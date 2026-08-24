@@ -106,7 +106,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 	runtimeMetadata := map[string]any{
 		"experiment_run_id": request.RunID, "experiment_leg_id": request.LegID,
 		"observation_plan": request.ObservationPlan, "interaction_plan": request.InteractionPlan,
-		"visual_call_budget": request.VisualCallBudget,
+		"visual_call_budget": request.VisualCallBudget, "expected_product_summary": request.BuildPrompt,
 	}
 	recoveryPhase := ""
 	if request.Kind == "recovery" {
@@ -287,8 +287,21 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 		}
 	}
 	visualArtifacts := []experiment.ArtifactRef{}
-	if !experimentArtifactsContainRole(request.ExistingArtifacts, "temporal_visual_observation") {
-		visualArtifacts, err = a.runTemporalVisualGate(ctx, request, downloads, evidenceRefs, emit)
+	liveVisualCalls, liveTerminal, liveErr := recordLiveBrowserVisualObservations(downloads, emit)
+	if liveErr != nil {
+		return liveErr
+	}
+	if liveVisualCalls > request.VisualCallBudget {
+		return &experiment.AdapterError{Code: "visual_call_budget_exceeded", Phase: "visual_observation_deferred", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: evidenceRefs}
+	}
+	if !experimentArtifactsContainRole(request.ExistingArtifacts, "temporal_visual_observation") && !liveTerminal {
+		remaining := request.VisualCallBudget - liveVisualCalls
+		if remaining < 1 {
+			return &experiment.AdapterError{Code: "visual_terminal_evidence_incomplete", Phase: "preview_candidate", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: evidenceRefs}
+		}
+		visualRequest := request
+		visualRequest.VisualCallBudget = remaining
+		visualArtifacts, err = a.runTemporalVisualGate(ctx, visualRequest, downloads, evidenceRefs, emit)
 		if err != nil {
 			return err
 		}
@@ -308,6 +321,40 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 		return a.runFinalFilm(ctx, request, projectID, result, materialized.SessionID, downloads, emit)
 	}
 	return nil
+}
+
+func recordLiveBrowserVisualObservations(downloads []CloudDeliverableDownloadResult, emit func(experiment.LegExecutionUpdate) error) (int, bool, error) {
+	calls, terminal := 0, false
+	for _, item := range downloads {
+		if item.Kind != "browser_visual_observation" {
+			continue
+		}
+		data, err := os.ReadFile(item.LocalPath)
+		if err != nil {
+			return calls, terminal, &experiment.AdapterError{Code: "live_visual_observation_unreadable", Phase: "visual_observation_deferred", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
+		}
+		if len(data) == 0 || len(data) > experiment.MaxEventBodyBytes {
+			return calls, terminal, &experiment.AdapterError{Code: "live_visual_observation_size_invalid", Phase: "visual_observation_deferred", State: experiment.RunStateFailed, Retryable: false}
+		}
+		var observation struct {
+			SchemaVersion string  `json:"schema_version"`
+			Decision      string  `json:"decision"`
+			Confidence    float64 `json:"confidence"`
+		}
+		if err := json.Unmarshal(data, &observation); err != nil || observation.SchemaVersion != browserVisualObservationSchemaVersion {
+			return calls, terminal, &experiment.AdapterError{Code: "live_visual_observation_invalid", Phase: "visual_observation_deferred", State: experiment.RunStateFailed, Retryable: false, Cause: err}
+		}
+		calls++
+		if observation.Decision == "succeeded" && observation.Confidence >= .85 {
+			terminal = true
+		}
+		if emit != nil {
+			if err := emit(experiment.LegExecutionUpdate{Kind: "visual_observation", Summary: "Worker 时序视觉观察已计入运行预算", EvidenceRefs: []string{item.ArtifactID}}); err != nil {
+				return calls, terminal, err
+			}
+		}
+	}
+	return calls, terminal, nil
 }
 
 func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context, projectID, jobID string, plan experiment.ObservationPlan, emit func(experiment.LegExecutionUpdate) error) (model.DirectJobStatus, error) {

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"cascade-demoops/backend/internal/config"
@@ -14,10 +15,12 @@ import (
 
 type browserVisualTestLLM struct {
 	task config.ModelTask
+	user string
 }
 
-func (f *browserVisualTestLLM) GenerateMultimodal(_ context.Context, task config.ModelTask, _ llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+func (f *browserVisualTestLLM) GenerateMultimodal(_ context.Context, task config.ModelTask, request llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
 	f.task = task
+	f.user = request.User
 	*(target.(*browserVisualObservationModelOutput)) = browserVisualObservationModelOutput{Decision: "in_progress", Confidence: .94, Summary: "A build progress surface is visible.", VisibleEvidence: []string{"Building"}}
 	return &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "glm-4.5v", Task: task}, nil
 }
@@ -30,7 +33,7 @@ func (*browserVisualTestLLM) GenerateText(context.Context, config.ModelTask, llm
 
 func TestBrowserVisualObserverBridgeBindsLoopbackModel(t *testing.T) {
 	client := &browserVisualTestLLM{}
-	bridge, err := startBrowserVisualObserverBridge(t.Context(), client, 10, nil)
+	bridge, err := startBrowserVisualObserverBridge(t.Context(), client, 10, "A responsive interactive product with a rendered primary surface.", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +59,9 @@ func TestBrowserVisualObserverBridgeBindsLoopbackModel(t *testing.T) {
 	}
 	if result.Decision != "in_progress" || result.Confidence != .94 || client.task != config.ModelTaskBrowserVisualObservation {
 		t.Fatalf("visual task binding was not preserved: result=%+v task=%s", result, client.task)
+	}
+	if !strings.Contains(client.user, "responsive interactive product") {
+		t.Fatalf("expected product summary was not bound into the visual Gate request: %q", client.user)
 	}
 }
 

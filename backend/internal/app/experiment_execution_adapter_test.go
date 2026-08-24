@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -77,6 +79,33 @@ func TestCompileExperimentInteractionContractsPreservesExecutableProofSemantics(
 	}
 	if got := contracts[4].ExpectedTransitions; !interactionPredicatesContain(got, "input_modality_used") {
 		t.Fatalf("touch proof predicates=%+v", got)
+	}
+}
+
+func TestRecordLiveBrowserVisualObservationsCountsCallsAndRequiresConfidentTerminal(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, decision string, confidence float64) CloudDeliverableDownloadResult {
+		path := filepath.Join(dir, name+".json")
+		payload, _ := json.Marshal(map[string]any{"schema_version": browserVisualObservationSchemaVersion, "decision": decision, "confidence": confidence})
+		if err := os.WriteFile(path, payload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return CloudDeliverableDownloadResult{ArtifactID: name, Kind: "browser_visual_observation", LocalPath: path}
+	}
+	downloads := []CloudDeliverableDownloadResult{
+		write("unknown", "unknown", 0), write("weak", "succeeded", .7), write("terminal", "succeeded", .93),
+		{ArtifactID: "screenshot", Kind: "browser_visual_poll_screenshot", LocalPath: filepath.Join(dir, "ignored.png")},
+	}
+	emitted := 0
+	calls, terminal, err := recordLiveBrowserVisualObservations(downloads, func(update experiment.LegExecutionUpdate) error {
+		if update.Kind != "visual_observation" || len(update.EvidenceRefs) != 1 {
+			t.Fatalf("unexpected visual update: %+v", update)
+		}
+		emitted++
+		return nil
+	})
+	if err != nil || calls != 3 || emitted != 3 || !terminal {
+		t.Fatalf("live observations calls=%d emitted=%d terminal=%t err=%v", calls, emitted, terminal, err)
 	}
 }
 

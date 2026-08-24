@@ -111,7 +111,7 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 			return model.RecordingResultPackage{}, newRuntimeExecutionError(runtimeErrorNodeMissing, err)
 		}
 		var observerErr error
-		visualObserver, observerErr = startBrowserVisualObserverBridge(ctx, r.service.llm, len(request.RuntimePlan.Stages), request.Progress)
+		visualObserver, observerErr = startBrowserVisualObserverBridge(ctx, r.service.llm, len(request.RuntimePlan.Stages), browserVisualExpectedProductSummary(request.Package), request.Progress)
 		if observerErr != nil {
 			return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_visual_observer_unavailable", observerErr)
 		}
@@ -710,6 +710,29 @@ func browserAgentForbiddenAction(kind string, forbidden []string) bool {
 		}
 	}
 	return false
+}
+
+func browserVisualExpectedProductSummary(pkg *model.ClientExecutionPackage) string {
+	if pkg == nil {
+		return "the approved interactive product result"
+	}
+	if value, ok := pkg.Metadata["expected_product_summary"].(string); ok && strings.TrimSpace(value) != "" {
+		return value
+	}
+	parts := make([]string, 0, len(pkg.ProjectContextSummary.Goals)+1)
+	if value := strings.TrimSpace(pkg.ProjectContextSummary.Name); value != "" {
+		parts = append(parts, value)
+	}
+	for _, goal := range pkg.ProjectContextSummary.Goals {
+		if value := strings.TrimSpace(goal.ValueProposition); value != "" {
+			parts = append(parts, value)
+		}
+		parts = append(parts, goal.SuccessCriteria...)
+	}
+	if len(parts) == 0 {
+		return "the approved interactive product result"
+	}
+	return strings.Join(parts, "; ")
 }
 
 func browserAgentWorkerOpenRequest(request BrowserAgentOutlineRunRequest) driver.BrowserAgentWorkerOpenRequest {
