@@ -16,14 +16,15 @@ describe("browser visual polling terminal evidence", () => {
   });
 
   it("reserves terminal-candidate calls instead of spending the whole budget on unchanged heartbeats", () => {
-    expect(browserVisualObservationAllocation(6, true)).toEqual({ heartbeatLimit: 3, terminalReserve: 3 });
+	expect(browserVisualObservationAllocation(6, true)).toEqual({ heartbeatLimit: 2, terminalReserve: 4 });
     expect(browserVisualObservationAllocation(6, false)).toEqual({ heartbeatLimit: 6, terminalReserve: 0 });
   });
 
   it("ignores pixel-only churn but admits structural terminal candidates", () => {
     const snapshot = { url: "https://example.test/result", visualDigest: "pixels-a", domDigest: "dom-a", ariaDigest: "aria-a", frameDigest: "frame-a" };
     expect(browserVisualTerminalCandidateMaterialChanged(snapshot, { ...snapshot, visualDigest: "pixels-b" })).toBe(false);
-    expect(browserVisualTerminalCandidateMaterialChanged(snapshot, { ...snapshot, domDigest: "dom-b" })).toBe(true);
+	expect(browserVisualTerminalCandidateMaterialChanged(snapshot, { ...snapshot, domDigest: "dom-b", ariaDigest: "aria-b" })).toBe(false);
+	expect(browserVisualTerminalCandidateMaterialChanged(snapshot, { ...snapshot, frameDigest: "frame-b" })).toBe(true);
     expect(browserVisualTerminalCandidateMaterialChanged(undefined, snapshot)).toBe(true);
   });
 });

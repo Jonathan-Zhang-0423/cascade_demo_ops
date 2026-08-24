@@ -1793,7 +1793,7 @@ export function confirmedBrowserVisualTerminalDecision(observations: BrowserVisu
 
 export function browserVisualObservationAllocation(maxCalls: number, requireVisualTerminal: boolean): { heartbeatLimit: number; terminalReserve: number } {
 	const bounded = Math.max(1, Math.min(12, Math.trunc(Number(maxCalls) || 1)));
-	const terminalReserve = requireVisualTerminal ? Math.min(3, Math.max(1, bounded - 1)) : 0;
+	const terminalReserve = requireVisualTerminal ? Math.min(4, Math.max(2, bounded - 1)) : 0;
 	return { heartbeatLimit: Math.max(1, bounded - terminalReserve), terminalReserve };
 }
 
@@ -1803,10 +1803,7 @@ export function browserVisualTerminalCandidateMaterialChanged(before: OutcomeSna
 	// Preserve terminal calls for a structural, accessible, route, or bound
 	// frame change. One unchanged follow-up remains allowed after a terminal
 	// verdict so that success or failure can be independently confirmed.
-	return before.url !== after.url
-		|| before.domDigest !== after.domDigest
-		|| before.ariaDigest !== after.ariaDigest
-		|| before.frameDigest !== after.frameDigest;
+	return before.url !== after.url || before.frameDigest !== after.frameDigest;
 }
 
 async function waitForPlayableSurfaceWithVisualObservation(
@@ -2725,6 +2722,7 @@ export function classifyPlayableSurfaceFrame(text: string, surface: boolean): Pl
 
 async function interactiveSurfaceTargetOnce(page: any): Promise<PlayableSurfaceTarget | undefined> {
   const frames = typeof page.frames === "function" ? page.frames() : [page];
+	const candidates: Array<PlayableSurfaceTarget & { area: number }> = [];
   const surfaceSelectors = [
     '[role="application"]:visible', "canvas:visible",
     '[contenteditable="true"]:visible', '[role="grid"]:visible', '[tabindex]:visible',
@@ -2741,7 +2739,7 @@ async function interactiveSurfaceTargetOnce(page: any): Promise<PlayableSurfaceT
       const focusable = selector.includes("tabindex") || selector.includes("application") || selector.includes("contenteditable") || selector.includes("canvas") || selector.includes("iframe") || selector.includes("grid");
       const evidence = classifyInteractiveSurfaceFrame(surfaceVisible, stateful, focusable);
       if (evidence.surface && evidence.stateful) {
-        return { ...evidence, digestTarget: locator, keyboardTarget: body || locator };
+		candidates.push({ ...evidence, digestTarget: locator, keyboardTarget: body || locator, area: Number(box?.width || 0) * Number(box?.height || 0) });
       }
     }
     const embeddedFrame = typeof page.mainFrame === "function" ? frame !== page.mainFrame() : frames.length > 1 && frameIndex > 0;
@@ -2759,10 +2757,11 @@ async function interactiveSurfaceTargetOnce(page: any): Promise<PlayableSurfaceT
         return { interactiveCount: visible, width: Number(rect?.width || 0), height: Number(rect?.height || 0) };
       }).catch(() => ({ interactiveCount: 0, width: 0, height: 0 }));
       const evidence = classifyDOMInteractiveSurface(profile.interactiveCount, profile.width, profile.height);
-      if (evidence.surface) return { ...evidence, digestTarget: body, keyboardTarget: body };
+		if (evidence.surface) candidates.push({ ...evidence, digestTarget: body, keyboardTarget: body, area: profile.width * profile.height });
     }
   }
-  return undefined;
+	candidates.sort((left, right) => right.area - left.area);
+	return candidates[0];
 }
 
 async function waitForPlayableSurfaceTarget(page: any, timeout: number): Promise<PlayableSurfaceTarget | undefined> {
