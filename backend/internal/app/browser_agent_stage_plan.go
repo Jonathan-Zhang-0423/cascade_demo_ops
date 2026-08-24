@@ -216,6 +216,7 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 	sequence := int64(0)
 	completedStages := map[string]model.StageExecutionEvent{}
 	latestCompletedOrder := 0
+	latestReachedOrder := 0
 	interruptionConsumed := false
 	if history, ok := sink.(stageExecutionEventHistory); ok {
 		for _, event := range history.Events() {
@@ -224,6 +225,11 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			}
 			if event.Sequence > sequence {
 				sequence = event.Sequence
+			}
+			for _, stage := range plan.Stages {
+				if stage.ID == event.StageID && stage.Order > latestReachedOrder {
+					latestReachedOrder = stage.Order
+				}
 			}
 			if event.EventType == model.StageExecutionEventStageCompleted {
 				completedStages[event.StageID] = event
@@ -285,7 +291,13 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			}
 			checkpointStage := bindRuntimeStageToCheckpoint(stage, completedEvent.Observation)
 			revalidated, revalidateErr := revalidator.RevalidateStage(ctx, plan, checkpointStage)
-			if revalidateErr == nil && validResumedStageObservation(revalidated, completedEvent.Observation, stageReplayPolicy(stage)) {
+			// If a later stage already emitted an audit event, this stage's
+			// successful outcome was consumed before the interruption. Restore
+			// and prove the exact audited result route, but do not require a
+			// mutable business assertion from an earlier observation to remain
+			// true. The first incomplete stage will validate the current state.
+			allowConsumedCheckpointRoute := latestReachedOrder > stage.Order
+			if revalidateErr == nil && validResumedStageObservation(revalidated, completedEvent.Observation, stageReplayPolicy(stage), allowConsumedCheckpointRoute) {
 				if err := appendEvent(stage, model.StageExecutionEventStageResumed, revalidated.Observation, revalidated.EvidenceRefs); err != nil {
 					return result, err
 				}
@@ -497,14 +509,14 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 	return result, nil
 }
 
-func validResumedStageObservation(result BrowserAgentStageActionResult, previous *model.RuntimeObservation, replayPolicy model.InteractionReplayPolicy) bool {
+func validResumedStageObservation(result BrowserAgentStageActionResult, previous *model.RuntimeObservation, replayPolicy model.InteractionReplayPolicy, allowConsumedCheckpointRoute bool) bool {
 	if result.Observation == nil || !runtimeObservationIsRealEvidence(result.Observation.Source) || len(result.EvidenceRefs) == 0 {
 		return false
 	}
 	if sameBrowserStateFingerprint(previous, result.Observation) {
 		return true
 	}
-	if replayPolicy == model.InteractionReplayOnceEffect && sameExactObservedURL(previous, result.Observation) {
+	if (replayPolicy == model.InteractionReplayOnceEffect || allowConsumedCheckpointRoute) && sameExactObservedURL(previous, result.Observation) {
 		return true
 	}
 	if len(result.Observation.Assertions) == 0 {

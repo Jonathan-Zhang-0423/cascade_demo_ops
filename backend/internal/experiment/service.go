@@ -467,6 +467,21 @@ func (s *Service) Resume(ctx context.Context, runID string, expectedRevision int
 			}
 		}
 	}
+	// A freshly admitted run may be resumed before the scheduler has claimed
+	// its first leg. Requeue only that already-queued leg; this compatibility
+	// path must not select a later recovery leg while an earlier leg is waiting.
+	if resumeIndex < 0 && run.State == RunStateQueued {
+		for index := range next.Legs {
+			if next.Legs[index].State == RunStateQueued {
+				resumeIndex = index
+				resumePhase = strings.TrimSpace(next.Legs[index].Phase)
+				if resumePhase == "" {
+					resumePhase = "resume_checkpoint_verification"
+				}
+				break
+			}
+		}
+	}
 	if resumeIndex < 0 {
 		return Run{}, errors.New("experiment has no resumable active leg")
 	}

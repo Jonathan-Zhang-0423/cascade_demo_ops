@@ -589,6 +589,37 @@ type resumableStageExecutor struct {
 	revalidatePass  bool
 }
 
+type consumedCheckpointStageExecutor struct {
+	executeCalls    int
+	revalidateCalls int
+	checkpointURL   string
+}
+
+func (e *consumedCheckpointStageExecutor) ExecuteStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
+	e.executeCalls++
+	return BrowserAgentStageActionResult{
+		Observation:  &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, URL: e.checkpointURL, Assertions: []model.RuntimeAssertion{{Kind: "current_stage", Passed: true}}},
+		EvidenceRefs: []model.EvidenceRef{{ID: fmt.Sprintf("execute_after_resume_%d", e.executeCalls), Kind: model.EvidenceKindBrowserTrace}},
+	}, nil
+}
+
+func (e *consumedCheckpointStageExecutor) RevalidateStage(_ context.Context, _ BrowserAgentRuntimePlan, stage BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
+	e.revalidateCalls++
+	if !stage.CheckpointRestore || stage.URL != e.checkpointURL {
+		return BrowserAgentStageActionResult{}, errors.New("resume did not bind the exact audited checkpoint route")
+	}
+	return BrowserAgentStageActionResult{
+		Observation: &model.RuntimeObservation{
+			Source: model.RuntimeObservationAssertion, URL: e.checkpointURL,
+			// An async page may legitimately leave the prior phase after the
+			// following stage has already begun. This stale assertion must not
+			// cause the completed observe-only stage to be replayed.
+			Assertions: []model.RuntimeAssertion{{Kind: "prior_phase_visible", Passed: false}},
+		},
+		EvidenceRefs: []model.EvidenceRef{{ID: "checkpoint_route_recaptured", Kind: model.EvidenceKindWebScreenshot}},
+	}, nil
+}
+
 func (e *resumableStageExecutor) ExecuteStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
 	e.executeCalls++
 	return BrowserAgentStageActionResult{Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "result", Passed: true}}}, EvidenceRefs: []model.EvidenceRef{{ID: fmt.Sprintf("execute_%d", e.executeCalls), Kind: model.EvidenceKindBrowserTrace}}}, nil
@@ -623,6 +654,46 @@ func TestBrowserAgentStageOrchestratorResumesCompletedStagesWithoutReplayingActi
 		if event.EventType != model.StageExecutionEventStageResumed {
 			t.Fatalf("resume audit event is missing: %+v", resumed.Events)
 		}
+	}
+}
+
+func TestBrowserAgentStageOrchestratorDoesNotReplayConsumedObserveCheckpoint(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	orchestrator := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{})
+	plan, err := orchestrator.Prepare(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Stages) < 2 {
+		t.Fatal("resume fixture requires two stages")
+	}
+	plan.Stages = plan.Stages[:2]
+	plan.Stages[0].InteractionContract = &model.InteractionContract{ReplayPolicy: model.InteractionReplayObserveOnly}
+	checkpointURL := "https://app.example.com/results/run-42"
+	completed := model.StageExecutionEvent{
+		RunID: plan.RunID, SourcePackageID: plan.SourcePackageID, SourceBundleHashSHA256: plan.SourceBundleHashSHA256,
+		PolicyHashSHA256: plan.PolicyHashSHA256, StageID: plan.Stages[0].ID, Sequence: 1,
+		EventType:    model.StageExecutionEventStageCompleted,
+		Observation:  &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, URL: checkpointURL, Assertions: []model.RuntimeAssertion{{Kind: "prior_phase_visible", Passed: true}}},
+		EvidenceRefs: []model.EvidenceRef{{ID: "completed_checkpoint", Kind: model.EvidenceKindWebScreenshot}},
+	}
+	laterStarted := model.StageExecutionEvent{
+		RunID: plan.RunID, SourcePackageID: plan.SourcePackageID, SourceBundleHashSHA256: plan.SourceBundleHashSHA256,
+		PolicyHashSHA256: plan.PolicyHashSHA256, StageID: plan.Stages[1].ID, Sequence: 2,
+		EventType: model.StageExecutionEventStageStarted,
+	}
+	sink := &memoryStageEventSink{events: []model.StageExecutionEvent{completed, laterStarted}}
+	executor := &consumedCheckpointStageExecutor{checkpointURL: checkpointURL}
+
+	resumed, err := orchestrator.Run(context.Background(), plan, stubStageObserver{}, executor, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executor.revalidateCalls != 1 || executor.executeCalls != 1 {
+		t.Fatalf("completed observe checkpoint was replayed: execute=%d revalidate=%d", executor.executeCalls, executor.revalidateCalls)
+	}
+	if len(resumed.Events) == 0 || resumed.Events[0].StageID != plan.Stages[0].ID || resumed.Events[0].EventType != model.StageExecutionEventStageResumed {
+		t.Fatalf("completed checkpoint was not resumed before the first incomplete stage: %+v", resumed.Events)
 	}
 }
 
