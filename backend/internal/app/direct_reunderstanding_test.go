@@ -196,6 +196,29 @@ func TestPrependReusableSessionSetupRestoresOnlyApprovedAuthentication(t *testin
 	}
 }
 
+func TestHydrateAdaptiveSourceGraphRestoresCompactedExecutableAction(t *testing.T) {
+	graph := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/workspace")
+	graph.Nodes = []*model.GraphNode{{ID: "submit", Action: "click", Metadata: map[string]any{"business_stage_kind": string(model.BusinessStageKindBusinessSubmit)}}}
+	source := model.ClientExecutionPackage{
+		WorkflowGraph: graph,
+		ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{PlanJSON: &model.ExecutionScriptDocument{Steps: []model.ScriptStep{{
+			NodeID: "submit", StageKind: model.BusinessStageKindBusinessSubmit, RouteState: model.BusinessRouteStateWorkspace,
+			Action:          model.ScriptActionInstruction{Type: model.GraphActionClick, Target: model.ActionTarget{Role: "button", EvidenceRefs: []model.EvidenceRef{{ID: "submit-evidence"}}}},
+			ExpectedOutcome: "successor entity exists", Validations: []model.ValidationSpec{{ID: "successor", Kind: "url_matches", Expected: "/entity/:id", Required: true}},
+		}}}},
+	}
+	hydrated, err := hydrateAdaptiveSourceGraph(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hydrated == graph || len(hydrated.Nodes) != 1 || hydrated.Nodes[0].ActionSpec == nil || hydrated.Nodes[0].ActionSpec.Type != model.GraphActionClick || hydrated.Nodes[0].ActionSpec.Target.Role != "button" {
+		t.Fatalf("compacted graph action was not hydrated: %+v", hydrated)
+	}
+	if graph.Nodes[0].ActionSpec != nil {
+		t.Fatal("source package graph was mutated during hydration")
+	}
+}
+
 func TestPrepareAdaptiveDirectReconciliationBuildsObserveOnlyPackage(t *testing.T) {
 	service, states, state, build := newDirectReunderstandingTestState(t)
 	result := directReunderstandingFailedResult(build, false)
@@ -243,11 +266,15 @@ func TestPrepareAdaptiveDirectReconciliationBuildsObserveOnlyPackage(t *testing.
 		t.Fatal("adaptive reconciliation package is incomplete")
 	}
 	seenCapabilities := 0
+	seenObserveOnlyResume := false
 	for _, stage := range prepared.Build.Package.ExecutableScriptBundle.ScriptOutline.Stages {
 		if stage.StageKind == model.BusinessStageKindBusinessSubmit || stage.StageKind == model.BusinessStageKindBusinessInput || stage.StageKind == model.BusinessStageKindModeSelection {
 			t.Fatalf("continuation package retained a creation write stage: %+v", stage)
 		}
 		if len(stage.Interactions) > 0 {
+			if stage.Interactions[0].Kind == model.GraphActionNavigate && stage.InteractionContract != nil && stage.InteractionContract.ReplayPolicy == model.InteractionReplayObserveOnly {
+				seenObserveOnlyResume = true
+			}
 			if _, ok := stage.Interactions[0].Parameters["capability_layer"]; ok {
 				seenCapabilities++
 			}
@@ -255,6 +282,9 @@ func TestPrepareAdaptiveDirectReconciliationBuildsObserveOnlyPackage(t *testing.
 	}
 	if seenCapabilities != len(definition.InteractionPlan.Steps) {
 		t.Fatalf("continuation package capability contracts=%d want=%d", seenCapabilities, len(definition.InteractionPlan.Steps))
+	}
+	if !seenObserveOnlyResume {
+		t.Fatal("continuation package dropped its observe-only successor navigation")
 	}
 }
 

@@ -47,8 +47,12 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		if result.SourcePackageID != loadedPackage.PackageID {
 			return adaptiveDirectReconciliationBuild{}, errors.New("adaptive reconciliation source package does not match the failed result")
 		}
+		hydratedGraph, hydrateErr := hydrateAdaptiveSourceGraph(loadedPackage)
+		if hydrateErr != nil {
+			return adaptiveDirectReconciliationBuild{}, hydrateErr
+		}
 		repairCopy := *state
-		repairCopy.WorkflowGraph = loadedPackage.WorkflowGraph
+		repairCopy.WorkflowGraph = hydratedGraph
 		repairCopy.ExecutableScriptBundle = loadedPackage.ExecutableScriptBundle
 		repairState = &repairCopy
 	} else if adaptiveReconciliationNeedsAuthentication(state) || result.CloudJobID != strings.TrimSpace(sourceJobID) {
@@ -103,6 +107,58 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		return adaptiveDirectReconciliationBuild{}, fmt.Errorf("build adaptive successor package: %w", err)
 	}
 	return adaptiveDirectReconciliationBuild{State: next, Build: build, SourceResult: result}, nil
+}
+
+// hydrateAdaptiveSourceGraph restores executable fields that are compacted out
+// of the uploaded graph from the plan in the same approved package. It never
+// changes the action or target; it only reconstructs the package's own binding
+// so recovery can classify the failed effect correctly.
+func hydrateAdaptiveSourceGraph(source model.ClientExecutionPackage) (*model.DemoWorkflowGraph, error) {
+	if source.WorkflowGraph == nil || source.ExecutableScriptBundle == nil || source.ExecutableScriptBundle.PlanJSON == nil {
+		return nil, errors.New("adaptive reconciliation source package is incomplete")
+	}
+	encoded, err := json.Marshal(source.WorkflowGraph)
+	if err != nil {
+		return nil, err
+	}
+	var graph model.DemoWorkflowGraph
+	if err := json.Unmarshal(encoded, &graph); err != nil {
+		return nil, err
+	}
+	nodes := make(map[string]*model.GraphNode, len(graph.Nodes))
+	for _, node := range graph.Nodes {
+		if node != nil {
+			nodes[node.ID] = node
+		}
+	}
+	for _, step := range source.ExecutableScriptBundle.PlanJSON.Steps {
+		node := nodes[step.NodeID]
+		if node == nil {
+			continue
+		}
+		action := step.Action
+		node.Action = string(action.Type)
+		node.ActionSpec = &model.GraphAction{
+			Type: action.Type, Target: action.Target, Value: action.Value, InputRef: action.InputRef, SecretRef: action.SecretRef,
+			Parameters: action.Parameters, TimeoutMS: action.TimeoutMS, WaitUntil: action.WaitUntil, Preconditions: append([]model.StateAssertion(nil), action.Preconditions...),
+		}
+		node.PageRef = firstNonEmptyString(step.PageTarget.URL, step.PageTarget.PageRef, action.Target.URL, node.PageRef)
+		node.ExpectedOutcome = step.ExpectedOutcome
+		node.Validations = append([]model.ValidationSpec(nil), step.Validations...)
+		node.EvidenceRefs = append([]model.EvidenceRef(nil), step.EvidenceRefs...)
+		node.DurationHintMS = firstPositiveInt(step.Timing.DurationMS, node.DurationHintMS)
+		if step.InteractionContract != nil {
+			contract := *step.InteractionContract
+			node.InteractionContract = &contract
+		}
+		if node.Metadata == nil {
+			node.Metadata = map[string]any{}
+		}
+		node.Metadata["business_stage_id"] = step.NodeID
+		node.Metadata["business_stage_kind"] = string(step.StageKind)
+		node.Metadata["business_route_state"] = string(step.RouteState)
+	}
+	return &graph, nil
 }
 
 func adaptiveReconciliationNeedsAuthentication(state *orchestrator.CascadeState) bool {
@@ -267,7 +323,7 @@ func applyAdaptiveInteractionContracts(graph *model.DemoWorkflowGraph, plan expe
 		if node == nil {
 			continue
 		}
-		if isSessionSetupGraphNode(node) {
+		if isSessionSetupGraphNode(node) || isAdaptiveSuccessorResumeGraphNode(node) {
 			node.Type = model.GraphNodeTypeAction
 			base = append(base, node)
 			continue
@@ -350,4 +406,12 @@ func applyAdaptiveInteractionContracts(graph *model.DemoWorkflowGraph, plan expe
 		graph.Edges = append(graph.Edges, &model.GraphEdge{ID: fmt.Sprintf("edge_adaptive_contract_%02d", index), FromNode: base[index-1].ID, ToNode: base[index].ID, Condition: "validated", Priority: index})
 	}
 	return nil
+}
+
+func isAdaptiveSuccessorResumeGraphNode(node *model.GraphNode) bool {
+	if node == nil || node.ActionSpec == nil || node.ActionSpec.Type != model.GraphActionNavigate || node.Metadata == nil {
+		return false
+	}
+	resume, _ := node.Metadata["adaptive_successor_resume"].(bool)
+	return resume
 }
