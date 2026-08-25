@@ -203,6 +203,8 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 					"action_recipe":                   "continue_execution",
 					"optional_when_target_absent":     "true",
 					"capture_result_surface_baseline": "true",
+					"target_wait_timeout_ms":          "300000",
+					"target_poll_interval_ms":         "5000",
 				},
 			})
 		}

@@ -66,7 +66,7 @@ func TestAdaptiveExperimentPackageCompilesWithoutCascadeFlow(t *testing.T) {
 		if stage.NodeID != "business_stage_continue_prepared_execution" {
 			continue
 		}
-		foundContinuation = stage.Interaction.Parameters["action_recipe"] == "continue_execution" && stage.Interaction.Parameters["optional_when_target_absent"] == "true" && stage.Interaction.Parameters["capture_result_surface_baseline"] == "true"
+		foundContinuation = stage.Interaction.Parameters["action_recipe"] == "continue_execution" && stage.Interaction.Parameters["optional_when_target_absent"] == "true" && stage.Interaction.Parameters["capture_result_surface_baseline"] == "true" && stage.Interaction.Parameters["target_wait_timeout_ms"] == "300000"
 	}
 	if !foundContinuation {
 		t.Fatal("adaptive async package did not include the optional runtime execution continuation")
