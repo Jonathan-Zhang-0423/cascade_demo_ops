@@ -356,6 +356,9 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 		return &experiment.AdapterError{Code: "direct_result_unavailable", Phase: "result_materialization", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
 	}
 	if result.Status == model.RecordingResultStatusFailed {
+		if adaptiveObservationFailureShouldDefer(request, result) {
+			return &experiment.AdapterError{Code: "confidence_deferred", Phase: "confidence_deferred", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: resultEvidenceRefs(result)}
+		}
 		return &experiment.AdapterError{Code: "explicit_terminal_build_failure", Phase: "terminal_failed", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: resultEvidenceRefs(result)}
 	}
 	downloads, err := a.downloadDirectArtifacts(ctx, projectID, jobID, status.Artifacts)
@@ -423,6 +426,26 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 		return a.runFinalFilm(ctx, request, projectID, result, materialized.SessionID, downloads, emit)
 	}
 	return nil
+}
+
+func adaptiveObservationFailureShouldDefer(request experiment.LegExecutionRequest, result model.RecordingResultPackage) bool {
+	if request.HarnessProfile != experiment.HarnessProfileAdaptiveBusinessV1 || result.FailureDiagnostic == nil {
+		return false
+	}
+	code := strings.TrimSpace(result.FailureDiagnostic.Error.Code)
+	if code != "outcome_verification_failed" && code != "browser_agent_observation_failed" {
+		return false
+	}
+	failedNodeID := strings.TrimSpace(result.FailureDiagnostic.FailedNodeID)
+	for _, step := range request.InteractionPlan.Steps {
+		if step.ReplayPolicy != experiment.ReplayObserveOnly {
+			continue
+		}
+		if failedNodeID == "business_stage_contract_experiment_interaction_"+step.StepID {
+			return true
+		}
+	}
+	return false
 }
 
 func readAdaptiveCapabilityScore(downloads []CloudDeliverableDownloadResult) (*model.CapabilityScore, string, error) {

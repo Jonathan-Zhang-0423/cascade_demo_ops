@@ -195,6 +195,32 @@ func TestReadAdaptiveCapabilityScoreUsesPersistedStageEvent(t *testing.T) {
 	}
 }
 
+func TestAdaptiveObservationTimeoutDefersWithoutDeclaringBusinessFailure(t *testing.T) {
+	request := experiment.LegExecutionRequest{
+		HarnessProfile: experiment.HarnessProfileAdaptiveBusinessV1,
+		InteractionPlan: experiment.InteractionPlan{Steps: []experiment.InteractionStep{
+			{StepID: "surface_ready", ReplayPolicy: experiment.ReplayObserveOnly},
+			{StepID: "directional_moves", ReplayPolicy: experiment.ReplayIdempotentWrite},
+		}},
+	}
+	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{
+		FailedNodeID: "business_stage_contract_experiment_interaction_surface_ready",
+		Error:        model.AgentError{Code: "outcome_verification_failed"},
+	}}
+	if !adaptiveObservationFailureShouldDefer(request, result) {
+		t.Fatal("an inconclusive observe-only timeout was promoted to an explicit business failure")
+	}
+	result.FailureDiagnostic.FailedNodeID = "business_stage_contract_experiment_interaction_directional_moves"
+	if adaptiveObservationFailureShouldDefer(request, result) {
+		t.Fatal("an action proof failure was incorrectly treated as passive observation deferral")
+	}
+	result.FailureDiagnostic.FailedNodeID = "business_stage_contract_experiment_interaction_surface_ready"
+	result.FailureDiagnostic.Error.Code = "explicit_visible_terminal_error"
+	if adaptiveObservationFailureShouldDefer(request, result) {
+		t.Fatal("an explicit terminal failure was incorrectly deferred")
+	}
+}
+
 func interactionPredicatesContain(values []model.InteractionPredicate, kind string) bool {
 	for _, value := range values {
 		if value.Kind == kind {

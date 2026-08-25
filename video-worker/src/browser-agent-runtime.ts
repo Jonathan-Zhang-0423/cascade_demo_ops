@@ -2004,6 +2004,10 @@ export function browserVisualFinalObservationDue(input: {
 	return busyTransitionCompleted || scheduledRefresh || nearDeadline;
 }
 
+export function browserVisualUnchangedSurfaceObservationDue(existingCount: number, maxCalls: number, nowMS: number, deadlineMS: number): boolean {
+	return existingCount < maxCalls && deadlineMS-nowMS <= 30_000;
+}
+
 async function waitForPlayableSurfaceWithVisualObservation(
 	session: BrowserAgentSession,
 	stage: BrowserAgentWorkerStage,
@@ -2034,11 +2038,12 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			if (busyNow) sawBusy = true;
 			const surfaceDigest = session.resultSurfaceBaselineDigest ? await visualDigest(session.page, target.digestTarget) : "";
 			const surfaceChanged = Boolean(session.resultSurfaceBaselineDigest && surfaceDigest && surfaceDigest !== session.resultSurfaceBaselineDigest);
-			if (session.resultSurfaceBaselineDigest && !surfaceChanged) {
+			const existing = session.visionVerdictsByNodeID.get(stage.node_id) || [];
+			const unchangedObservationDue = browserVisualUnchangedSurfaceObservationDue(existing.length, config.maxCalls, Date.now(), deadline);
+			if (session.resultSurfaceBaselineDigest && !surfaceChanged && !unchangedObservationDue) {
 				await session.page.waitForTimeout(Math.min(1_000, Math.max(100, deadline - Date.now())));
 				continue;
 			}
-			const existing = session.visionVerdictsByNodeID.get(stage.node_id) || [];
 			if (!requireVisualTerminal) {
 				// Compatibility mode: the visual result is supporting evidence and
 				// the deterministic surface remains the admitting channel.
