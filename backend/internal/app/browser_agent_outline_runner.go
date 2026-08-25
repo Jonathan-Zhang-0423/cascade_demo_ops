@@ -113,7 +113,11 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 			return model.RecordingResultPackage{}, newRuntimeExecutionError(runtimeErrorNodeMissing, err)
 		}
 		var observerErr error
-		visualObserver, observerErr = startBrowserVisualObserverBridge(ctx, r.service.llm, len(request.RuntimePlan.Stages), browserVisualExpectedProductSummary(request.Package), request.Progress)
+		visualCallBudget := packageMetadataInt(request.Package.Metadata, "visual_call_budget")
+		if visualCallBudget <= 0 {
+			visualCallBudget = 12
+		}
+		visualObserver, observerErr = startBrowserVisualObserverBridge(ctx, r.service.llm, len(request.RuntimePlan.Stages), browserVisualExpectedProductSummary(request.Package), visualCallBudget, request.Progress)
 		if observerErr != nil {
 			return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_visual_observer_unavailable", observerErr)
 		}
@@ -122,9 +126,11 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 		workerEnvironment["CASCADE_BROWSER_VISION_OBSERVER_URL"] = visualObserver.URL
 		workerEnvironment["CASCADE_BROWSER_VISION_OBSERVER_TOKEN"] = visualObserver.Token
 		workerEnvironment["CASCADE_BROWSER_VISION_INTERVAL_MS"] = "60000"
-		// Each observation may use one bounded fallback provider call. Six
-		// screenshots therefore preserve the experiment's twelve-call ceiling.
-		workerEnvironment["CASCADE_BROWSER_VISION_MAX_CALLS"] = "6"
+		visualObservationLimit := (visualCallBudget + 1) / 2
+		if visualCallBudget <= 2 {
+			visualObservationLimit = visualCallBudget
+		}
+		workerEnvironment["CASCADE_BROWSER_VISION_MAX_CALLS"] = strconv.Itoa(max(1, visualObservationLimit))
 		worker := driver.NewBrowserAgentWorker(r.service.nodeBinaryForExecution(), workerPath, workerEnvironment)
 		factory = func(ctx context.Context, open driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
 			return worker.Open(ctx, open)

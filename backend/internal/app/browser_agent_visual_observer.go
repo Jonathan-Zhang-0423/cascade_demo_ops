@@ -158,7 +158,7 @@ func (b *browserVisualObserverBridge) Close() {
 	_ = b.listener.Close()
 }
 
-func startBrowserVisualObserverBridge(parent context.Context, client llm.Client, stageCount int, expectedProductSummary string, progress func(string, string, int)) (*browserVisualObserverBridge, error) {
+func startBrowserVisualObserverBridge(parent context.Context, client llm.Client, stageCount int, expectedProductSummary string, maxProviderCalls int, progress func(string, string, int)) (*browserVisualObserverBridge, error) {
 	if client == nil {
 		return nil, errors.New("browser visual observer model is not configured")
 	}
@@ -172,6 +172,10 @@ func startBrowserVisualObserverBridge(parent context.Context, client llm.Client,
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	bridge := &browserVisualObserverBridge{URL: "http://" + listener.Addr().String() + "/v1/observe", Token: token, listener: listener}
+	// Adaptive runs reserve one provider call for each of their two temporal
+	// observations. A JSON-shape fallback is itself another provider call, so it
+	// is available only to larger legacy budgets.
+	allowProviderFallback := maxProviderCalls <= 0 || maxProviderCalls > 2
 	mux := http.NewServeMux()
 	bridge.server = &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second}
 	mux.HandleFunc("POST /v1/observe", func(w http.ResponseWriter, r *http.Request) {
@@ -201,7 +205,7 @@ func startBrowserVisualObserverBridge(parent context.Context, client llm.Client,
 		callCtx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 		trace, callErr := client.GenerateMultimodal(callCtx, config.ModelTaskBrowserVisualObservation, modelRequest, &output)
 		cancel()
-		if callErr != nil && browserVisualObserverMayFallback(trace) && r.Context().Err() == nil {
+		if callErr != nil && allowProviderFallback && browserVisualObserverMayFallback(trace) && r.Context().Err() == nil {
 			providerCalls++
 			output = browserVisualObservationModelOutput{}
 			fallbackCtx, fallbackCancel := context.WithTimeout(r.Context(), 45*time.Second)

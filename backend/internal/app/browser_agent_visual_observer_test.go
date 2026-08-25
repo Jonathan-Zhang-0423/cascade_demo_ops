@@ -19,13 +19,19 @@ type browserVisualTestLLM struct {
 	user string
 }
 
-type browserVisualFallbackTestLLM struct{ browserVisualTestLLM }
+type browserVisualFallbackTestLLM struct {
+	browserVisualTestLLM
+	multimodalCalls int
+	textCalls       int
+}
 
-func (*browserVisualFallbackTestLLM) GenerateMultimodal(_ context.Context, task config.ModelTask, _ llm.MultimodalRequest, _ any) (*llm.CallTrace, error) {
+func (f *browserVisualFallbackTestLLM) GenerateMultimodal(_ context.Context, task config.ModelTask, _ llm.MultimodalRequest, _ any) (*llm.CallTrace, error) {
+	f.multimodalCalls++
 	return &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "glm-4.5v", Task: task, ErrorClass: "json_parse_failed"}, llm.ErrDeterministicRequired{Reason: "json_parse_failed"}
 }
 
-func (*browserVisualFallbackTestLLM) GenerateMultimodalText(_ context.Context, task config.ModelTask, request llm.MultimodalRequest) (string, *llm.CallTrace, error) {
+func (f *browserVisualFallbackTestLLM) GenerateMultimodalText(_ context.Context, task config.ModelTask, request llm.MultimodalRequest) (string, *llm.CallTrace, error) {
+	f.textCalls++
 	if !request.TextMode {
 		return "", nil, errors.New("visual fallback did not request text mode")
 	}
@@ -47,7 +53,7 @@ func (*browserVisualTestLLM) GenerateText(context.Context, config.ModelTask, llm
 
 func TestBrowserVisualObserverBridgeBindsLoopbackModel(t *testing.T) {
 	client := &browserVisualTestLLM{}
-	bridge, err := startBrowserVisualObserverBridge(t.Context(), client, 10, "A responsive interactive product with a rendered primary surface.", nil)
+	bridge, err := startBrowserVisualObserverBridge(t.Context(), client, 10, "A responsive interactive product with a rendered primary surface.", 2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +109,7 @@ func TestBrowserVisualObserverFailureCodeOnlyExposesSafeClass(t *testing.T) {
 
 func TestBrowserVisualObserverUsesBoundedLineFallbackAfterJSONShapeFailure(t *testing.T) {
 	client := &browserVisualFallbackTestLLM{}
-	bridge, err := startBrowserVisualObserverBridge(t.Context(), client, 10, "A complete interactive product", nil)
+	bridge, err := startBrowserVisualObserverBridge(t.Context(), client, 10, "A complete interactive product", 12, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,5 +135,35 @@ func TestBrowserVisualObserverUsesBoundedLineFallbackAfterJSONShapeFailure(t *te
 	}
 	if result.Decision != "succeeded" || result.ProviderCalls != 2 || len(result.VisibleEvidence) != 2 {
 		t.Fatalf("bounded line fallback was not normalized: %+v", result)
+	}
+	if client.multimodalCalls != 1 || client.textCalls != 1 {
+		t.Fatalf("large-budget fallback calls=%d/%d", client.multimodalCalls, client.textCalls)
+	}
+}
+
+func TestBrowserVisualObserverTwoCallBudgetDoesNotSpendFallback(t *testing.T) {
+	client := &browserVisualFallbackTestLLM{}
+	bridge, err := startBrowserVisualObserverBridge(t.Context(), client, 10, "A complete interactive product", 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bridge.Close()
+	request := browserVisualObservationRequest{
+		SchemaVersion: browserVisualObservationSchemaVersion, ObservationKind: "task_terminal",
+		StageID: "stage_8", NodeID: "surface", StageOrder: 8, Sequence: 1,
+		SemanticGoal: "Observe the result", ExpectedState: "A complete product is visible",
+		ScreenshotDataURI: "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("masked-png")),
+	}
+	body, _ := json.Marshal(request)
+	httpRequest, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, bridge.URL, bytes.NewReader(body))
+	httpRequest.Header.Set("Authorization", "Bearer "+bridge.Token)
+	httpRequest.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(httpRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable || client.multimodalCalls != 1 || client.textCalls != 0 {
+		t.Fatalf("two-call budget spent a fallback: status=%d calls=%d/%d", response.StatusCode, client.multimodalCalls, client.textCalls)
 	}
 }
