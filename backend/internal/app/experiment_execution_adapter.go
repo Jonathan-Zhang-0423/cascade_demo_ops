@@ -75,7 +75,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 			if statusErr == nil && status.Status == "failed" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
 				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 			}
-			status, err := a.waitForDirectResult(ctx, projectID, jobID, request.ObservationPlan, emit)
+			status, err := a.waitForDirectResult(ctx, projectID, jobID, request, emit)
 			if err != nil {
 				return err
 			}
@@ -156,7 +156,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "request_submitted", Summary: "目标提交已被 Direct Gateway 接收", EvidenceRefs: []string{jobID}}); err != nil {
 		return err
 	}
-	status, err := a.waitForDirectResult(ctx, prepared.State.ProjectID, jobID, request.ObservationPlan, emit)
+	status, err := a.waitForDirectResult(ctx, prepared.State.ProjectID, jobID, request, emit)
 	if err != nil {
 		return err
 	}
@@ -207,7 +207,7 @@ func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Con
 	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: phase, Summary: summary, EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
 		return err
 	}
-	status, err := a.waitForDirectResult(ctx, projectID, jobID, request.ObservationPlan, emit)
+	status, err := a.waitForDirectResult(ctx, projectID, jobID, request, emit)
 	if err != nil {
 		return err
 	}
@@ -554,8 +554,9 @@ func recordLiveBrowserVisualObservations(downloads []CloudDeliverableDownloadRes
 	return calls, terminal, nil
 }
 
-func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context, projectID, jobID string, plan experiment.ObservationPlan, emit func(experiment.LegExecutionUpdate) error) (model.DirectJobStatus, error) {
+func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context, projectID, jobID string, request experiment.LegExecutionRequest, emit func(experiment.LegExecutionUpdate) error) (model.DirectJobStatus, error) {
 	started := a.now()
+	plan := request.ObservationPlan
 	warned := false
 	lastProgress := -1
 	for {
@@ -570,7 +571,14 @@ func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context,
 		switch status.Status {
 		case "completed":
 			return status, nil
-		case "failed", "canceled", "expired":
+		case "failed":
+			if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+				if result, resultErr := a.service.GetDirectResult(ctx, projectID, jobID); resultErr == nil && adaptiveObservationFailureShouldDefer(request, result) {
+					return status, &experiment.AdapterError{Code: "confidence_deferred", Phase: "confidence_deferred", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: resultEvidenceRefs(result)}
+				}
+			}
+			return status, &experiment.AdapterError{Code: firstNonEmptyString(status.BlockingErrorCode, "explicit_terminal_build_failure"), Phase: "terminal_failed", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: []string{jobID}}
+		case "canceled", "expired":
 			return status, &experiment.AdapterError{Code: firstNonEmptyString(status.BlockingErrorCode, "explicit_terminal_build_failure"), Phase: "terminal_failed", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: []string{jobID}}
 		case "awaiting_credentials":
 			if _, err := a.service.ReuploadDirectCredential(ctx, projectID, jobID); err != nil {
