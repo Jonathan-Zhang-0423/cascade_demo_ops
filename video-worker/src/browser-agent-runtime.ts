@@ -2362,17 +2362,20 @@ async function executeFormalAuthentication(session: BrowserAgentSession, stage: 
   const secret = session.taskSecrets[secretRef];
   if (!secret) throw new Error("browser_agent_task_secret_unavailable");
   const entryURL = session.page.url();
+  const runtimeBootstrap = runtimeAdaptiveAuthenticationBootstrap(stage, entryURL);
   try {
     let passwordInput = await firstVisibleLocator(session.page, passwordInputSelectors());
     if (!passwordInput) {
-      const entry = await firstApprovedAuthenticationLocator(session.page, stage, false);
+      const entry = await firstApprovedAuthenticationLocator(session.page, stage, false)
+        || (runtimeBootstrap ? await firstRuntimeAuthenticationEntryLocator(session.page, secret.username) : undefined);
       if (!entry) throw new Error("login_entry_evidence_missing");
       await entry.click({ timeout: actionTimeoutMS });
       await waitForPageSettled(session.page, 5_000);
       passwordInput = await firstVisibleLocator(session.page, passwordInputSelectors());
     }
     const usernameInput = await firstVisibleLocator(session.page, usernameInputSelectors());
-    const submit = await firstApprovedAuthenticationLocator(session.page, stage, true);
+    const submit = await firstApprovedAuthenticationLocator(session.page, stage, true)
+      || (runtimeBootstrap && passwordInput ? await firstRuntimeAuthenticationSubmitLocator(session.page, passwordInput) : undefined);
     if (!usernameInput || !passwordInput || !submit) throw new Error("authentication_context_unverified");
     await prepareSecretTarget(session, usernameInput);
     await prepareSecretTarget(session, passwordInput);
@@ -2410,12 +2413,87 @@ function authenticationCandidates(stage: BrowserAgentWorkerStage): BrowserAgentS
 }
 
 function stageHasAuthenticationProvenance(stage: BrowserAgentWorkerStage, currentURL: string): boolean {
-  return authenticationCandidates(stage).some((candidate) =>
+  const candidates = authenticationCandidates(stage);
+  if (candidates.length === 0 && runtimeAdaptiveAuthenticationBootstrap(stage, currentURL)) return true;
+  return candidates.some((candidate) =>
     candidate.observed_page_role === "authentication"
     && candidate.observed_form_role === "authentication"
     && Boolean(candidate.evidence_digest_sha256)
     && Boolean(candidate.observed_url)
     && urlMatches(candidate.observed_url!, stage.url || stage.route || stage.entry_route || currentURL));
+}
+
+// Selector-free session setup is admitted only when the approved package
+// binds one credential, a non-destructive runtime stage, and an explicit
+// successor route. The concrete controls are then scored from the live page.
+export function runtimeAdaptiveAuthenticationBootstrap(stage: BrowserAgentWorkerStage, currentURL: string): boolean {
+  if (stage.stage_kind !== "session_setup" || stage.target_contract?.destructive !== false) return false;
+  if (!stage.expected_route_after_action || !stage.interactions?.length) return false;
+  if (authenticationCandidates(stage).length > 0) return false;
+  const secretRefs = [...new Set(stage.interactions.map((item) => String(item.secret_ref || "").trim()).filter(Boolean))];
+  if (secretRefs.length !== 1 || stage.interactions.some((item) => item.non_destructive !== true || Boolean(item.target?.selector || item.target?.test_id))) return false;
+  const entry = stage.url || stage.route || stage.entry_route || currentURL;
+  if (!entry || !urlMatches(currentURL, entry)) return false;
+  const successorURL = absoluteTargetURL(stage.expected_route_after_action, currentURL, stage.url);
+  const entryURL = absoluteTargetURL(entry, currentURL, stage.url);
+  return !urlMatches(successorURL, entryURL);
+}
+
+export function runtimeAuthenticationChoiceScore(label: string, usernameLooksLikeEmail: boolean, inPrimaryContainer: boolean): number {
+  const value = label.trim().toLowerCase();
+  const email = /(^|\s)(e-?mail|mail)(\s|$)|邮箱|邮件/.test(value);
+  const phone = /phone|mobile|sms|手机号|手机|短信/.test(value);
+  const external = /github|google|wechat|weixin|微信|oauth/.test(value);
+  const accountCreation = /register|sign\s*up|create\s+account|注册|创建账户/.test(value);
+  const login = /log\s*in|sign\s*in|login|登录|登陆|登入/.test(value);
+  const semantic = accountCreation ? 0 : usernameLooksLikeEmail ? (email ? 1 : login ? 0.55 : 0.1) : (login ? 1 : 0.25);
+  const context = inPrimaryContainer ? 1 : 0.5;
+  const uniqueness = email && usernameLooksLikeEmail ? 1 : login ? 0.65 : 0.25;
+  const transition = accountCreation || external || (usernameLooksLikeEmail && phone) ? 0 : email || login ? 1 : 0.2;
+  return 0.3 + 0.25 * semantic + 0.2 * context + 0.15 * uniqueness + 0.1 * transition;
+}
+
+async function firstRuntimeAuthenticationEntryLocator(page: any, username: string): Promise<any | undefined> {
+  const candidates: Array<{ locator: any; score: number }> = [];
+  const locator = page.locator('button, [role="button"], a[href]');
+  const count = Math.min(await locator.count().catch(() => 0), 48);
+  const usernameLooksLikeEmail = username.includes("@");
+  for (let index = 0; index < count; index += 1) {
+    const item = locator.nth(index);
+    if (!await item.isVisible().catch(() => false) || !await item.isEnabled().catch(() => false)) continue;
+    const metadata = await item.evaluate((element: any) => ({
+      label: String(element.getAttribute("aria-label") || element.innerText || element.textContent || ""),
+      inPrimaryContainer: Boolean(element.closest("main, form, [role='dialog'], [role='main']")),
+    })).catch(() => ({ label: "", inPrimaryContainer: false }));
+    candidates.push({ locator: item, score: runtimeAuthenticationChoiceScore(metadata.label, usernameLooksLikeEmail, metadata.inPrimaryContainer) });
+  }
+  candidates.sort((left, right) => right.score - left.score);
+  if (!candidates[0] || candidates[0].score < 0.85) return undefined;
+  if (candidates[1] && candidates[0].score - candidates[1].score < 0.2) return undefined;
+  return candidates[0].locator;
+}
+
+async function firstRuntimeAuthenticationSubmitLocator(page: any, passwordInput: any): Promise<any | undefined> {
+  const structural = await firstVisibleLocator(page, ['form button[type="submit"]', 'form input[type="submit"]', 'button[type="submit"]', 'input[type="submit"]']);
+  if (structural) return structural;
+  const container = passwordInput.locator("xpath=ancestor::*[self::form or @role='dialog'][1]");
+  if (await container.count().catch(() => 0) !== 1) return undefined;
+  const buttons = container.locator('button, [role="button"]');
+  const visible: any[] = [];
+  const count = Math.min(await buttons.count().catch(() => 0), 12);
+  for (let index = 0; index < count; index += 1) {
+    const item = buttons.nth(index);
+    if (await item.isVisible().catch(() => false) && await item.isEnabled().catch(() => false)) visible.push(item);
+  }
+  if (visible.length === 1) return visible[0];
+  const scored: Array<{ locator: any; score: number }> = [];
+  for (const item of visible) {
+    const label = await item.evaluate((element: any) => String(element.getAttribute("aria-label") || element.innerText || element.textContent || "")).catch(() => "");
+    scored.push({ locator: item, score: runtimeAuthenticationChoiceScore(label, false, true) });
+  }
+  scored.sort((left, right) => right.score - left.score);
+  if (!scored[0] || scored[0].score < 0.85 || (scored[1] && scored[0].score - scored[1].score < 0.2)) return undefined;
+  return scored[0].locator;
 }
 
 async function firstApprovedAuthenticationLocator(page: any, stage: BrowserAgentWorkerStage, formSubmit: boolean): Promise<any | undefined> {

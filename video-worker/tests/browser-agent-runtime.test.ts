@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, browserVisualTerminalWithStructuralEvidence, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, browserVisualTerminalWithStructuralEvidence, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -244,6 +244,32 @@ describe("browser agent navigation policy", () => {
       url: "https://app.example.com/app", target_contract: { semantic_id: "entry", destructive: false },
       interactions: [{ kind: "navigate", non_destructive: true }],
     }, "https://app.example.com/results/runtime-42", "https://app.example.com/results/runtime-42")).toBe("https://app.example.com/app");
+  });
+});
+
+describe("runtime adaptive authentication bootstrap", () => {
+  const stage = {
+    id: "stage_login", order: 1, node_id: "node_login", stage_kind: "session_setup",
+    url: "https://app.example/login", entry_route: "/login", expected_route_after_action: "/app",
+    target_contract: { semantic_id: "login", destructive: false },
+    interactions: [{ kind: "inspect", secret_ref: "vault://approved/login", non_destructive: true }],
+  } as any;
+
+  it("admits only selector-free credential stages with an explicit successor", () => {
+    expect(runtimeAdaptiveAuthenticationBootstrap(stage, "https://app.example/login")).toBe(true);
+    expect(runtimeAdaptiveAuthenticationBootstrap({ ...stage, expected_route_after_action: "/login" }, "https://app.example/login")).toBe(false);
+    expect(runtimeAdaptiveAuthenticationBootstrap({ ...stage, interactions: [{ ...stage.interactions[0], target: { selector: "#login" } }] }, "https://app.example/login")).toBe(false);
+    expect(runtimeAdaptiveAuthenticationBootstrap({ ...stage, stage_kind: "business_submit" }, "https://app.example/login")).toBe(false);
+  });
+
+  it("selects an email-compatible login method with the global action threshold and margin", () => {
+    const email = runtimeAuthenticationChoiceScore("邮箱登录", true, true);
+    const phone = runtimeAuthenticationChoiceScore("手机号登录", true, true);
+    const external = runtimeAuthenticationChoiceScore("GitHub 账号登录", true, true);
+    expect(email).toBeGreaterThanOrEqual(.85);
+    expect(email - phone).toBeGreaterThanOrEqual(.2);
+    expect(email - external).toBeGreaterThanOrEqual(.2);
+    expect(runtimeAuthenticationChoiceScore("创建账户", true, true)).toBeLessThan(.85);
   });
 });
 
