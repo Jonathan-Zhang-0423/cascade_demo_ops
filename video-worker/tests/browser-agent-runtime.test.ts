@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationPollDecision, runtimeExecutionContinuationScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationPollDecision, runtimeExecutionContinuationScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -280,6 +280,14 @@ describe("runtime execution continuation", () => {
 		expect(runtimeContinuationPollDecision(false, "welcome", "product", false, true)).toBe("observe");
 		expect(runtimeContinuationPollDecision(false, "welcome", "welcome", true, true)).toBe("advance");
 		expect(runtimeContinuationPollDecision(false, "welcome", "welcome", false, false, true)).toBe("advance");
+	});
+});
+
+describe("visual refresh entity recovery", () => {
+	it("detects a same-origin deep-entry drift without using a route template", () => {
+		expect(browserVisualRefreshRecoveryRequired("https://app.example.com/entity/runtime-42", "https://app.example.com/workspace")).toBe(true);
+		expect(browserVisualRefreshRecoveryRequired("https://app.example.com/entity/runtime-42", "https://app.example.com/entity/runtime-42")).toBe(false);
+		expect(browserVisualRefreshRecoveryRequired("https://app.example.com/entity/runtime-42", "https://other.example.com/workspace")).toBe(false);
 	});
 });
 

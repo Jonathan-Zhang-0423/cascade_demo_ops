@@ -2022,8 +2022,9 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	while (Date.now() < deadline) {
 		if (requireVisualTerminal && browserVisualRefreshDue(startedAtMS, Date.now(), refreshAfterMS, refreshed)) {
 			refreshed = true;
-			await session.page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
-			await waitForPageSettled(session.page, 5_000);
+			if (!await refreshAndRestoreObservedEntry(session)) {
+				return { surface: false, score: false, controls: false };
+			}
 			nextCaptureAt = Date.now();
 		}
 		const target = await interactiveSurfaceTargetOnce(session.page);
@@ -2074,6 +2075,52 @@ async function waitForPlayableSurfaceWithVisualObservation(
 		await session.page.waitForTimeout(Math.min(1_000, Math.max(100, deadline - Date.now())));
 	}
 	return { surface: false, score: false, controls: false };
+}
+
+export function browserVisualRefreshRecoveryRequired(observedEntryURL: string, currentURL: string): boolean {
+	if (!String(observedEntryURL || "").trim()) return false;
+	try {
+		const observed = new URL(observedEntryURL);
+		const current = new URL(currentURL);
+		return observed.origin === current.origin && !sameAbsoluteURL(observed.href, current.href);
+	} catch {
+		return false;
+	}
+}
+
+async function refreshAndRestoreObservedEntry(session: BrowserAgentSession): Promise<boolean> {
+	const observedEntryURL = session.page.url();
+	await session.page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+	await waitForPageSettled(session.page, 5_000);
+	if (!browserVisualRefreshRecoveryRequired(observedEntryURL, session.page.url())) return sameAbsoluteURL(observedEntryURL, session.page.url());
+	if (urlPolicyError(observedEntryURL, session, false)) return false;
+
+	// A deep SPA route may reload to its workspace. Recover through the exact
+	// runtime-observed entity entry when it is present; this is a navigation-only
+	// observation recovery and never guesses from names, hosts, or route shapes.
+	const links = session.page.locator('a[href]');
+	const count = Math.min(await links.count().catch(() => 0), 256);
+	const exactVisible: any[] = [];
+	for (let index = 0; index < count; index += 1) {
+		const link = links.nth(index);
+		if (!await link.isVisible().catch(() => false)) continue;
+		const href = await link.evaluate((element: any) => String(element.href || element.getAttribute?.("href") || "")).catch(() => "");
+		if (sameAbsoluteURL(href, observedEntryURL)) exactVisible.push(link);
+	}
+	if (exactVisible.length === 1) {
+		await exactVisible[0].click({ timeout: 10_000 }).catch(() => undefined);
+		await waitForPageSettled(session.page, 5_000);
+		if (sameAbsoluteURL(observedEntryURL, session.page.url())) return true;
+	}
+
+	// History recovery preserves client-side router state on applications whose
+	// server entry point redirects deep links back to the workspace.
+	await session.page.goBack({ waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => undefined);
+	await waitForPageSettled(session.page, 3_000);
+	if (sameAbsoluteURL(observedEntryURL, session.page.url())) return true;
+	await session.page.goto(observedEntryURL, { waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => undefined);
+	await waitForPageSettled(session.page, 3_000);
+	return sameAbsoluteURL(observedEntryURL, session.page.url());
 }
 
 async function captureAndUnderstandVisionPoll(
