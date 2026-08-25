@@ -52,6 +52,11 @@ func adaptiveBusinessSnapshot(stage BrowserAgentRuntimeStage, observation *model
 		return snapshot
 	}
 	snapshot.PageRef = strings.TrimSpace(observation.URL)
+	if runtimeObservationIsRealEvidence(observation.Source) && snapshot.PageRef != "" {
+		snapshot.EvidenceChannels = append(snapshot.EvidenceChannels, model.BusinessEvidenceChannel{
+			Kind: "page_state", Reference: snapshot.PageRef, Confirmed: true, Confidence: 0.8,
+		})
+	}
 	if targetResolved {
 		snapshot.Controls = append(snapshot.Controls, model.BusinessControlSummary{
 			SemanticID: stage.TargetContract.SemanticID, Role: firstNonEmptyString(stage.TargetContract.AllowedRoles...), Enabled: true, Score: stage.TargetContract.Confidence,
@@ -155,11 +160,23 @@ func firstRuntimeEvidenceID(observation *model.RuntimeObservation) string {
 func distinctConfirmedChannelCount(channels []model.BusinessEvidenceChannel) int {
 	seen := map[string]bool{}
 	for _, channel := range channels {
-		if channel.Confirmed && strings.TrimSpace(channel.Kind) != "" {
-			seen[channel.Kind] = true
+		if channel.Confirmed {
+			kind := businessEvidenceFamily(channel.Kind)
+			if kind != "" {
+				seen[kind] = true
+			}
 		}
 	}
 	return len(seen)
+}
+
+func businessEvidenceFamily(kind string) string {
+	switch strings.TrimSpace(kind) {
+	case "page_state", "url_transition":
+		return "navigation"
+	default:
+		return strings.TrimSpace(kind)
+	}
 }
 
 func evidenceStrings(refs []model.EvidenceRef) []string {

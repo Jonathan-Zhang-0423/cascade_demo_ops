@@ -70,6 +70,55 @@ func TestAdaptiveHarnessReplaysJobE1DAsOneSubmitAndSkipsStageFive(t *testing.T) 
 	}
 }
 
+func TestAdaptiveHarnessPersistsOptionalModeSkipWhenControlIsAbsent(t *testing.T) {
+	stage := BrowserAgentRuntimeStage{
+		ID: "stage_optional_mode", Order: 1, NodeID: "node_optional_mode",
+		StageKind: model.BusinessStageKindModeSelection, EntryRoute: "https://product.example/app",
+		TargetContract: model.BrowserAgentTargetContract{SemanticID: "optional_mode", Destructive: false, Confidence: .76},
+		Interactions:   []model.BrowserAgentInteraction{{Kind: model.GraphActionClick, NonDestructive: true}},
+	}
+	plan := BrowserAgentRuntimePlan{
+		RunID: "run_optional_mode", SourcePackageID: "pkg_optional_mode",
+		SourceBundleHashSHA256: "bundle_optional_mode", PolicyHashSHA256: "policy_optional_mode",
+		HarnessProfile: model.AdaptiveBusinessHarnessProfileV1, Stages: []BrowserAgentRuntimeStage{stage},
+	}
+	observer := unresolvedOptionalModeObserver{}
+	executor := &countingStageExecutor{}
+	sink, err := newStageEventAuditLog(t.TempDir(), "job_optional_mode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{}).Run(context.Background(), plan, observer, executor, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AuditError != nil || executor.calls != 0 {
+		t.Fatalf("optional mode must be skipped without an action or audit failure: calls=%d audit=%v", executor.calls, result.AuditError)
+	}
+	foundBusinessState, foundSkip, foundComplete := false, false, false
+	for _, event := range result.Events {
+		foundBusinessState = foundBusinessState || event.EventType == model.StageExecutionEventBusinessStateObserved
+		foundSkip = foundSkip || event.EventType == model.StageExecutionEventStepSatisfied
+		foundComplete = foundComplete || event.EventType == model.StageExecutionEventStageCompleted
+	}
+	if !foundBusinessState || !foundSkip || !foundComplete {
+		t.Fatalf("optional mode skip was not fully audited: %+v", result.Events)
+	}
+}
+
+type unresolvedOptionalModeObserver struct{}
+
+func (unresolvedOptionalModeObserver) ObserveStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageObservation, error) {
+	return BrowserAgentStageObservation{
+		Observation: model.RuntimeObservation{
+			Source: model.RuntimeObservationActualBrowser, URL: "https://product.example/app",
+			Assertions: []model.RuntimeAssertion{{Kind: "target_resolved", Passed: false, Actual: "no optional configuration control"}},
+		},
+		EvidenceRefs:   []model.EvidenceRef{{ID: "optional_mode_page", Kind: model.EvidenceKindWebScreenshot, Confidence: 1}},
+		TargetResolved: false,
+	}, nil
+}
+
 func TestCompileBrowserAgentRuntimePlanKeepsApprovedStageOrderAndSemantics(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	approved := &pkg.ExecutableScriptBundle.StageApprovalPlan.Stages[1]

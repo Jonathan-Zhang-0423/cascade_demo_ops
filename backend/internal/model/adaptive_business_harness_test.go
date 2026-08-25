@@ -19,6 +19,22 @@ func TestDecideBusinessTransitionSkipsSatisfiedSuccessor(t *testing.T) {
 	}
 }
 
+func TestDecideBusinessTransitionDoesNotDoubleCountNavigationEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := BusinessStateSnapshot{
+		SchemaVersion: "demoops.business_state_snapshot.v1", Phase: BusinessPhaseBuildRunning,
+		Confidence: .95, ObservedAt: now,
+		EvidenceChannels: []BusinessEvidenceChannel{
+			{Kind: "page_state", Reference: "https://product.example/entity/1", Confirmed: true},
+			{Kind: "url_transition", Reference: "https://product.example/entity/1", Confirmed: true},
+		},
+	}
+	decision := DecideBusinessTransition(snapshot, BusinessTransitionStep{StepID: "submit", From: BusinessPhaseInputReady, To: BusinessPhaseBuildRunning})
+	if decision.Kind == HarnessDecisionSkip {
+		t.Fatalf("navigation-only evidence must not satisfy the two-channel transition gate: %+v", decision)
+	}
+}
+
 func TestDecideBusinessTransitionDoesNotActBelowConfidenceThreshold(t *testing.T) {
 	step := BusinessTransitionStep{StepID: "submit", From: BusinessPhaseInputReady, To: BusinessPhaseBuildRunning}
 	if decision := DecideBusinessTransition(BusinessStateSnapshot{Phase: BusinessPhaseInputReady, Confidence: 0.8}, step); decision.Kind != HarnessDecisionObserve {

@@ -184,11 +184,23 @@ func ValidateBusinessStateSnapshot(snapshot BusinessStateSnapshot) error {
 func confirmedBusinessEvidenceCount(channels []BusinessEvidenceChannel) int {
 	seen := map[string]bool{}
 	for _, channel := range channels {
-		if channel.Confirmed && strings.TrimSpace(channel.Kind) != "" {
-			seen[channel.Kind] = true
+		if channel.Confirmed {
+			kind := businessEvidenceFamily(channel.Kind)
+			if kind != "" {
+				seen[kind] = true
+			}
 		}
 	}
 	return len(seen)
+}
+
+func businessEvidenceFamily(kind string) string {
+	switch strings.TrimSpace(kind) {
+	case "page_state", "url_transition":
+		return "navigation"
+	default:
+		return strings.TrimSpace(kind)
+	}
 }
 
 func confirmedBusinessEvidenceRefs(channels []BusinessEvidenceChannel) []string {
