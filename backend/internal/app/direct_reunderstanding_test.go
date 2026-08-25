@@ -155,6 +155,18 @@ func TestAdaptiveSuccessorRepairSkipsMissingSubmitAndKeepsVerificationSuffix(t *
 	}
 }
 
+func TestSelectObservedSuccessorURLPrefersConcreteEntityBeforeWorkspaceDrift(t *testing.T) {
+	project := &model.ProjectContext{ProductURL: "https://app.example.com/workspace"}
+	events := []model.StageExecutionEvent{
+		{Sequence: 10, Observation: &model.RuntimeObservation{URL: "https://app.example.com/workspace"}},
+		{Sequence: 20, Observation: &model.RuntimeObservation{URL: "https://app.example.com/entity/runtime-42"}},
+		{Sequence: 30, Observation: &model.RuntimeObservation{URL: "https://app.example.com/workspace"}},
+	}
+	if got := selectObservedSuccessorURL(project, "https://app.example.com/workspace", events); got != "https://app.example.com/entity/runtime-42" {
+		t.Fatalf("workspace drift replaced the concrete observed entity: %q", got)
+	}
+}
+
 func TestPrependReusableSessionSetupRestoresOnlyApprovedAuthentication(t *testing.T) {
 	evidence := model.EvidenceRef{ID: "evidence_login_form", Kind: "page_snapshot", ArtifactID: "login-form"}
 	sourceGraph := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/login")
@@ -234,7 +246,7 @@ func TestSyncAdaptiveBusinessStagePlanKeepsDistinctLoginSuccessRoute(t *testing.
 	graph.Nodes = []*model.GraphNode{{
 		ID: "session", Title: "Restore session", Goal: "Log in", PageRef: "/login", ActionSpec: &model.GraphAction{Type: model.GraphActionInspect},
 		Validations: []model.ValidationSpec{{ID: "login_success", Kind: "url_matches", Target: model.ActionTarget{URL: "/app"}, Required: true}},
-		Metadata: map[string]any{"business_stage_kind": string(model.BusinessStageKindSessionSetup), "business_route_state": string(model.BusinessRouteStateUnauthenticated)},
+		Metadata:    map[string]any{"business_stage_kind": string(model.BusinessStageKindSessionSetup), "business_route_state": string(model.BusinessRouteStateUnauthenticated)},
 	}, {
 		ID: "resume", PageRef: "/entity/current", ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate},
 	}}
@@ -252,7 +264,7 @@ func TestNormalizeAdaptiveReconciliationResumeAcceptsTerminalInteractionFailure(
 	graph.Nodes = []*model.GraphNode{{
 		ID: "resume_terminal", ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: "https://app.example.com/old"}},
 		InteractionContract: &model.InteractionContract{ContractID: "stale_interaction_contract", ReplayPolicy: model.InteractionReplayIdempotentWrite},
-		Metadata: map[string]any{"terminal_repair_resume": true},
+		Metadata:            map[string]any{"terminal_repair_resume": true},
 	}, {
 		ID: "verify", ActionSpec: &model.GraphAction{Type: model.GraphActionInspect},
 	}}

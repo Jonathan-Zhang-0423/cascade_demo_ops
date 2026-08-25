@@ -1,10 +1,13 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -64,6 +67,9 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	}
 	if result.Status != model.RecordingResultStatusFailed || result.CloudJobID != strings.TrimSpace(sourceJobID) || result.FailureDiagnostic == nil {
 		return adaptiveDirectReconciliationBuild{}, errors.New("adaptive reconciliation source result does not match the failed Direct job")
+	}
+	if observedURL := s.adaptiveObservedSuccessorURL(ctx, projectID, state, result); observedURL != "" {
+		result.FailureDiagnostic.CurrentURL = observedURL
 	}
 	graph, eligible, err := terminalInteractionVerificationRepairGraph(repairState, result, time.Now().UTC())
 	if err != nil || !eligible || !adaptiveReconciliationGraphSupported(graph) {
@@ -134,6 +140,94 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	return adaptiveDirectReconciliationBuild{State: next, Build: build, SourceResult: result}, nil
 }
 
+func (s *Service) adaptiveObservedSuccessorURL(ctx context.Context, projectID string, state *orchestrator.CascadeState, result model.RecordingResultPackage) string {
+	current := strings.TrimSpace(result.FailureDiagnostic.CurrentURL)
+	if state == nil || state.ProjectContext == nil || state.DesktopCloudRun == nil || result.StageEventLogRef == nil {
+		return current
+	}
+	var descriptor *model.DirectArtifact
+	for index := range state.DesktopCloudRun.DirectArtifacts {
+		if state.DesktopCloudRun.DirectArtifacts[index].ArtifactID == result.StageEventLogRef.ID {
+			descriptor = &state.DesktopCloudRun.DirectArtifacts[index]
+			break
+		}
+	}
+	if descriptor == nil {
+		if status, err := s.GetDirectExecutionStatus(ctx, projectID, result.CloudJobID); err == nil {
+			for index := range status.Artifacts {
+				if status.Artifacts[index].ArtifactID == result.StageEventLogRef.ID {
+					descriptor = &status.Artifacts[index]
+					break
+				}
+			}
+		}
+	}
+	if descriptor == nil {
+		return current
+	}
+	download, err := s.DownloadDirectArtifact(ctx, projectID, DirectArtifactDownloadRequest{JobID: result.CloudJobID, Artifact: *descriptor})
+	if err != nil || !download.ChecksumVerified {
+		return current
+	}
+	file, err := os.Open(download.LocalPath)
+	if err != nil {
+		return current
+	}
+	defer file.Close()
+	events := make([]model.StageExecutionEvent, 0, 64)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), experiment.MaxEventBodyBytes)
+	for scanner.Scan() {
+		var event model.StageExecutionEvent
+		if json.Unmarshal(scanner.Bytes(), &event) == nil && event.Observation != nil {
+			events = append(events, event)
+		}
+	}
+	if scanner.Err() != nil {
+		return current
+	}
+	return selectObservedSuccessorURL(state.ProjectContext, current, events)
+}
+
+func selectObservedSuccessorURL(project *model.ProjectContext, current string, events []model.StageExecutionEvent) string {
+	bestURL := strings.TrimSpace(current)
+	bestScore, bestSequence := observedSuccessorURLScore(project, bestURL), int64(-1)
+	for _, event := range events {
+		if event.Observation == nil {
+			continue
+		}
+		candidate := strings.TrimSpace(event.Observation.URL)
+		score := observedSuccessorURLScore(project, candidate)
+		if score < 0 || score < bestScore || (score == bestScore && event.Sequence <= bestSequence) {
+			continue
+		}
+		bestURL, bestScore, bestSequence = candidate, score, event.Sequence
+	}
+	return bestURL
+}
+
+func observedSuccessorURLScore(project *model.ProjectContext, candidate string) int {
+	approved, err := approvedTerminalProjectURL(project, candidate)
+	if err != nil {
+		return -1
+	}
+	target, targetErr := url.Parse(approved)
+	base, baseErr := url.Parse(strings.TrimSpace(project.ProductURL))
+	if targetErr != nil || baseErr != nil {
+		return -1
+	}
+	segments := len(strings.FieldsFunc(strings.Trim(target.Path, "/"), func(r rune) bool { return r == '/' }))
+	score := segments * 10
+	if !sameURLWithoutQuery(target, base) {
+		score += 100
+	}
+	return score
+}
+
+func sameURLWithoutQuery(left, right *url.URL) bool {
+	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host) && strings.TrimSuffix(left.Path, "/") == strings.TrimSuffix(right.Path, "/")
+}
+
 func adaptiveReconciliationGraphSupported(graph *model.DemoWorkflowGraph) bool {
 	if graph == nil {
 		return false
@@ -157,9 +251,9 @@ func normalizeAdaptiveReconciliationResume(graph *model.DemoWorkflowGraph, obser
 		node.ActionSpec.Target.URL = observedURL
 		node.InteractionContract = &model.InteractionContract{
 			SchemaVersion: model.InteractionContractSchemaVersion,
-			ContractID: "interaction_adaptive_observed_resume_" + node.ID,
-			SemanticGoal: "进入已观察到的业务实体，只继续观察和验证。",
-			ActionKind: model.GraphActionNavigate, ReplayPolicy: model.InteractionReplayObserveOnly,
+			ContractID:    "interaction_adaptive_observed_resume_" + node.ID,
+			SemanticGoal:  "进入已观察到的业务实体，只继续观察和验证。",
+			ActionKind:    model.GraphActionNavigate, ReplayPolicy: model.InteractionReplayObserveOnly,
 			TargetSemanticID: "observed_successor_entity", ActionTarget: node.ActionSpec.Target,
 			ExpectedTransitions: []model.InteractionPredicate{{
 				ID: "observe_adaptive_successor_route", Kind: "url_matches", Target: model.ActionTarget{URL: observedURL},
