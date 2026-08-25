@@ -591,7 +591,7 @@ func applyAdaptiveInteractionContracts(graph *model.DemoWorkflowGraph, plan expe
 		if node == nil {
 			continue
 		}
-		if isSessionSetupGraphNode(node) || isAdaptiveSuccessorResumeGraphNode(node) {
+		if isSessionSetupGraphNode(node) || isAdaptiveSuccessorResumeGraphNode(node) || isAdaptivePendingContinuationGraphNode(node) {
 			node.Type = model.GraphNodeTypeAction
 			base = append(base, node)
 			continue
@@ -684,4 +684,13 @@ func isAdaptiveSuccessorResumeGraphNode(node *model.GraphNode) bool {
 	}
 	resume, _ := node.Metadata["adaptive_successor_resume"].(bool)
 	return resume
+}
+
+func isAdaptivePendingContinuationGraphNode(node *model.GraphNode) bool {
+	if node == nil || node.ActionSpec == nil || node.Metadata == nil {
+		return false
+	}
+	pending, _ := node.Metadata["adaptive_pending_continuation"].(bool)
+	recipe, _ := node.ActionSpec.Parameters["action_recipe"].(string)
+	return pending && node.ActionSpec.Type == model.GraphActionClick && recipe == "continue_execution"
 }

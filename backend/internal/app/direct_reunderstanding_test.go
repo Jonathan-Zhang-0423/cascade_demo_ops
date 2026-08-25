@@ -194,6 +194,39 @@ func TestInsertPendingAdaptiveContinuationRestoresOnlySkippedUnstartedEffect(t *
 	}
 }
 
+func TestApplyAdaptiveInteractionContractsPreservesPendingContinuation(t *testing.T) {
+	observedURL := "https://app.example.com/entity/runtime-42"
+	resume := &model.GraphNode{ID: "resume", Type: model.GraphNodeTypeStart, PageRef: observedURL, ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: observedURL}}, Metadata: map[string]any{"adaptive_successor_resume": true}}
+	pending := &model.GraphNode{
+		ID: "continue_two", Type: model.GraphNodeTypeAction, PageRef: observedURL,
+		ActionSpec:          &model.GraphAction{Type: model.GraphActionClick, Target: model.ActionTarget{URL: observedURL}, Parameters: map[string]any{"action_recipe": "continue_execution"}},
+		InteractionContract: &model.InteractionContract{SchemaVersion: model.InteractionContractSchemaVersion, ContractID: "pending", ActionKind: model.GraphActionClick, ReplayPolicy: model.InteractionReplayOnceEffect},
+		Metadata:            map[string]any{"adaptive_pending_continuation": true},
+	}
+	legacyVerify := &model.GraphNode{ID: "legacy_verify", Type: model.GraphNodeTypeEnd, ActionSpec: &model.GraphAction{Type: model.GraphActionInspect}}
+	graph := model.NewDemoWorkflowGraph("repair", "project", observedURL)
+	graph.Nodes = []*model.GraphNode{resume, pending, legacyVerify}
+	plan := experiment.InteractionPlan{
+		SchemaVersion: experiment.InteractionPlanSchemaVersion,
+		PlanID:        "plan-preserve-pending",
+		SurfaceKind:   "runtime_discovered",
+		Steps: []experiment.InteractionStep{
+			{StepID: "surface_ready", SemanticIntent: "verify the observed interactive surface", ReplayPolicy: experiment.ReplayObserveOnly, ExpectedChanges: []string{"visual"}, EvidenceSlots: []string{"surface"}, ProofRequirements: []experiment.ProofRequirement{{Kind: "all_evidence_slots"}}, Action: experiment.InteractionAction{Kind: "observe", TargetSemanticID: "surface"}},
+			{StepID: "surface_stable", SemanticIntent: "verify the observed surface remains available", ReplayPolicy: experiment.ReplayObserveOnly, ExpectedChanges: []string{"visual"}, EvidenceSlots: []string{"stable"}, ProofRequirements: []experiment.ProofRequirement{{Kind: "all_evidence_slots"}}, Action: experiment.InteractionAction{Kind: "observe", TargetSemanticID: "surface"}},
+		},
+	}
+	observationPlan := experiment.ObservationPlan{SchemaVersion: experiment.ObservationPlanSchemaVersion}
+	if err := applyAdaptiveInteractionContracts(graph, plan, observationPlan, observedURL, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(graph.Nodes) != 4 || graph.Nodes[1].ID != pending.ID || !isAdaptivePendingContinuationGraphNode(graph.Nodes[1]) {
+		t.Fatalf("pending once-effect was dropped while rebuilding the proof suffix: %+v", graph.Nodes)
+	}
+	if graph.Nodes[2].InteractionContract == nil || graph.Nodes[2].InteractionContract.ContractID != "experiment_interaction_surface_ready" {
+		t.Fatalf("interaction proof suffix was not appended after the pending effect: %+v", graph.Nodes)
+	}
+}
+
 func TestPrependReusableSessionSetupRestoresOnlyApprovedAuthentication(t *testing.T) {
 	evidence := model.EvidenceRef{ID: "evidence_login_form", Kind: "page_snapshot", ArtifactID: "login-form"}
 	sourceGraph := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/login")
