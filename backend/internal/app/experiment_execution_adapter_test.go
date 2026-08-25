@@ -10,6 +10,7 @@ import (
 
 	"cascade-demoops/backend/internal/experiment"
 	"cascade-demoops/backend/internal/model"
+	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/store"
 )
 
@@ -218,6 +219,25 @@ func TestAdaptiveObservationTimeoutDefersWithoutDeclaringBusinessFailure(t *test
 	result.FailureDiagnostic.Error.Code = "explicit_visible_terminal_error"
 	if adaptiveObservationFailureShouldDefer(request, result) {
 		t.Fatal("an explicit terminal failure was incorrectly deferred")
+	}
+}
+
+func TestAdaptiveResumePrefersLatestReconciliationJobWithoutReplayingEffect(t *testing.T) {
+	states := store.NewMemoryStateStore()
+	state := &orchestrator.CascadeState{
+		ProjectID:              "project-one",
+		DesktopCloudRun:        &orchestrator.DesktopCloudRunState{CloudJobID: "job-observe-latest"},
+		ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{RepairLineage: &model.ScriptRepairLineage{SourceCloudJobID: "job-original"}},
+	}
+	if err := states.Save(t.Context(), state); err != nil {
+		t.Fatal(err)
+	}
+	adapter := newAppExperimentExecutionAdapter(&Service{states: states})
+	if got := adapter.latestAdaptiveReconciliationJobID(t.Context(), "project-one", "job-original", experiment.HarnessProfileAdaptiveBusinessV1); got != "job-observe-latest" {
+		t.Fatalf("resume selected stale effect job %q", got)
+	}
+	if got := adapter.latestAdaptiveReconciliationJobID(t.Context(), "project-one", "job-other", experiment.HarnessProfileAdaptiveBusinessV1); got != "job-other" {
+		t.Fatalf("unrelated repair lineage was selected: %q", got)
 	}
 }
 

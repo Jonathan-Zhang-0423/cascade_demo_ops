@@ -143,6 +143,8 @@ func (r *Runner) RunLeg(ctx context.Context, runID, legID string, adapter LegExe
 			_, getErr = r.service.CommitOnceEffect(ctx, runID, CommitOnceEffectRequest{ExpectedRevision: current.Revision, LegID: legID, EffectID: update.EffectID, StateFingerprintRef: update.StateFingerprintRef, ResultEntryRef: update.ResultEntryRef, EvidenceRefs: update.EvidenceRefs, SegmentRefs: update.SegmentRefs})
 		case "once_effect_admitted":
 			_, getErr = r.service.BindOnceEffectExternalTask(ctx, runID, current.Revision, legID, update.EffectID, update.ExternalTaskRef, update.EvidenceRefs)
+		case "checkpoint_result_entry":
+			_, getErr = r.service.AdvanceCheckpointResultEntry(ctx, runID, current.Revision, legID, update.ResultEntryRef, update.EvidenceRefs)
 		case "once_effect_rejected":
 			_, getErr = r.service.RejectOnceEffect(ctx, runID, current.Revision, legID, update.EffectID, update.Summary)
 		case "visual_observation":

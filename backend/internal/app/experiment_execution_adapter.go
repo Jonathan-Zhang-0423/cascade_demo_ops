@@ -53,6 +53,9 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 			return err
 		}
 		status, err := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
+		if err == nil && status.Status == "failed" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+			return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
+		}
 		if err != nil || status.Status != "completed" {
 			return &experiment.AdapterError{Code: "confirmed_result_revalidation_failed", Phase: "resume_observe_only", State: experiment.RunStateWaitingInput, Retryable: false, EvidenceRefs: []string{jobID}, Cause: err}
 		}
@@ -64,6 +67,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 			if !ok {
 				return &experiment.AdapterError{Code: "external_task_binding_invalid", Phase: "resume_observe_only", State: experiment.RunStateWaitingInput, Retryable: false}
 			}
+			jobID = a.latestAdaptiveReconciliationJobID(ctx, projectID, jobID, request.HarnessProfile)
 			if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "resume_external_task", Summary: "续接已持久化的 Direct 任务，不重新规划或提交", EvidenceRefs: []string{jobID}}); err != nil {
 				return err
 			}
@@ -184,6 +188,17 @@ func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Con
 		return &experiment.AdapterError{Code: "adaptive_reconciliation_upload_failed", Phase: "reconcile_observed_state", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{sourceJobID}, Cause: err}
 	}
 	jobID := upload.Receipt.JobID
+	entryRef := "direct:" + projectID + ":" + jobID
+	if request.Checkpoint != nil && experimentCheckpointConfirmed(request.Checkpoint, "target_submit") {
+		if err := emit(experiment.LegExecutionUpdate{Kind: "checkpoint_result_entry", ResultEntryRef: entryRef, EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
+			return err
+		}
+	} else {
+		evidenceRefs := resultEvidenceRefs(prepared.SourceResult)
+		if err := emit(experiment.LegExecutionUpdate{Kind: "once_effect_committed", EffectID: "target_submit", StateFingerprintRef: "result:" + prepared.SourceResult.ResultID, ResultEntryRef: entryRef, EvidenceRefs: evidenceRefs}); err != nil {
+			return err
+		}
+	}
 	phase, summary := "resume_observe_only", "只观察续接任务已启动；不会执行创建或提交"
 	if prepared.PendingContinuation {
 		phase = "resume_pending_effect"
@@ -197,6 +212,22 @@ func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Con
 		return err
 	}
 	return a.completeDirectLeg(ctx, request, projectID, jobID, status, true, emit)
+}
+
+func (a *appExperimentExecutionAdapter) latestAdaptiveReconciliationJobID(ctx context.Context, projectID, sourceJobID, harnessProfile string) string {
+	if a == nil || a.service == nil || a.service.states == nil || harnessProfile != experiment.HarnessProfileAdaptiveBusinessV1 {
+		return sourceJobID
+	}
+	state, err := a.service.states.Load(ctx, projectID)
+	if err != nil || state == nil || state.DesktopCloudRun == nil || state.ExecutableScriptBundle == nil || state.ExecutableScriptBundle.RepairLineage == nil {
+		return sourceJobID
+	}
+	candidate := strings.TrimSpace(state.DesktopCloudRun.CloudJobID)
+	lineageSource := strings.TrimSpace(state.ExecutableScriptBundle.RepairLineage.SourceCloudJobID)
+	if candidate == "" || candidate == sourceJobID || lineageSource != sourceJobID {
+		return sourceJobID
+	}
+	return candidate
 }
 
 func experimentProductEvidenceSummary(spec experiment.ProductSpec) string {

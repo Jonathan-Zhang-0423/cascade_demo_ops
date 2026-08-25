@@ -295,6 +295,44 @@ func (s *Service) CommitOnceEffect(ctx context.Context, runID string, request Co
 	return next, nil
 }
 
+func (s *Service) AdvanceCheckpointResultEntry(ctx context.Context, runID string, expectedRevision int, legID, resultEntryRef string, evidenceRefs []string) (Run, error) {
+	run, err := s.store.Get(ctx, runID)
+	if err != nil {
+		return Run{}, err
+	}
+	resultEntryRef = strings.TrimSpace(resultEntryRef)
+	if run.Revision != expectedRevision || resultEntryRef == "" || len(evidenceRefs) == 0 {
+		return Run{}, errors.New("checkpoint result entry advance requires current revision, result entry, and evidence")
+	}
+	index := legIndex(run, legID)
+	if index < 0 || run.Legs[index].Checkpoint == nil {
+		return Run{}, errors.New("checkpoint was not found")
+	}
+	confirmed := false
+	for _, record := range run.Legs[index].Checkpoint.OnceEffects {
+		if record.Status == "confirmed" {
+			confirmed = true
+			break
+		}
+	}
+	if !confirmed {
+		return Run{}, errors.New("checkpoint result entry cannot advance before a once-effect is confirmed")
+	}
+	if run.Legs[index].Checkpoint.ResultEntryRef == resultEntryRef {
+		return run, nil
+	}
+	next := run
+	next.Legs[index].Checkpoint.ResultEntryRef = resultEntryRef
+	next.Legs[index].Checkpoint.CreatedAt = s.now().UTC()
+	next.Revision++
+	next.UpdatedAt = s.now().UTC()
+	event := s.event(next, "checkpoint_result_entry_advanced", "恢复入口已推进到最新的观察任务；once-effect 状态保持不变", legID, evidenceRefs)
+	if err := s.store.Transition(ctx, run.RunID, run.Revision, next, event); err != nil {
+		return Run{}, err
+	}
+	return next, nil
+}
+
 func (s *Service) BindOnceEffectExternalTask(ctx context.Context, runID string, expectedRevision int, legID, effectID, externalTaskRef string, evidenceRefs []string) (Run, error) {
 	run, err := s.store.Get(ctx, runID)
 	if err != nil {

@@ -71,6 +71,31 @@ func TestConfirmedOnceEffectResumesObserveOnlyWithoutReplay(t *testing.T) {
 	}
 }
 
+func TestConfirmedCheckpointAdvancesObservationEntryWithoutCountingAnotherSubmission(t *testing.T) {
+	service := testService(t)
+	run := mustCreateRun(t, service)
+	run = mustTransitionLeg(t, service, run, run.Legs[0].LegID, RunStateRunning, "creating_target")
+	legID := run.Legs[0].LegID
+	started, err := service.BeginOnceEffect(t.Context(), run.RunID, run.Revision, legID, "target_submit", "target_submission", "idem-advance-entry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed, err := service.CommitOnceEffect(t.Context(), run.RunID, CommitOnceEffectRequest{
+		ExpectedRevision: started.Revision, LegID: legID, EffectID: "target_submit", StateFingerprintRef: "result:initial",
+		ResultEntryRef: "direct:project-one:job-initial", EvidenceRefs: []string{"job-initial"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := service.AdvanceCheckpointResultEntry(t.Context(), run.RunID, committed.Revision, legID, "direct:project-one:job-observe-two", []string{"job-initial", "job-observe-two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if advanced.Legs[0].Checkpoint.ResultEntryRef != "direct:project-one:job-observe-two" || advanced.Legs[0].TargetSubmissions != 1 || advanced.Legs[0].Checkpoint.OnceEffects[0].Status != "confirmed" {
+		t.Fatalf("observation entry advance changed once-effect semantics: %+v", advanced.Legs[0])
+	}
+}
+
 func TestUncertainOnceEffectDefersInsteadOfReplaying(t *testing.T) {
 	service := testService(t)
 	run := mustCreateRun(t, service)
