@@ -17,9 +17,15 @@ import (
 )
 
 type adaptiveDirectReconciliationBuild struct {
-	State        *orchestrator.CascadeState
-	Build        ClientExecutionPackageBuild
-	SourceResult model.RecordingResultPackage
+	State               *orchestrator.CascadeState
+	Build               ClientExecutionPackageBuild
+	SourceResult        model.RecordingResultPackage
+	PendingContinuation bool
+}
+
+type adaptiveObservedSuccessorEvidence struct {
+	URL    string
+	Events []model.StageExecutionEvent
 }
 
 // prepareAdaptiveDirectReconciliation compiles an observe/verify-only package
@@ -68,8 +74,9 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	if result.Status != model.RecordingResultStatusFailed || result.CloudJobID != strings.TrimSpace(sourceJobID) || result.FailureDiagnostic == nil {
 		return adaptiveDirectReconciliationBuild{}, errors.New("adaptive reconciliation source result does not match the failed Direct job")
 	}
-	if observedURL := s.adaptiveObservedSuccessorURL(ctx, projectID, state, result); observedURL != "" {
-		result.FailureDiagnostic.CurrentURL = observedURL
+	observed := s.adaptiveObservedSuccessorEvidence(ctx, projectID, state, result)
+	if observed.URL != "" {
+		result.FailureDiagnostic.CurrentURL = observed.URL
 	}
 	graph, eligible, err := terminalInteractionVerificationRepairGraph(repairState, result, time.Now().UTC())
 	if err != nil || !eligible || !adaptiveReconciliationGraphSupported(graph) {
@@ -79,6 +86,10 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		return adaptiveDirectReconciliationBuild{}, err
 	}
 	if err := normalizeAdaptiveReconciliationResume(graph, result.FailureDiagnostic.CurrentURL, directDiagnosticRefs(*result.FailureDiagnostic)); err != nil {
+		return adaptiveDirectReconciliationBuild{}, err
+	}
+	pendingContinuation, err := insertPendingAdaptiveContinuation(graph, repairState.WorkflowGraph, observed.Events, result.FailureDiagnostic.CurrentURL)
+	if err != nil {
 		return adaptiveDirectReconciliationBuild{}, err
 	}
 	if sourcePackage != nil {
@@ -137,13 +148,13 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	if err != nil {
 		return adaptiveDirectReconciliationBuild{}, fmt.Errorf("build adaptive successor package: %w", err)
 	}
-	return adaptiveDirectReconciliationBuild{State: next, Build: build, SourceResult: result}, nil
+	return adaptiveDirectReconciliationBuild{State: next, Build: build, SourceResult: result, PendingContinuation: pendingContinuation}, nil
 }
 
-func (s *Service) adaptiveObservedSuccessorURL(ctx context.Context, projectID string, state *orchestrator.CascadeState, result model.RecordingResultPackage) string {
+func (s *Service) adaptiveObservedSuccessorEvidence(ctx context.Context, projectID string, state *orchestrator.CascadeState, result model.RecordingResultPackage) adaptiveObservedSuccessorEvidence {
 	current := strings.TrimSpace(result.FailureDiagnostic.CurrentURL)
 	if state == nil || state.ProjectContext == nil || state.DesktopCloudRun == nil || result.StageEventLogRef == nil {
-		return current
+		return adaptiveObservedSuccessorEvidence{URL: current}
 	}
 	var descriptor *model.DirectArtifact
 	for index := range state.DesktopCloudRun.DirectArtifacts {
@@ -163,15 +174,15 @@ func (s *Service) adaptiveObservedSuccessorURL(ctx context.Context, projectID st
 		}
 	}
 	if descriptor == nil {
-		return current
+		return adaptiveObservedSuccessorEvidence{URL: current}
 	}
 	download, err := s.DownloadDirectArtifact(ctx, projectID, DirectArtifactDownloadRequest{JobID: result.CloudJobID, Artifact: *descriptor})
 	if err != nil || !download.ChecksumVerified {
-		return current
+		return adaptiveObservedSuccessorEvidence{URL: current}
 	}
 	file, err := os.Open(download.LocalPath)
 	if err != nil {
-		return current
+		return adaptiveObservedSuccessorEvidence{URL: current}
 	}
 	defer file.Close()
 	events := make([]model.StageExecutionEvent, 0, 64)
@@ -184,9 +195,75 @@ func (s *Service) adaptiveObservedSuccessorURL(ctx context.Context, projectID st
 		}
 	}
 	if scanner.Err() != nil {
-		return current
+		return adaptiveObservedSuccessorEvidence{URL: current}
 	}
-	return selectObservedSuccessorURL(state.ProjectContext, current, events)
+	return adaptiveObservedSuccessorEvidence{URL: selectObservedSuccessorURL(state.ProjectContext, current, events), Events: events}
+}
+
+func insertPendingAdaptiveContinuation(repair, source *model.DemoWorkflowGraph, events []model.StageExecutionEvent, observedURL string) (bool, error) {
+	if repair == nil || source == nil || len(repair.Nodes) == 0 {
+		return false, nil
+	}
+	actionStarted, skipped := map[string]bool{}, map[string]bool{}
+	for _, event := range events {
+		switch event.EventType {
+		case model.StageExecutionEventActionStarted, model.StageExecutionEventActionCompleted, model.StageExecutionEventActionEffectCommitted:
+			actionStarted[event.NodeID] = true
+		case model.StageExecutionEventStepSatisfied:
+			if event.HarnessDecision != nil && event.HarnessDecision.Kind == model.HarnessDecisionSkip {
+				skipped[event.NodeID] = true
+			}
+		}
+	}
+	var candidate *model.GraphNode
+	for _, node := range source.Nodes {
+		if node == nil || node.ActionSpec == nil || actionStarted[node.ID] || !skipped[node.ID] {
+			continue
+		}
+		if value, _ := node.ActionSpec.Parameters["action_recipe"].(string); value != "continue_execution" {
+			continue
+		}
+		candidate = node
+	}
+	if candidate == nil {
+		return false, nil
+	}
+	encoded, err := json.Marshal(candidate)
+	if err != nil {
+		return false, err
+	}
+	var pending model.GraphNode
+	if err := json.Unmarshal(encoded, &pending); err != nil {
+		return false, err
+	}
+	pending.Type = model.GraphNodeTypeAction
+	pending.PageRef = observedURL
+	if pending.ActionSpec.Target.URL != "" {
+		pending.ActionSpec.Target.URL = observedURL
+	}
+	for index := range pending.Validations {
+		if pending.Validations[index].Kind == "url_matches" {
+			pending.Validations[index].Target.URL = observedURL
+			pending.Validations[index].Expected = observedURL
+		}
+	}
+	if pending.InteractionContract != nil {
+		pending.InteractionContract.ReplayPolicy = model.InteractionReplayOnceEffect
+		pending.InteractionContract.ActionTarget = pending.ActionSpec.Target
+	}
+	if pending.Metadata == nil {
+		pending.Metadata = map[string]any{}
+	}
+	pending.Metadata["adaptive_pending_continuation"] = true
+	pending.Metadata["runtime_adaptive"] = true
+	pending.Metadata["non_destructive"] = true
+	pending.Metadata["replay_policy"] = string(model.InteractionReplayOnceEffect)
+	repair.Nodes = append([]*model.GraphNode{repair.Nodes[0], &pending}, repair.Nodes[1:]...)
+	repair.Edges = make([]*model.GraphEdge, 0, len(repair.Nodes)-1)
+	for index := 1; index < len(repair.Nodes); index++ {
+		repair.Edges = append(repair.Edges, &model.GraphEdge{ID: fmt.Sprintf("edge_adaptive_reconcile_%02d", index), FromNode: repair.Nodes[index-1].ID, ToNode: repair.Nodes[index].ID, Condition: "validated", Priority: index})
+	}
+	return true, nil
 }
 
 func selectObservedSuccessorURL(project *model.ProjectContext, current string, events []model.StageExecutionEvent) string {

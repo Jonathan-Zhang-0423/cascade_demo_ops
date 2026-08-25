@@ -167,6 +167,33 @@ func TestSelectObservedSuccessorURLPrefersConcreteEntityBeforeWorkspaceDrift(t *
 	}
 }
 
+func TestInsertPendingAdaptiveContinuationRestoresOnlySkippedUnstartedEffect(t *testing.T) {
+	started := &model.GraphNode{ID: "continue_one", Type: model.GraphNodeTypeAction, ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "continue_execution"}}}
+	pending := &model.GraphNode{ID: "continue_two", Type: model.GraphNodeTypeAction, PageRef: "https://app.example.com/workspace", ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "continue_execution"}}, InteractionContract: &model.InteractionContract{SchemaVersion: model.InteractionContractSchemaVersion, ContractID: "pending", ReplayPolicy: model.InteractionReplayOnceEffect}}
+	source := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/workspace")
+	source.Nodes = []*model.GraphNode{started, pending}
+	resume := &model.GraphNode{ID: "resume", Type: model.GraphNodeTypeStart, ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate}}
+	verify := &model.GraphNode{ID: "verify", Type: model.GraphNodeTypeEnd, ActionSpec: &model.GraphAction{Type: model.GraphActionInspect}}
+	repair := model.NewDemoWorkflowGraph("repair", "project", "https://app.example.com/entity/runtime-42")
+	repair.Nodes = []*model.GraphNode{resume, verify}
+	events := []model.StageExecutionEvent{
+		{NodeID: "continue_one", EventType: model.StageExecutionEventActionStarted},
+		{NodeID: "continue_two", EventType: model.StageExecutionEventStepSatisfied, HarnessDecision: &model.HarnessDecision{Kind: model.HarnessDecisionSkip}},
+	}
+	inserted, err := insertPendingAdaptiveContinuation(repair, source, events, "https://app.example.com/entity/runtime-42")
+	if err != nil || !inserted {
+		t.Fatalf("pending continuation was not restored: inserted=%t err=%v", inserted, err)
+	}
+	if len(repair.Nodes) != 3 || repair.Nodes[1].ID != "continue_two" || repair.Nodes[1].PageRef != "https://app.example.com/entity/runtime-42" {
+		t.Fatalf("unexpected reconciliation graph: %+v", repair.Nodes)
+	}
+	for _, node := range repair.Nodes {
+		if node.ID == "continue_one" {
+			t.Fatal("an already-started continuation effect was restored")
+		}
+	}
+}
+
 func TestPrependReusableSessionSetupRestoresOnlyApprovedAuthentication(t *testing.T) {
 	evidence := model.EvidenceRef{ID: "evidence_login_form", Kind: "page_snapshot", ArtifactID: "login-form"}
 	sourceGraph := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/login")

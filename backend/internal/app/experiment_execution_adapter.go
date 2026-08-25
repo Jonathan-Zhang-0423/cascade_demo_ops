@@ -184,7 +184,12 @@ func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Con
 		return &experiment.AdapterError{Code: "adaptive_reconciliation_upload_failed", Phase: "reconcile_observed_state", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{sourceJobID}, Cause: err}
 	}
 	jobID := upload.Receipt.JobID
-	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "resume_observe_only", Summary: "只观察续接任务已启动；不会执行创建或提交", EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
+	phase, summary := "resume_observe_only", "只观察续接任务已启动；不会执行创建或提交"
+	if prepared.PendingContinuation {
+		phase = "resume_pending_effect"
+		summary = "续接任务将执行原审批中曾跳过且从未启动的后继 effect；不会创建或提交新实体"
+	}
+	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: phase, Summary: summary, EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
 		return err
 	}
 	status, err := a.waitForDirectResult(ctx, projectID, jobID, request.ObservationPlan, emit)
