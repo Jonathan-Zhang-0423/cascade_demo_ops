@@ -89,18 +89,23 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 	if err != nil {
 		return &experiment.AdapterError{Code: "interaction_contract_compile_failed", Phase: "plan_review", State: experiment.RunStateFailed, Retryable: false, Cause: err}
 	}
-	input := orchestrator.UserInput{
-		Mode: model.AppModeWeb, ProductURL: request.TargetURL, ProductDescription: request.BuildPrompt,
-		TargetDurationSec: 105, TargetAudience: request.ProductSpec.Audience, BrandTone: request.ProductSpec.VisualDirection.Theme,
-		MustShow: interactionSemanticGoals(request.InteractionPlan), MustNotShow: append([]string{}, request.ProductSpec.ForbiddenOutcomes...),
-		InteractionContracts: interactionContracts,
-		AllowedDomains:       []string{parsed.Hostname()}, DemoCredentialRef: request.CredentialRef,
-		WorkflowExecution: &model.WorkflowExecutionHints{
-			TaskPackID: request.WorkflowTemplateID, RequiresFreshEntity: true, EntityName: request.ProjectName,
-			PrimaryInputSemantic: "product_spec", DirectExecution: true, RequiresSubmission: true, ObserveAsyncResult: true,
-		},
+	var prepared ProductRunPrepareResult
+	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+		prepared, err = a.service.prepareAdaptiveExperimentRun(ctx, request, interactionContracts)
+	} else {
+		input := orchestrator.UserInput{
+			Mode: model.AppModeWeb, ProductURL: request.TargetURL, ProductDescription: request.BuildPrompt,
+			TargetDurationSec: 105, TargetAudience: request.ProductSpec.Audience, BrandTone: request.ProductSpec.VisualDirection.Theme,
+			MustShow: interactionSemanticGoals(request.InteractionPlan), MustNotShow: append([]string{}, request.ProductSpec.ForbiddenOutcomes...),
+			InteractionContracts: interactionContracts,
+			AllowedDomains:       []string{parsed.Hostname()}, DemoCredentialRef: request.CredentialRef,
+			WorkflowExecution: &model.WorkflowExecutionHints{
+				TaskPackID: request.WorkflowTemplateID, RequiresFreshEntity: true, EntityName: request.ProjectName,
+				PrimaryInputSemantic: "product_spec", DirectExecution: true, RequiresSubmission: true, ObserveAsyncResult: true,
+			},
+		}
+		prepared, err = a.service.PrepareProductRun(ctx, CloudLifecycleRequest{UserInput: &input})
 	}
-	prepared, err := a.service.PrepareProductRun(ctx, CloudLifecycleRequest{UserInput: &input})
 	if err != nil || prepared.State == nil || prepared.Build == nil || prepared.Build.Package.ConfidenceSummary == nil {
 		return &experiment.AdapterError{Code: "execution_package_planning_failed", Phase: "plan_review", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
 	}

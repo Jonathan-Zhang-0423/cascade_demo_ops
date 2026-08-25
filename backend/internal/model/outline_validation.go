@@ -57,14 +57,16 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 			return &OutlineConsistencyError{Code: "selector_route_provenance_mismatch", NodeID: step.NodeID, Reason: err.Error()}
 		}
 		if stageRequiresAuthenticationContext(step, stage, outline) {
-			if !stageHasLoginEntryEvidence(step, stage, outline) {
-				return &OutlineConsistencyError{Code: "login_entry_evidence_missing", NodeID: step.NodeID, Reason: "does not bind the approved authentication entry route to formal page-scan evidence"}
-			}
-			if !stageHasVerifiedAuthenticationContext(step, stage, outline) {
-				return &OutlineConsistencyError{Code: "authentication_context_unverified", NodeID: step.NodeID, Reason: "does not prove an authentication page and password-bearing authentication form, or includes marketing email semantics"}
-			}
-			if !stageHasLoginSuccessValidation(step, stage, outline) {
-				return &OutlineConsistencyError{Code: "login_success_validation_missing", NodeID: step.NodeID, Reason: "requires a post-login route assertion bound to formal browser-scan evidence, or that route plus a formally observed authenticated-page element assertion"}
+			if !runtimeAdaptiveAuthenticationBootstrap(step, stage, outline) {
+				if !stageHasLoginEntryEvidence(step, stage, outline) {
+					return &OutlineConsistencyError{Code: "login_entry_evidence_missing", NodeID: step.NodeID, Reason: "does not bind the approved authentication entry route to formal page-scan evidence"}
+				}
+				if !stageHasVerifiedAuthenticationContext(step, stage, outline) {
+					return &OutlineConsistencyError{Code: "authentication_context_unverified", NodeID: step.NodeID, Reason: "does not prove an authentication page and password-bearing authentication form, or includes marketing email semantics"}
+				}
+				if !stageHasLoginSuccessValidation(step, stage, outline) {
+					return &OutlineConsistencyError{Code: "login_success_validation_missing", NodeID: step.NodeID, Reason: "requires a post-login route assertion bound to formal browser-scan evidence, or that route plus a formally observed authenticated-page element assertion"}
+				}
 			}
 		}
 		if step.RuntimeAdaptive {
@@ -109,6 +111,49 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 		}
 	}
 	return nil
+}
+
+// runtimeAdaptiveAuthenticationBootstrap is the site-neutral admission path
+// for a credential-bound session whose concrete login controls can only be
+// observed inside the isolated execution browser. It accepts no selector
+// guesses: the Worker must discover the form at runtime and still prove a
+// required route transition away from the authentication entry.
+func runtimeAdaptiveAuthenticationBootstrap(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) bool {
+	if !step.RuntimeAdaptive || !stage.RuntimeAdaptive || !outline.RuntimeAdaptive || !stageHasSecretRef(step, stage) {
+		return false
+	}
+	if firstPrimarySelector(step, stage, outline) != "" {
+		return false
+	}
+	for _, name := range append(append([]string{}, targetContractNames(step.TargetContract)...), append(targetContractNames(stage.TargetContract), targetContractNames(outline.TargetContract)...)...) {
+		if marketingAuthenticationName(name) {
+			return false
+		}
+	}
+	authRoute := firstNonEmptyOutlineRoute(step.PageTarget.URL, stage.EntryRoute, outline.Route)
+	if authRoute == "" {
+		return false
+	}
+	for _, validation := range step.Validations {
+		if !validation.Required || validation.Kind != "url_matches" {
+			continue
+		}
+		target := strings.TrimSpace(validation.Target.URL)
+		if target == "" {
+			target = strings.TrimSpace(stringExpected(validation.Expected))
+		}
+		if target != "" && !routesEquivalent(target, authRoute) {
+			return true
+		}
+	}
+	return false
+}
+
+func targetContractNames(contract *BrowserAgentTargetContract) []string {
+	if contract == nil {
+		return nil
+	}
+	return contract.AllowedNames
 }
 
 func validateActionComponentBinding(step ScriptStep, stage StageApprovalStage, outline BrowserAgentOutlineStage) error {

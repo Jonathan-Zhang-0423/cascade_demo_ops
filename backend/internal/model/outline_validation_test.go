@@ -45,9 +45,18 @@ func TestValidateBrowserAgentOutlineConsistencyRejectsWorkspaceWithoutCredential
 	assertOutlineConsistencyCode(t, bundle, "session_auth_evidence_missing")
 }
 
-func TestValidateBrowserAgentOutlineConsistencyRejectsRuntimeAdaptiveLoginWithoutPageEvidence(t *testing.T) {
+func TestValidateBrowserAgentOutlineConsistencyAcceptsSelectorFreeRuntimeAdaptiveLoginBootstrap(t *testing.T) {
 	bundle := runtimeAdaptiveOutlineBundleForTest()
 	clearSelectorProvenanceForTest(bundle)
+	if err := ValidateBrowserAgentOutlineConsistency(bundle); err != nil {
+		t.Fatalf("selector-free runtime authentication bootstrap should be observed by the isolated worker: %v", err)
+	}
+}
+
+func TestValidateBrowserAgentOutlineConsistencyRejectsRuntimeAdaptiveLoginWithoutSuccessTransition(t *testing.T) {
+	bundle := runtimeAdaptiveOutlineBundleForTest()
+	clearSelectorProvenanceForTest(bundle)
+	bundle.PlanJSON.Steps[0].Validations = nil
 	assertOutlineConsistencyCode(t, bundle, "login_entry_evidence_missing")
 }
 
