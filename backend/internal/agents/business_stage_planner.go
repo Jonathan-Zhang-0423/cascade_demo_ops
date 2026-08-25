@@ -78,7 +78,9 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 	// normalized intent graph because that graph also contains action kinds,
 	// selector aliases, and other generated metadata that may follow a phrase
 	// such as "new project".
-	projectName := intentProjectName(businessStageExplicitRequirementText(project, brief, report))
+	explicitRequirementText := businessStageExplicitRequirementText(project, brief, report)
+	projectName := intentProjectName(explicitRequirementText)
+	followUpRequirement := intentFollowUpRequirement(explicitRequirementText)
 	wantsNewProject := containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") || projectName != ""
 	if wantsNewProject {
 		builder.addStage(stageSpec{
@@ -163,6 +165,42 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			durationMS:    durationMSForIntentKeywords(intentText, "启动", "开始", "提交", "启动构建", "开始构建", "run build", "start build", "submit", "run", "start"),
 			keywords:      []string{"agent", "智能体", "开始构建", "启动构建", "实际构建", "生成", "构建", "build", "run", "start", "generate"},
 			capture:       []string{"启动构建按钮", "构建开始状态"},
+		})
+	}
+
+	if followUpRequirement != "" && !strings.EqualFold(followUpRequirement, projectName) {
+		builder.addStage(stageSpec{
+			id:            "followup_requirement_input",
+			kind:          model.BusinessStageKindBusinessInput,
+			title:         "补充完整构建需求",
+			objective:     "在项目页的后续用户输入框填写用户批准的完整构建需求。",
+			actionType:    string(model.GraphActionFill),
+			actionLabel:   "填写完整构建需求",
+			inputSemantic: "followup_build_requirement",
+			inputValue:    followUpRequirement,
+			successState:  "后续用户输入框已完整填写批准的构建需求。",
+			routeState:    model.BusinessRouteStateProjectDetail,
+			entryRoute:    firstNonEmpty(routeHints.projectDetail, routeHints.buildRunning),
+			expectedRoute: firstNonEmpty(routeHints.projectDetail, routeHints.buildRunning),
+			durationMS:    durationMSForIntentKeywords(intentText, "完整需求", "补充需求", "后续用户输入框", "follow-up requirement"),
+			keywords:      []string{"input-chat", "chat input", "用户输入框", "后续输入框", "完整需求", "补充需求", followUpRequirement},
+			capture:       []string{"后续用户输入框", "已填写的完整构建需求"},
+		})
+		builder.addStage(stageSpec{
+			id:            "followup_requirement_submit",
+			kind:          model.BusinessStageKindBusinessSubmit,
+			title:         "提交完整构建需求",
+			objective:     "提交刚刚填写的完整构建需求，并验证真实构建过程继续运行。",
+			actionType:    string(model.GraphActionClick),
+			actionLabel:   "提交完整构建需求",
+			inputSemantic: "followup_build_requirement_submit",
+			successState:  "完整构建需求已提交，页面出现构建进度、日志或项目状态。",
+			routeState:    model.BusinessRouteStateBuildRunning,
+			entryRoute:    firstNonEmpty(routeHints.projectDetail, routeHints.buildRunning),
+			expectedRoute: firstNonEmpty(routeHints.buildRunning, routeHints.projectDetail),
+			durationMS:    durationMSForIntentKeywords(intentText, "提交完整需求", "提交需求", "发送需求", "submit requirement"),
+			keywords:      []string{"button-send-chat", "send chat", "提交需求", "发送需求", "send", "submit"},
+			capture:       []string{"提交需求按钮", "构建继续运行状态"},
 		})
 	}
 
@@ -685,10 +723,12 @@ func businessStageIsApprovedNonDestructive(spec stageSpec) bool {
 		return true
 	}
 	allowedAction := map[string]model.GraphActionType{
-		"new_project_entry":  model.GraphActionClick,
-		"project_name_input": model.GraphActionFill,
-		"select_build_mode":  model.GraphActionClick,
-		"start_agent_build":  model.GraphActionClick,
+		"new_project_entry":           model.GraphActionClick,
+		"project_name_input":          model.GraphActionFill,
+		"select_build_mode":           model.GraphActionClick,
+		"start_agent_build":           model.GraphActionClick,
+		"followup_requirement_input":  model.GraphActionFill,
+		"followup_requirement_submit": model.GraphActionClick,
 	}
 	want, ok := allowedAction[spec.id]
 	if !ok || model.GraphActionType(spec.actionType) != want {
@@ -776,6 +816,10 @@ func (s businessTargetSource) targetsForStage(spec stageSpec) []model.BusinessTa
 func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.BusinessTargetCandidate {
 	preferredTestID := ""
 	switch spec.id {
+	case "followup_requirement_input":
+		preferredTestID = "input-chat"
+	case "followup_requirement_submit":
+		preferredTestID = "button-send-chat"
 	case "final_observe":
 		preferredTestID = "build-result-card"
 	case "playable_preview", "verify_playable_controls":
@@ -1071,6 +1115,10 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 			containsAnyNormalized(selectorText, "button-new-project", "new-project-button", "new-project-entry", "create-project-entry")
 	case "project_name_input":
 		return containsAnyNormalized(text, "project name", "project-name", "project idea", "project-idea", "project prompt", "project-prompt", "项目名称", "项目名", "项目需求", "需求描述", "idea", "prompt", spec.inputValue)
+	case "followup_requirement_input":
+		return containsAnyNormalized(text, "input-chat", "chat input", "chat-input", "用户输入框", "后续输入框", "补充需求", "完整需求", spec.inputValue)
+	case "followup_requirement_submit":
+		return containsAnyNormalized(text, "button-send-chat", "send chat", "send-chat", "提交需求", "发送需求")
 	case "select_build_mode":
 		return containsAnyNormalized(text, "build mode", "build-mode", "builder mode", "mode plan", "mode-plan", "plan mode", "plan-mode", "构建模式", "规划模式", "计划模式")
 	case "start_agent_build":
@@ -1103,6 +1151,9 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 func businessStageMatchesTraceKind(spec stageSpec, trace model.FeatureGoalTrace) bool {
 	switch spec.kind {
 	case model.BusinessStageKindBusinessInput:
+		if spec.id == "followup_requirement_input" {
+			return containsAnyNormalized(trace.IntentLabel, spec.inputValue, "完整需求", "补充需求", "后续用户输入框")
+		}
 		return containsAnyNormalized(trace.IntentLabel, spec.inputValue, "项目名称", "project name")
 	case model.BusinessStageKindModeSelection:
 		return containsAnyNormalized(trace.IntentLabel, "构建模式", "build mode")
@@ -1385,6 +1436,31 @@ func businessStageExplicitRequirementText(project *model.ProjectContext, brief *
 	// line boundaries so numbered formal instructions cannot be concatenated
 	// into the value of the preceding fill instruction.
 	return strings.Join(parts, "\n")
+}
+
+var followUpRequirementPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?:输入并提交|填写并提交|输入|填写|提交)(?:后续|补充)?(?:的)?(?:完整)?(?:构建)?需求\s*[：:]\s*[“"']([^”"'\n]{1,1000})[”"']`),
+	regexp.MustCompile(`(?:再|随后|然后)\s*(?:输入并)?提交\s*[“"']([^”"'\n]{1,1000})[”"']`),
+	regexp.MustCompile(`(?:输入并提交|填写并提交)(?:后续|补充)?(?:的)?(?:完整)?(?:构建)?需求\s*[：:]\s*([^\n]{1,1000})`),
+}
+
+func intentFollowUpRequirement(text string) string {
+	text = strings.TrimSpace(text)
+	for _, pattern := range followUpRequirementPatterns {
+		for _, match := range pattern.FindAllStringSubmatch(text, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			candidate := strings.Trim(strings.TrimSpace(match[1]), `"'“”‘’`)
+			if candidate == "" || len([]rune(candidate)) > 1000 || containsAnyNormalized(candidate,
+				"password", "passwd", "secret", "token", "api key", "cookie", "密码", "口令", "密钥", "令牌",
+			) {
+				continue
+			}
+			return candidate
+		}
+	}
+	return ""
 }
 
 func intentIsObservationOnly(intentText string) bool {

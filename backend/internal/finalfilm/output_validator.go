@@ -31,7 +31,7 @@ type finalFilmRenderManifest struct {
 }
 
 func validateFinalFilmOutput(ctx context.Context, renderer Renderer, result executor.RenderResult, profile model.EditorRenderProfile, plan model.DemoEditPlan, requireTestNarration bool, checkedAt time.Time) (model.FinalFilmOutputValidation, error) {
-	validation := model.FinalFilmOutputValidation{Status: "failed", CheckedAt: checkedAt.UTC()}
+	validation := model.FinalFilmOutputValidation{Status: "failed", DeliveryStatus: "incomplete", QualityTier: "blocked", CheckedAt: checkedAt.UTC()}
 	fail := func(err error) (model.FinalFilmOutputValidation, error) {
 		validation.Error = err.Error()
 		return validation, err
@@ -97,6 +97,8 @@ func validateFinalFilmOutput(ctx context.Context, renderer Renderer, result exec
 		}
 	}
 	validation.Status = "passed"
+	validation.DeliveryStatus = "complete"
+	validation.QualityTier = "enterprise"
 	return validation, nil
 }
 

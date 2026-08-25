@@ -598,8 +598,9 @@ var intentProjectInputValuePatterns = []*regexp.Regexp{
 	// the value capture narrow: the action verb precedes the field and the
 	// value follows an explicit `value:`/`value is` marker.
 	regexp.MustCompile(`(?i)\b(?:fill|enter|type)\s+(?:the\s+)?project[\s_-]*(?:name|idea|prompt)\s*(?:field|input|textarea)?\s+with\s+(?:the\s+)?(?:exact\s+)?value\s*(?:is|:|=)\s*[“”"']?([^“”"'，。；;,.\n]{1,512})`),
-	regexp.MustCompile(`(?:项目(?:名称|名|需求)|project\s*(?:name|idea|prompt)|今天你想做什么)[^，。；;,\n]{0,64}?(?:输入|填写|填入|fill)\s*(?:为|是|[:：=])?\s*[“”"']?([^“”"'，。；;,\n]{1,512})`),
+	regexp.MustCompile(`(?:项目(?:名称|名|需求)|project\s*(?:name|idea|prompt)|今天你想做什么)[^，。；;,\n]{0,64}?(?:中|内)?(?:输入|填写|填入|fill)\s*(?:为|是|[:：=])?\s*[“”"']?([^“”"'，。；;,\n]{1,512})`),
 	regexp.MustCompile(`(?:输入|填写|填入)\s*(?:项目(?:名称|名|需求)|project\s*(?:name|idea|prompt))\s*(?:为|是|[:：=])?\s*[“”"']?([^“”"'，。；;,\n]{1,512})`),
+	regexp.MustCompile(`(?:在|于)\s*[“”"']?(?:今天你想做什么(?:？|\?)?)[“”"']?\s*(?:输入框)?(?:中|内)?\s*(?:输入|填写|填入)\s*[“”"']?([^“”"'，。；;,\n]{1,512})`),
 }
 
 var intentDurationOnlyPattern = regexp.MustCompile(`^\d+(?:\.\d+)?\s*(?:秒|s|sec|secs|second|seconds)$`)
@@ -647,6 +648,7 @@ func intentProjectName(intentText string) string {
 func normalizeIntentProjectNameCandidate(value string) string {
 	candidate := strings.Trim(strings.TrimSpace(value), `"'“”‘’()（）:：=-`)
 	if candidate == "" || intentDurationOnlyPattern.MatchString(candidate) || containsAnyNormalized(candidate,
+		"框出现", "输入框出现", "文本框出现", "field appears", "input appears",
 		"入口", "流程", "页面", "步骤", "entry", "flow", "page", "step",
 		"新建项目", "创建项目", "新增项目", "new project", "create project",
 		"构建模式", "build mode", "builder mode", "等待", "wait", "agent", "智能体",

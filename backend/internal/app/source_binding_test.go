@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"cascade-demoops/backend/internal/config"
@@ -124,6 +125,96 @@ func TestDecideSourceBindingPersistsMixedConfirmationWithoutReanalysis(t *testin
 	persisted, err := states.Load(ctx, state.ProjectID)
 	if err != nil || persisted.SourceBinding.Status != model.ProductSourceBindingConfirmed || persisted.SourceBinding.Decision != "confirm_mixed" {
 		t.Fatalf("mixed confirmation was not saved: state=%+v err=%v", persisted, err)
+	}
+}
+
+func TestAssistantRerunPreservesConfirmedMixedSourceBinding(t *testing.T) {
+	ctx := context.Background()
+	states := store.NewMemoryStateStore()
+	service, err := NewService(config.AppRuntimeConfig{DataRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := sourceBindingDecisionState("project-confirmed-rerun", "assessment-confirmed-rerun")
+	state.SourceBinding.Status = model.ProductSourceBindingConfirmed
+	state.SourceBinding.Decision = "confirm_mixed"
+	state.SourceBinding.EffectiveMode = model.ProductSourceModeMixed
+	state.ProjectContext.SourceBinding = state.SourceBinding
+	if err := states.Save(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	input := orchestrator.UserInput{ProjectID: state.ProjectID}
+	if err := service.preserveSourceBindingDecisionForRerun(ctx, state.ProjectID, &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.SourceBindingDecision != "confirm_mixed" || input.SourceBindingHash != state.SourceBinding.AssessmentHash {
+		t.Fatalf("App rerun lost the persisted source-binding authorization: %+v", input)
+	}
+}
+
+func TestAssistantRerunRejectsInconsistentMixedSourceBinding(t *testing.T) {
+	ctx := context.Background()
+	states := store.NewMemoryStateStore()
+	service, err := NewService(config.AppRuntimeConfig{DataRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := sourceBindingDecisionState("project-inconsistent-rerun", "assessment-inconsistent-rerun")
+	state.SourceBinding.Status = model.ProductSourceBindingUnverified
+	state.SourceBinding.Decision = "confirm_mixed"
+	state.SourceBinding.EffectiveMode = model.ProductSourceModePageOnly
+	state.ProjectContext.SourceBinding = state.SourceBinding
+	if err := states.Save(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	input := orchestrator.UserInput{ProjectID: state.ProjectID}
+	if err := service.preserveSourceBindingDecisionForRerun(ctx, state.ProjectID, &input); err == nil {
+		t.Fatal("an unconfirmed mixed-source decision must not be copied into an App rerun")
+	}
+	if input.SourceBindingDecision != "" || input.SourceBindingHash != "" {
+		t.Fatalf("inconsistent source-binding data leaked into the rerun input: %+v", input)
+	}
+}
+
+func TestExistingProjectRegenerationFailurePreservesLastValidState(t *testing.T) {
+	ctx := context.Background()
+	states := store.NewMemoryStateStore()
+	service, err := NewService(config.AppRuntimeConfig{DataRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := sourceBindingDecisionState("project-atomic-rerun", "sha256:assessment-atomic-rerun")
+	state.SourceBinding.Status = model.ProductSourceBindingConfirmed
+	state.SourceBinding.Decision = "confirm_mixed"
+	state.SourceBinding.EffectiveMode = model.ProductSourceModeMixed
+	state.ProjectContext.SourceBinding = state.SourceBinding
+	state.Status = orchestrator.FlowStatusAwaitingHuman
+	state.CurrentNode = orchestrator.NodeHumanApprove
+	if err := states.Save(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.GenerateExecutionPackage(ctx, orchestrator.UserInput{
+		ProjectID:             state.ProjectID,
+		Mode:                  model.AppModeDesktop,
+		LocalRepoPath:         filepath.Join(t.TempDir(), "missing-repository"),
+		ProductDescription:    "regeneration must fail without replacing the prior state",
+		TargetAudience:        "test",
+		SourceBindingDecision: "confirm_mixed",
+		SourceBindingHash:     state.SourceBinding.AssessmentHash,
+	})
+	if err == nil {
+		t.Fatal("expected regeneration to fail for a missing local repository")
+	}
+	persisted, loadErr := states.Load(ctx, state.ProjectID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if persisted != state || persisted.Status != orchestrator.FlowStatusAwaitingHuman || persisted.CurrentNode != orchestrator.NodeHumanApprove {
+		t.Fatalf("failed regeneration replaced the last valid state: %+v", persisted)
+	}
+	if persisted.SourceBinding == nil || persisted.SourceBinding.Status != model.ProductSourceBindingConfirmed || persisted.SourceBinding.Decision != "confirm_mixed" || persisted.SourceBinding.EffectiveMode != model.ProductSourceModeMixed {
+		t.Fatalf("failed regeneration lost confirmed source binding: %+v", persisted.SourceBinding)
 	}
 }
 

@@ -601,6 +601,43 @@ func TestDevHTTPBridgeDemoCredentialRejectsUnsafeRef(t *testing.T) {
 	}
 }
 
+func TestReadLocalDemoCredentialPrefersRequestedVaultRefOverDevFallback(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	t.Setenv("DEMO_USER", "xxx")
+	t.Setenv("DEMO_PASS", "xxx")
+	server.readDemoCredential = func(name string) (credentialstore.DemoCredential, error) {
+		if name != "approved-login" {
+			return credentialstore.DemoCredential{}, errors.New("credential not found")
+		}
+		return credentialstore.DemoCredential{Username: "vault-user@example.test", Password: "vault-password"}, nil
+	}
+
+	credential, err := server.readLocalDemoCredential("approved-login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.Username != "vault-user@example.test" || credential.Password != "vault-password" {
+		t.Fatal("dev fallback overrode the requested vault credential")
+	}
+}
+
+func TestReadLocalDemoCredentialUsesDevFallbackOnlyWhenVaultUnavailable(t *testing.T) {
+	server := newTestDevHTTPServer(t)
+	t.Setenv("DEMO_USER", "fallback@example.test")
+	t.Setenv("DEMO_PASS", "fallback-password")
+	server.readDemoCredential = func(string) (credentialstore.DemoCredential, error) {
+		return credentialstore.DemoCredential{}, errors.New("credential not found")
+	}
+
+	credential, err := server.readLocalDemoCredential("missing-login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.Username != "fallback@example.test" || credential.Password != "fallback-password" {
+		t.Fatal("dev fallback was not used after the requested vault credential was unavailable")
+	}
+}
+
 func TestDevHTTPBridgeRejectsForeignOriginBeforeCredentialMutation(t *testing.T) {
 	server := newTestDevHTTPServer(t)
 	called := false

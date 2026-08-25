@@ -219,6 +219,12 @@ func validateBrowserAgentEvidenceMaster(ctx context.Context, service DeliveryRen
 	if probe.DurationMS <= 0 || strings.TrimSpace(probe.VideoCodec) == "" {
 		return fmt.Errorf("recording_evidence_not_decodable: codec=%q duration_ms=%d", probe.VideoCodec, probe.DurationMS)
 	}
+	// Browser Agent evidence is the source master for the editor. Keep its
+	// capture cadence deterministic so the final 30fps delivery does not hide
+	// a variable-rate or unexpectedly slow source recording.
+	if probe.FPS > 0 && (probe.FPS < 29.75 || probe.FPS > 30.25) {
+		return fmt.Errorf("recording_evidence_fps_mismatch: got=%.3f want=30", probe.FPS)
+	}
 	return nil
 }
 

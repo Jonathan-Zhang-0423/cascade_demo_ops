@@ -90,6 +90,19 @@ const (
 	RecordingResultStatusFailed    RecordingResultStatus = "failed"
 )
 
+// RecordingResultClassification separates formal App runs from local or
+// controlled test evidence. It is intentionally small so reports cannot blur
+// fixture, manual, preflight, and formal Direct outcomes.
+type RecordingResultClassification string
+
+const (
+	RecordingResultClassificationFormalAppDirect     RecordingResultClassification = "formal_app_direct"
+	RecordingResultClassificationServerPreflight     RecordingResultClassification = "server_preflight"
+	RecordingResultClassificationFixtureWaiver       RecordingResultClassification = "fixture_waiver"
+	RecordingResultClassificationVisibleManualReview RecordingResultClassification = "visible_manual_review"
+	RecordingResultClassificationFailedLoginGate     RecordingResultClassification = "failed_login_gate"
+)
+
 type ResultDeliveryStatus string
 
 const (
@@ -541,26 +554,27 @@ func (d ApprovalSubjectDigestsSHA256) Empty() bool {
 }
 
 type RecordingResultPackage struct {
-	ResultID              string                    `json:"result_id"`
-	SourcePackageID       string                    `json:"source_package_id"`
-	CloudJobID            string                    `json:"cloud_job_id"`
-	SchemaVersion         string                    `json:"schema_version"`
-	Status                RecordingResultStatus     `json:"status"`
-	ExecutionTrace        *ExecutionTrace           `json:"execution_trace,omitempty"`
-	StepResults           []StepResult              `json:"step_results,omitempty"`
-	GeneratedAssets       []ArtifactRef             `json:"generated_assets,omitempty"`
-	VerificationReport    VerificationReport        `json:"verification_report"`
-	ExecutionRuntime      string                    `json:"execution_runtime,omitempty"`
-	ValidationReports     []ValidationReport        `json:"validation_reports,omitempty"`
-	ValidationRunReport   *ValidationRunReport      `json:"validation_run_report,omitempty"`
-	PatchLedger           []RuntimePatchLedgerEntry `json:"patch_ledger,omitempty"`
-	StageEventLogRef      *ArtifactRef              `json:"stage_event_log_ref,omitempty"`
-	FailureDiagnostic     *ScriptFailureDiagnostic  `json:"failure_diagnostic,omitempty"`
-	RepairRequest         *ScriptRepairRequest      `json:"repair_request,omitempty"`
-	GraphPatchSuggestions []GraphPatch              `json:"graph_patch_suggestions,omitempty"`
-	AuditTrail            CloudExecutionAuditTrail  `json:"audit_trail"`
-	Delivery              ResultDelivery            `json:"delivery"`
-	CreatedAt             time.Time                 `json:"created_at"`
+	ResultID              string                        `json:"result_id"`
+	SourcePackageID       string                        `json:"source_package_id"`
+	CloudJobID            string                        `json:"cloud_job_id"`
+	SchemaVersion         string                        `json:"schema_version"`
+	Status                RecordingResultStatus         `json:"status"`
+	Classification        RecordingResultClassification `json:"classification"`
+	ExecutionTrace        *ExecutionTrace               `json:"execution_trace,omitempty"`
+	StepResults           []StepResult                  `json:"step_results,omitempty"`
+	GeneratedAssets       []ArtifactRef                 `json:"generated_assets,omitempty"`
+	VerificationReport    VerificationReport            `json:"verification_report"`
+	ExecutionRuntime      string                        `json:"execution_runtime,omitempty"`
+	ValidationReports     []ValidationReport            `json:"validation_reports,omitempty"`
+	ValidationRunReport   *ValidationRunReport          `json:"validation_run_report,omitempty"`
+	PatchLedger           []RuntimePatchLedgerEntry     `json:"patch_ledger,omitempty"`
+	StageEventLogRef      *ArtifactRef                  `json:"stage_event_log_ref,omitempty"`
+	FailureDiagnostic     *ScriptFailureDiagnostic      `json:"failure_diagnostic,omitempty"`
+	RepairRequest         *ScriptRepairRequest          `json:"repair_request,omitempty"`
+	GraphPatchSuggestions []GraphPatch                  `json:"graph_patch_suggestions,omitempty"`
+	AuditTrail            CloudExecutionAuditTrail      `json:"audit_trail"`
+	Delivery              ResultDelivery                `json:"delivery"`
+	CreatedAt             time.Time                     `json:"created_at"`
 }
 
 // ValidateDirectConsistency enforces the App↔Gateway result binding after a
