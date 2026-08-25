@@ -61,15 +61,15 @@ func TestAdaptiveExperimentPackageCompilesWithoutCascadeFlow(t *testing.T) {
 	if got := len(prepared.Build.Package.ExecutableScriptBundle.PlanJSON.Steps); got < len(loaded.InteractionPlan.Steps) {
 		t.Fatalf("compiled steps=%d interaction contracts=%d", got, len(loaded.InteractionPlan.Steps))
 	}
-	foundContinuation := false
+	foundContinuations := map[string]bool{}
 	for _, stage := range prepared.Build.Package.ExecutableScriptBundle.StageApprovalPlan.Stages {
-		if stage.NodeID != "business_stage_continue_prepared_execution" {
+		if stage.NodeID != "business_stage_continue_prepared_execution" && stage.NodeID != "business_stage_continue_prepared_execution_followup" {
 			continue
 		}
-		foundContinuation = stage.Interaction.Parameters["action_recipe"] == "continue_execution" && stage.Interaction.Parameters["optional_when_target_absent"] == "true" && stage.Interaction.Parameters["capture_result_surface_baseline"] == "true" && stage.Interaction.Parameters["target_wait_timeout_ms"] == "300000"
+		foundContinuations[stage.NodeID] = stage.Interaction.Parameters["action_recipe"] == "continue_execution" && stage.Interaction.Parameters["optional_when_target_absent"] == "true" && stage.Interaction.Parameters["capture_result_surface_baseline"] == "true" && stage.Interaction.Parameters["target_wait_timeout_ms"] == "300000"
 	}
-	if !foundContinuation {
-		t.Fatal("adaptive async package did not include the optional runtime execution continuation")
+	if !foundContinuations["business_stage_continue_prepared_execution"] || !foundContinuations["business_stage_continue_prepared_execution_followup"] {
+		t.Fatalf("adaptive async package did not include the bounded runtime execution continuation chain: %+v", foundContinuations)
 	}
 }
 

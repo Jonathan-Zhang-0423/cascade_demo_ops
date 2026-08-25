@@ -266,16 +266,20 @@ describe("runtime execution continuation", () => {
 	it("admits only a unique semantic continuation action", () => {
 		const continuation = runtimeExecutionContinuationScore("继续构建", "button", true, true);
 		const cancellation = runtimeExecutionContinuationScore("取消", "button", true, true);
+		const productControl = runtimeExecutionContinuationScore("开始游戏", "button", true, true);
 		expect(continuation).toBe(1);
 		expect(adaptiveTargetCandidateExecutable(continuation, cancellation)).toBe(true);
 		expect(cancellation).toBeLessThan(.85);
+		expect(productControl).toBeLessThan(.85);
 	});
 
 	it("keeps polling until a continuation appears or the result surface changes", () => {
-		expect(runtimeContinuationPollDecision(false, "welcome", "welcome", false)).toBe("observe");
-		expect(runtimeContinuationPollDecision(true, "welcome", "welcome", false)).toBe("act");
-		expect(runtimeContinuationPollDecision(false, "welcome", "product", false)).toBe("advance");
-		expect(runtimeContinuationPollDecision(false, "welcome", "welcome", true)).toBe("advance");
+		expect(runtimeContinuationPollDecision(false, "welcome", "welcome", false, false)).toBe("observe");
+		expect(runtimeContinuationPollDecision(true, "welcome", "welcome", false, true)).toBe("act");
+		expect(runtimeContinuationPollDecision(false, "welcome", "product", false, false)).toBe("advance");
+		expect(runtimeContinuationPollDecision(false, "welcome", "product", false, true)).toBe("observe");
+		expect(runtimeContinuationPollDecision(false, "welcome", "welcome", true, true)).toBe("advance");
+		expect(runtimeContinuationPollDecision(false, "welcome", "welcome", false, false, true)).toBe("advance");
 	});
 });
 

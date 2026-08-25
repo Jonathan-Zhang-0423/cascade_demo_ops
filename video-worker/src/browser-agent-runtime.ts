@@ -307,6 +307,7 @@ type BrowserAgentSession = {
 	visionPollEvidenceByNodeID: Map<string, EvidenceRef[]>;
 	visionVerdictsByNodeID: Map<string, BrowserVisualObservation[]>;
 	resultSurfaceBaselineDigest?: string;
+	runtimeContinuationEffectsCommitted: number;
   // A verified action may move an application from its entry route to a
   // newly-created result route. Subsequent non-navigation stages must keep
   // that live route instead of treating their planning-time entry route as a
@@ -449,6 +450,7 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 		visionPollArtifactsByNodeID: new Map(),
 		visionPollEvidenceByNodeID: new Map(),
 		visionVerdictsByNodeID: new Map(),
+		runtimeContinuationEffectsCommitted: 0,
     taskSecrets: validatedTaskSecrets(request.task_secrets),
   };
   await page.route("**/*", async (route: any) => {
@@ -707,8 +709,8 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
   const session = requiredSession(request.session_id);
   validateStage(request.stage);
   await ensureStageExecutionRoute(session, request.stage);
-  const action = request.stage.interactions[0];
-  await waitForObservationWindow(session.page, request.stage);
+	const action = request.stage.interactions[0];
+	await waitForObservationWindow(session.page, request.stage);
 	if (action && String(action.parameters?.action_recipe || "") === "continue_execution") {
 		if (booleanParameter(action.parameters, "capture_result_surface_baseline", false)) {
 			const existingSurface = await interactiveSurfaceTargetOnce(session.page);
@@ -726,7 +728,7 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
   let resolutionFailure = "";
   const resolutionAttempts: BrowserTargetResolutionAttempt[] = [];
   if (action && interactionRequiresResolvedTarget(action.kind)) {
-    try {
+	try {
       resolved = await resolveTarget(session.page, request.stage, action, false, resolutionAttempts);
 		targetGeometry = await captureTargetGeometry(session, request.stage, resolved, artifact.id);
 		if (!targetGeometry) {
@@ -1042,10 +1044,11 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   };
 }
 
-export function runtimeContinuationPollDecision(targetResolved: boolean, baselineDigest: string, currentDigest: string, deadlineReached: boolean): "act" | "advance" | "observe" {
+export function runtimeContinuationPollDecision(targetResolved: boolean, baselineDigest: string, currentDigest: string, deadlineReached: boolean, busy: boolean, idleResumeWithoutPriorEffect = false): "act" | "advance" | "observe" {
 	if (targetResolved) return "act";
-	if (baselineDigest && currentDigest && baselineDigest !== currentDigest) return "advance";
+	if (!busy && baselineDigest && currentDigest && baselineDigest !== currentDigest) return "advance";
 	if (deadlineReached) return "advance";
+	if (!busy && idleResumeWithoutPriorEffect) return "advance";
 	return "observe";
 }
 
@@ -1053,13 +1056,20 @@ async function waitForRuntimeExecutionContinuation(session: BrowserAgentSession,
 	const timeoutMS = Math.max(0, Math.min(300_000, Math.trunc(Number(interaction.parameters?.target_wait_timeout_ms) || 0)));
 	if (timeoutMS <= 0) return;
 	const pollMS = Math.max(1_000, Math.min(15_000, Math.trunc(Number(interaction.parameters?.target_poll_interval_ms) || 5_000)));
+	const requiredCommittedEffects = booleanParameter(interaction.parameters, "requires_prior_continuation_effect", false)
+		? Math.max(1, numericParameter(interaction.parameters, "continuation_chain_index", 2, 1, 8) - 1)
+		: 0;
+	const resumeGraceMS = numericParameter(interaction.parameters, "continuation_resume_grace_ms", 15_000, 0, 60_000);
+	const startedAt = Date.now();
 	const deadline = Date.now() + timeoutMS;
 	while (true) {
 		const attempts: BrowserTargetResolutionAttempt[] = [];
 		const target = await firstRuntimeExecutionContinuationLocator(session.page, stage, attempts);
 		const surface = session.resultSurfaceBaselineDigest ? await interactiveSurfaceTargetOnce(session.page) : undefined;
 		const currentDigest = surface ? await visualDigest(session.page, surface.digestTarget) : "";
-		const decision = runtimeContinuationPollDecision(Boolean(target), session.resultSurfaceBaselineDigest || "", currentDigest, Date.now() >= deadline);
+		const priorEffectMissing = session.runtimeContinuationEffectsCommitted < requiredCommittedEffects;
+		const idleResumeWithoutPriorEffect = priorEffectMissing && Date.now() - startedAt >= resumeGraceMS;
+		const decision = runtimeContinuationPollDecision(Boolean(target), session.resultSurfaceBaselineDigest || "", currentDigest, Date.now() >= deadline, await pageStillBusy(session.page), idleResumeWithoutPriorEffect);
 		if (decision !== "observe") return;
 		await session.page.waitForTimeout(Math.min(pollMS, Math.max(100, deadline - Date.now())));
 	}
@@ -1233,6 +1243,9 @@ async function executeInteraction(
 	const visualDigestBefore = trackVisualChange ? await pageVisualDigest(session.page) : "";
   if (interaction.kind === "click") {
     await resolved.locator.click({ timeout });
+	if (String(interaction.parameters?.action_recipe || "") === "continue_execution") {
+		session.runtimeContinuationEffectsCommitted += 1;
+	}
   } else if (interaction.kind === "fill") {
     if (interaction.input_ref && !interaction.secret_ref && interaction.value === undefined) throw new Error("browser_agent_input_ref_requires_resolver");
     const value = interaction.secret_ref ? requiredStageSecretValue(interaction.secret_ref, secretValues) : interaction.value || "";
@@ -1385,7 +1398,7 @@ export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, i
 export function runtimeExecutionContinuationScore(label: string, role: string, inPrimaryContainer: boolean, uniqueSemanticCandidate: boolean): number {
 	const normalized = String(label || "").trim().toLowerCase();
 	const allowedRole = role === "button" || role === "link";
-	const continuation = /continue|confirm|proceed|execute|build|generate|run|start|继续|确认|执行|构建|生成|开始|启动/.test(normalized);
+	const continuation = runtimeExecutionContinuationLabel(normalized);
 	const abort = /cancel|close|dismiss|back|stop|delete|remove|取消|关闭|返回|停止|删除|移除/.test(normalized);
 	return adaptiveTargetCandidateScore({
 		role_state: allowedRole && !abort ? 1 : 0,
@@ -1394,6 +1407,12 @@ export function runtimeExecutionContinuationScore(label: string, role: string, i
 		uniqueness: uniqueSemanticCandidate ? 1 : 0,
 		transition_feasibility: allowedRole && continuation && !abort ? 1 : 0,
 	});
+}
+
+function runtimeExecutionContinuationLabel(value: string): boolean {
+	const normalized = String(value || "").trim().toLowerCase();
+	if (/continue|confirm|proceed|execute|build|generate|继续|确认|执行|构建|生成/.test(normalized)) return true;
+	return /(?:run|start).*(?:task|job|build|generation|execution)|(?:task|job|build|generation|execution).*(?:run|start)|(?:开始|启动).*(?:任务|构建|生成|执行)|(?:任务|构建|生成|执行).*(?:开始|启动)/.test(normalized);
 }
 
 async function firstRuntimeExecutionContinuationLocator(page: any, stage: BrowserAgentWorkerStage, attempts: BrowserTargetResolutionAttempt[]): Promise<ResolvedTarget | undefined> {
@@ -1410,7 +1429,7 @@ async function firstRuntimeExecutionContinuationLocator(page: any, stage: Browse
 			inPrimaryContainer: Boolean(element.closest("main, article, section, [role='main'], [role='region']")),
 		})).catch(() => ({ role: "", label: "", inPrimaryContainer: false }));
 		if (forbiddenName(metadata.label, stage.target_contract.forbidden_names || [])) continue;
-		if (!/continue|confirm|proceed|execute|build|generate|run|start|继续|确认|执行|构建|生成|开始|启动/i.test(metadata.label)) continue;
+		if (!runtimeExecutionContinuationLabel(metadata.label)) continue;
 		values.push({ locator: item, score: runtimeExecutionContinuationScore(metadata.label, metadata.role, metadata.inPrimaryContainer, true) });
 	}
 	values.sort((left, right) => right.score - left.score);

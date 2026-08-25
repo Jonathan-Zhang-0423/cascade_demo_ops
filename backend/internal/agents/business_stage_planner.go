@@ -185,28 +185,56 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			capture:       []string{"启动构建按钮", "构建开始状态"},
 		})
 		if workflowHints != nil && workflowHints.MayRequireExecutionConfirmation {
-			builder.addStage(stageSpec{
-				id:            "continue_prepared_execution",
-				kind:          model.BusinessStageKindBusinessSubmit,
-				title:         "继续执行已准备的方案",
-				objective:     "如果提交后出现唯一的执行确认入口，则确认并继续；若业务已直接进入执行态则跳过。",
-				actionType:    string(model.GraphActionClick),
-				actionLabel:   "继续执行",
-				successState:  "业务执行过程开始，页面出现进度、日志或更新后的结果区域。",
-				routeState:    model.BusinessRouteStateProjectDetail,
-				entryRoute:    firstNonEmpty(routeHints.projectDetail, routeHints.buildRunning, routeHints.workspace),
-				expectedRoute: firstNonEmpty(routeHints.buildRunning, routeHints.projectDetail, routeHints.workspace),
-				durationMS:    1000,
-				keywords:      []string{"继续", "确认", "执行", "构建", "continue", "confirm", "execute", "build"},
-				capture:       []string{"执行确认入口", "执行开始后的状态"},
-				parameters: map[string]string{
+			// Async products may reveal more than one semantically distinct
+			// execution confirmation (for example, prepare -> execute). Keep the
+			// chain bounded and runtime-discovered: the follow-up is eligible only
+			// when the preceding continuation effect was actually committed.
+			for index, continuation := range []struct {
+				id        string
+				title     string
+				objective string
+			}{
+				{
+					id:        "continue_prepared_execution",
+					title:     "继续执行已准备的方案",
+					objective: "如果提交后出现唯一的执行确认入口，则确认并继续；若业务已直接进入执行态则跳过。",
+				},
+				{
+					id:        "continue_prepared_execution_followup",
+					title:     "确认后继执行阶段",
+					objective: "仅在上一确认动作真实发生后，等待并执行至多一个新的后继确认；若结果已就绪或没有新确认入口则跳过。",
+				},
+			} {
+				parameters := map[string]string{
 					"action_recipe":                   "continue_execution",
 					"optional_when_target_absent":     "true",
 					"capture_result_surface_baseline": "true",
 					"target_wait_timeout_ms":          "300000",
 					"target_poll_interval_ms":         "5000",
-				},
-			})
+					"continuation_chain_index":        fmt.Sprintf("%d", index+1),
+					"continuation_chain_limit":        "2",
+				}
+				if index > 0 {
+					parameters["requires_prior_continuation_effect"] = "true"
+					parameters["continuation_resume_grace_ms"] = "15000"
+				}
+				builder.addStage(stageSpec{
+					id:            continuation.id,
+					kind:          model.BusinessStageKindBusinessSubmit,
+					title:         continuation.title,
+					objective:     continuation.objective,
+					actionType:    string(model.GraphActionClick),
+					actionLabel:   "继续执行",
+					successState:  "业务执行过程开始，页面出现进度、日志或更新后的结果区域。",
+					routeState:    model.BusinessRouteStateProjectDetail,
+					entryRoute:    firstNonEmpty(routeHints.projectDetail, routeHints.buildRunning, routeHints.workspace),
+					expectedRoute: firstNonEmpty(routeHints.buildRunning, routeHints.projectDetail, routeHints.workspace),
+					durationMS:    1000,
+					keywords:      []string{"继续", "确认", "执行", "构建", "continue", "confirm", "execute", "build"},
+					capture:       []string{"执行确认入口", "执行开始后的状态"},
+					parameters:    parameters,
+				})
+			}
 		}
 	}
 
@@ -778,11 +806,12 @@ func businessStageIsApprovedNonDestructive(spec stageSpec) bool {
 		return true
 	}
 	allowedAction := map[string]model.GraphActionType{
-		"new_project_entry":           model.GraphActionClick,
-		"project_name_input":          model.GraphActionFill,
-		"select_build_mode":           model.GraphActionClick,
-		"start_agent_build":           model.GraphActionClick,
-		"continue_prepared_execution": model.GraphActionClick,
+		"new_project_entry":                    model.GraphActionClick,
+		"project_name_input":                   model.GraphActionFill,
+		"select_build_mode":                    model.GraphActionClick,
+		"start_agent_build":                    model.GraphActionClick,
+		"continue_prepared_execution":          model.GraphActionClick,
+		"continue_prepared_execution_followup": model.GraphActionClick,
 	}
 	want, ok := allowedAction[spec.id]
 	if !ok || model.GraphActionType(spec.actionType) != want {
@@ -1158,7 +1187,7 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 			return false
 		}
 		return containsAnyNormalized(labelText+" "+selectorText, "build", "generate", "run", "start", "构建", "生成", "启动", "开始")
-	case "continue_prepared_execution":
+	case "continue_prepared_execution", "continue_prepared_execution_followup":
 		return containsAnyNormalized(labelText+" "+selectorText, "continue", "confirm", "execute", "build", "继续", "确认", "执行", "构建")
 	}
 	if containsAnyNormalized(text, spec.keywords...) {
