@@ -87,6 +87,24 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	if err != nil {
 		return adaptiveDirectReconciliationBuild{}, fmt.Errorf("repackage adaptive successor graph: %w", err)
 	}
+	if next.ExecutableScriptBundle == nil {
+		return adaptiveDirectReconciliationBuild{}, errors.New("adaptive reconciliation executable bundle is missing")
+	}
+	repairAttempt := 1
+	if result.RepairRequest != nil && result.RepairRequest.RepairAttempt >= repairAttempt {
+		repairAttempt = result.RepairRequest.RepairAttempt + 1
+	}
+	baseBundleID, baseBundleHash := "", ""
+	if repairState.ExecutableScriptBundle != nil {
+		baseBundleID = repairState.ExecutableScriptBundle.ID
+		baseBundleHash = repairState.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
+	}
+	next.ExecutableScriptBundle.RepairLineage = &model.ScriptRepairLineage{
+		BaseBundleID: baseBundleID, BaseBundleHashSHA256: baseBundleHash,
+		SourceResultID: result.ResultID, SourceCloudJobID: result.CloudJobID, RepairAttempt: repairAttempt,
+		ChangeSummary:  "Restore the approved session and observe the already-created successor entity without replaying creation or submission.",
+		DiagnosticRefs: directDiagnosticRefs(*result.FailureDiagnostic), CreatedAt: time.Now().UTC(),
+	}
 	next.ExecutionPackageGeneration = state.ExecutionPackageGeneration
 	next.Approved = false
 	next.CurrentNode = orchestrator.NodeHumanApprove

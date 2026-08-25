@@ -227,7 +227,8 @@ func terminalPlayableRepairRequirementScope(pkg *ClientExecutionPackage) bool {
 		return false
 	}
 	return strings.HasPrefix(pkg.WorkflowGraph.ID, "graph_terminal_playable_repair_") ||
-		strings.HasPrefix(pkg.WorkflowGraph.ID, "graph_terminal_interaction_repair_")
+		strings.HasPrefix(pkg.WorkflowGraph.ID, "graph_terminal_interaction_repair_") ||
+		strings.HasPrefix(pkg.WorkflowGraph.ID, "graph_adaptive_successor_repair_")
 }
 
 // The client execution package covers browser interaction and recording. It

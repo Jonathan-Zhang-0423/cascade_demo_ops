@@ -265,6 +265,9 @@ func TestPrepareAdaptiveDirectReconciliationBuildsObserveOnlyPackage(t *testing.
 	if prepared.Build.Package.ExecutableScriptBundle == nil || prepared.Build.Package.ExecutableScriptBundle.ScriptOutline == nil {
 		t.Fatal("adaptive reconciliation package is incomplete")
 	}
+	if prepared.Build.Package.ConfidenceSummary == nil || prepared.Build.Package.ConfidenceSummary.Readiness == model.PackageReadinessBlocked {
+		t.Fatalf("adaptive reconciliation package is blocked: %+v", prepared.Build.Package.ConfidenceSummary)
+	}
 	seenCapabilities := 0
 	seenObserveOnlyResume := false
 	for _, stage := range prepared.Build.Package.ExecutableScriptBundle.ScriptOutline.Stages {
