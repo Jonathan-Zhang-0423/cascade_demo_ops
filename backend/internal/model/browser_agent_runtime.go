@@ -17,17 +17,24 @@ const (
 type StageExecutionEventType string
 
 const (
-	StageExecutionEventStageStarted         StageExecutionEventType = "stage_started"
-	StageExecutionEventObservationCollected StageExecutionEventType = "observation_collected"
-	StageExecutionEventTargetResolved       StageExecutionEventType = "target_resolved"
-	StageExecutionEventActionStarted        StageExecutionEventType = "action_started"
-	StageExecutionEventActionCompleted      StageExecutionEventType = "action_completed"
-	StageExecutionEventOutcomeObserved      StageExecutionEventType = "outcome_observed"
-	StageExecutionEventRepairProposed       StageExecutionEventType = "repair_proposed"
-	StageExecutionEventRepairApplied        StageExecutionEventType = "repair_applied"
-	StageExecutionEventStageResumed         StageExecutionEventType = "stage_resumed"
-	StageExecutionEventStageCompleted       StageExecutionEventType = "stage_completed"
-	StageExecutionEventStageFailed          StageExecutionEventType = "stage_failed"
+	StageExecutionEventStageStarted             StageExecutionEventType = "stage_started"
+	StageExecutionEventObservationCollected     StageExecutionEventType = "observation_collected"
+	StageExecutionEventTargetResolved           StageExecutionEventType = "target_resolved"
+	StageExecutionEventActionStarted            StageExecutionEventType = "action_started"
+	StageExecutionEventActionCompleted          StageExecutionEventType = "action_completed"
+	StageExecutionEventOutcomeObserved          StageExecutionEventType = "outcome_observed"
+	StageExecutionEventRepairProposed           StageExecutionEventType = "repair_proposed"
+	StageExecutionEventRepairApplied            StageExecutionEventType = "repair_applied"
+	StageExecutionEventStageResumed             StageExecutionEventType = "stage_resumed"
+	StageExecutionEventBusinessStateObserved    StageExecutionEventType = "business_state_observed"
+	StageExecutionEventStepSatisfied            StageExecutionEventType = "step_satisfied_by_observation"
+	StageExecutionEventActionEffectCommitted    StageExecutionEventType = "action_effect_committed"
+	StageExecutionEventActionEffectReclassified StageExecutionEventType = "action_effect_reclassified"
+	StageExecutionEventTransitionAbsorbed       StageExecutionEventType = "transition_absorbed"
+	StageExecutionEventConfidenceDeferred       StageExecutionEventType = "confidence_deferred"
+	StageExecutionEventCapabilityScored         StageExecutionEventType = "capability_scored"
+	StageExecutionEventStageCompleted           StageExecutionEventType = "stage_completed"
+	StageExecutionEventStageFailed              StageExecutionEventType = "stage_failed"
 )
 
 type RuntimeObservationSource string
@@ -72,6 +79,9 @@ type StageExecutionEvent struct {
 	OccurredAt             time.Time               `json:"occurred_at"`
 	Action                 *RuntimeAction          `json:"action,omitempty"`
 	Observation            *RuntimeObservation     `json:"observation,omitempty"`
+	HarnessDecision        *HarnessDecision        `json:"harness_decision,omitempty"`
+	ActionEffect           *ActionEffectCheckpoint `json:"action_effect,omitempty"`
+	CapabilityScore        *CapabilityScore        `json:"capability_score,omitempty"`
 	EvidenceRefs           []EvidenceRef           `json:"evidence_refs,omitempty"`
 }
 
@@ -88,6 +98,7 @@ type RuntimeObservation struct {
 	TargetGeometry           *BrowserTargetGeometry           `json:"target_geometry,omitempty"`
 	TargetResolutionAttempts []BrowserTargetResolutionAttempt `json:"target_resolution_attempts,omitempty"`
 	StateFingerprint         *BrowserStateFingerprint         `json:"state_fingerprint,omitempty"`
+	BusinessState            *BusinessStateSnapshot           `json:"business_state,omitempty"`
 }
 
 type BrowserStateFingerprint struct {
@@ -294,6 +305,11 @@ func (e StageExecutionEvent) Validate() error {
 				return err
 			}
 		}
+		if e.Observation.BusinessState != nil {
+			if err := ValidateBusinessStateSnapshot(*e.Observation.BusinessState); err != nil {
+				return err
+			}
+		}
 	}
 	return validateRuntimeEvidenceRefs(e.EvidenceRefs)
 }
@@ -417,7 +433,10 @@ func validStageExecutionEventType(value StageExecutionEventType) bool {
 	switch value {
 	case StageExecutionEventStageStarted, StageExecutionEventObservationCollected, StageExecutionEventTargetResolved,
 		StageExecutionEventActionStarted, StageExecutionEventActionCompleted, StageExecutionEventOutcomeObserved,
-		StageExecutionEventRepairProposed, StageExecutionEventRepairApplied, StageExecutionEventStageResumed, StageExecutionEventStageCompleted,
+		StageExecutionEventRepairProposed, StageExecutionEventRepairApplied, StageExecutionEventStageResumed,
+		StageExecutionEventBusinessStateObserved, StageExecutionEventStepSatisfied, StageExecutionEventActionEffectCommitted,
+		StageExecutionEventActionEffectReclassified, StageExecutionEventTransitionAbsorbed, StageExecutionEventConfidenceDeferred,
+		StageExecutionEventCapabilityScored, StageExecutionEventStageCompleted,
 		StageExecutionEventStageFailed:
 		return true
 	default:

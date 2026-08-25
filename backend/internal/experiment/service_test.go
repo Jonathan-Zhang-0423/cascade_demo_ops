@@ -117,6 +117,41 @@ func TestResumeBoundExternalTaskSelectsWaitingMainLeg(t *testing.T) {
 	}
 }
 
+func TestReconcileObservedStateCreatesRevisionFromFailedBoundRun(t *testing.T) {
+	service := testService(t)
+	run := mustCreateRun(t, service)
+	run = mustTransitionLeg(t, service, run, run.Legs[0].LegID, RunStateRunning, "target_submission")
+	legID := run.Legs[0].LegID
+	started, err := service.BeginOnceEffect(t.Context(), run.RunID, run.Revision, legID, "target_submit", "target_submission", "idem-reconcile-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := service.BindOnceEffectExternalTask(t.Context(), run.RunID, started.Revision, legID, "target_submit", "direct:project-one:job-one", []string{"job-one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := service.TransitionLeg(t.Context(), run.RunID, LegTransitionRequest{ExpectedRevision: bound.Revision, LegID: legID, State: RunStateFailed, Phase: "terminal_failed", EventType: "module_failed", Summary: "fixed-step harness failed after successor navigation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Resume(t.Context(), run.RunID, failed.Revision); err == nil {
+		t.Fatal("a failed run must remain terminal without an explicit reconciliation strategy")
+	}
+	reconciled, err := service.Resume(t.Context(), run.RunID, failed.Revision, "reconcile_observed_state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled.State != RunStateQueued || reconciled.Phase != "reconcile_observed_state" || reconciled.Legs[0].State != RunStateQueued || reconciled.Legs[0].BrowserAttempt != 2 {
+		t.Fatalf("failed externally-bound run was not revisioned for observation-only reconciliation: %+v", reconciled)
+	}
+	if reconciled.Legs[0].Checkpoint.OnceEffects[0].ExternalTaskRef != "direct:project-one:job-one" || reconciled.Legs[0].TargetSubmissions != 0 {
+		t.Fatalf("reconciliation lost the existing external binding or fabricated a second submission: %+v", reconciled.Legs[0])
+	}
+	if reconciled.HarnessProfile != HarnessProfileAdaptiveBusinessV1 || reconciled.Budget.VisualCallsPerRun != 2 || len(reconciled.InteractionPlan.Steps) != 7 {
+		t.Fatalf("reconciliation did not refresh the versioned adaptive contract: profile=%q budget=%+v steps=%d", reconciled.HarnessProfile, reconciled.Budget, len(reconciled.InteractionPlan.Steps))
+	}
+}
+
 func TestCancelTerminatesRunWithoutCreatingEffects(t *testing.T) {
 	service := testService(t)
 	run := mustCreateRun(t, service)

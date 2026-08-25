@@ -12,6 +12,8 @@ const (
 	ReportSchemaVersion              = "demoops.experiment_run_report.v1"
 	WorkflowTemplateAsyncProductDemo = "async-product-build-demo-v1"
 	BuildDeliveryPortableSingleHTML  = "portable-single-document-web-v1"
+	HarnessProfileAdaptiveBusinessV1 = "adaptive-business-harness-v1"
+	HarnessProfileCascadeFlowCompat  = "cascade-flow-compat-v1"
 	MaxEventBodyBytes                = 1024 * 1024
 	EventBodyWarningBytes            = 512 * 1024
 )
@@ -139,6 +141,9 @@ type InteractionStep struct {
 	ProofRequirements []ProofRequirement `json:"proof_requirements"`
 	Action            InteractionAction  `json:"action"`
 	MaxAttempts       int                `json:"max_attempts,omitempty"`
+	CapabilityLayer   string             `json:"capability_layer,omitempty"`
+	CapabilityScore   int                `json:"capability_score,omitempty"`
+	ProofSessionID    string             `json:"proof_session_id,omitempty"`
 }
 
 // InteractionAction is a site-neutral execution recipe. Product-specific
@@ -168,6 +173,7 @@ type CreateRunRequest struct {
 	CredentialRef    string `json:"credential_ref"`
 	AuthorizationRef string `json:"authorization_ref"`
 	IdempotencyKey   string `json:"idempotency_key"`
+	HarnessProfile   string `json:"harness_profile,omitempty"`
 }
 
 type Run struct {
@@ -181,6 +187,7 @@ type Run struct {
 	CredentialRef     string              `json:"credential_ref"`
 	AuthorizationRef  string              `json:"authorization_ref"`
 	IdempotencyKey    string              `json:"idempotency_key"`
+	HarnessProfile    string              `json:"harness_profile,omitempty"`
 	State             RunState            `json:"state"`
 	Phase             string              `json:"phase"`
 	Revision          int                 `json:"revision"`
@@ -212,6 +219,16 @@ type RunLeg struct {
 	Checkpoint         *Checkpoint         `json:"checkpoint,omitempty"`
 	ArtifactRefs       []ArtifactRef       `json:"artifact_refs,omitempty"`
 	HumanInterventions []HumanIntervention `json:"human_interventions,omitempty"`
+	CapabilityScore    *CapabilitySummary  `json:"capability_score,omitempty"`
+}
+
+type CapabilitySummary struct {
+	CoreScore        int      `json:"core_score"`
+	EnhancementScore int      `json:"enhancement_score"`
+	TotalScore       int      `json:"total_score"`
+	CorePassed       bool     `json:"core_passed"`
+	EligibleForFilm  bool     `json:"eligible_for_film"`
+	Missing          []string `json:"missing,omitempty"`
 }
 
 type Checkpoint struct {

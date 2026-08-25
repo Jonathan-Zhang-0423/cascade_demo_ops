@@ -47,7 +47,7 @@ function validateExperimentDefinition(value) {
     recovery_injection_phase: "once_effect_committed",
   };
   for (const [key, wanted] of Object.entries(expected)) if (value[key] !== wanted) throw new Error(`experiment definition ${key} must be ${wanted}`);
-  if (value.authorization_budget?.target_submissions !== 2 || value.authorization_budget?.final_film_jobs !== 1 || value.authorization_budget?.provider_calls !== 8 || value.authorization_budget?.visual_calls_per_run !== 12) throw new Error("experiment definition budget is not frozen");
+  if (value.authorization_budget?.target_submissions !== 2 || value.authorization_budget?.final_film_jobs !== 1 || value.authorization_budget?.provider_calls !== 8 || value.authorization_budget?.visual_calls_per_run !== 2) throw new Error("experiment definition budget is not frozen");
   if (value.main_target_duration_ms?.min !== 100000 || value.main_target_duration_ms?.max !== 110000) throw new Error("experiment target duration must be 100-110 seconds");
 }
 

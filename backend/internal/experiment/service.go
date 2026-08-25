@@ -49,6 +49,10 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 	request.CredentialRef = strings.TrimSpace(request.CredentialRef)
 	request.AuthorizationRef = strings.TrimSpace(request.AuthorizationRef)
 	request.IdempotencyKey = strings.TrimSpace(request.IdempotencyKey)
+	request.HarnessProfile = strings.TrimSpace(request.HarnessProfile)
+	if request.HarnessProfile == "" {
+		request.HarnessProfile = HarnessProfileCascadeFlowCompat
+	}
 	loaded, err := LoadDefinition(s.definitionRoot, request.DefinitionRef)
 	if err != nil {
 		return Run{}, fmt.Errorf("load experiment definition: %w", err)
@@ -62,7 +66,7 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 	if existing, ok, err := s.store.FindByIdempotencyKey(ctx, request.IdempotencyKey); err != nil {
 		return Run{}, err
 	} else if ok {
-		if existing.DefinitionRef != request.DefinitionRef || existing.UserGoal != request.UserGoal || existing.TargetURL != request.TargetURL || existing.CredentialRef != request.CredentialRef || existing.AuthorizationRef != request.AuthorizationRef {
+		if existing.DefinitionRef != request.DefinitionRef || existing.UserGoal != request.UserGoal || existing.TargetURL != request.TargetURL || existing.CredentialRef != request.CredentialRef || existing.AuthorizationRef != request.AuthorizationRef || firstNonEmptyHarnessProfile(existing.HarnessProfile) != request.HarnessProfile {
 			return Run{}, errors.New("idempotency_key is already bound to a different experiment request")
 		}
 		return existing, nil
@@ -86,7 +90,8 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 		SchemaVersion: RunSchemaVersion, RunID: runID, DefinitionRef: request.DefinitionRef, DefinitionID: loaded.Definition.DefinitionID,
 		WorkflowTemplate: loaded.Definition.WorkflowTemplateID, UserGoal: request.UserGoal, TargetURL: request.TargetURL, CredentialRef: request.CredentialRef,
 		AuthorizationRef: request.AuthorizationRef, IdempotencyKey: request.IdempotencyKey,
-		State: RunStateQueued, Phase: "product_spec_frozen", Revision: 1, Budget: loaded.Definition.AuthorizationBudget,
+		HarnessProfile: request.HarnessProfile,
+		State:          RunStateQueued, Phase: "product_spec_frozen", Revision: 1, Budget: loaded.Definition.AuthorizationBudget,
 		ProductSpec: loaded.ProductSpec, ObservationPlan: loaded.ObservationPlan, InteractionPlan: loaded.InteractionPlan,
 		Legs: []RunLeg{
 			{LegID: runID + ":main", Kind: "main", ProjectName: mainProjectName, BuildPrompt: mainPrompt, State: RunStateQueued, Phase: "awaiting_execution", BrowserAttempt: 1},
@@ -102,6 +107,13 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 		return Run{}, err
 	}
 	return run, nil
+}
+
+func firstNonEmptyHarnessProfile(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return HarnessProfileCascadeFlowCompat
+	}
+	return strings.TrimSpace(value)
 }
 
 func uniqueExperimentProjectName(base, runID string) string {
@@ -414,7 +426,7 @@ func (s *Service) MarkOnceEffectUncertain(ctx context.Context, runID string, exp
 	return next, nil
 }
 
-func (s *Service) Resume(ctx context.Context, runID string, expectedRevision int) (Run, error) {
+func (s *Service) Resume(ctx context.Context, runID string, expectedRevision int, strategies ...string) (Run, error) {
 	run, err := s.store.Get(ctx, runID)
 	if err != nil {
 		return Run{}, err
@@ -422,8 +434,57 @@ func (s *Service) Resume(ctx context.Context, runID string, expectedRevision int
 	if run.Revision != expectedRevision {
 		return Run{}, ErrRevisionConflict
 	}
-	if terminalRunState(run.State) {
+	strategy := ""
+	if len(strategies) > 0 {
+		strategy = strings.TrimSpace(strategies[0])
+	}
+	if terminalRunState(run.State) && !(run.State == RunStateFailed && strategy == "reconcile_observed_state") {
 		return Run{}, errors.New("terminal experiment run cannot be resumed")
+	}
+	if run.State == RunStateFailed && strategy == "reconcile_observed_state" {
+		resumeIndex := -1
+		for index := range run.Legs {
+			leg := run.Legs[index]
+			if leg.State != RunStateFailed || leg.Checkpoint == nil {
+				continue
+			}
+			for _, record := range leg.Checkpoint.OnceEffects {
+				if strings.TrimSpace(record.ExternalTaskRef) != "" {
+					resumeIndex = index
+					break
+				}
+			}
+			if resumeIndex >= 0 {
+				break
+			}
+		}
+		if resumeIndex < 0 {
+			return Run{}, errors.New("failed experiment has no externally bound effect to reconcile")
+		}
+		next := run
+		// Reconciliation is a new revision of the orchestration contract, not a
+		// replay of the frozen browser action list. Refresh only the generic
+		// plans and budgets from the same versioned definition so an older failed
+		// run can benefit from the adaptive harness without changing its user
+		// goal, project identity, authorization, or once-effect checkpoint.
+		if loaded, loadErr := LoadDefinition(s.definitionRoot, run.DefinitionRef); loadErr == nil {
+			next.HarnessProfile = HarnessProfileAdaptiveBusinessV1
+			next.ProductSpec = loaded.ProductSpec
+			next.ObservationPlan = loaded.ObservationPlan
+			next.InteractionPlan = loaded.InteractionPlan
+			next.Budget.VisualCallsPerRun = loaded.Definition.AuthorizationBudget.VisualCallsPerRun
+		}
+		next.State, next.Phase = RunStateQueued, "reconcile_observed_state"
+		next.Legs[resumeIndex].State, next.Legs[resumeIndex].Phase = RunStateQueued, "reconcile_observed_state"
+		next.Legs[resumeIndex].BrowserAttempt++
+		next.Waiting, next.LastError, next.TerminalAt = nil, nil, time.Time{}
+		next.Revision++
+		next.UpdatedAt = s.now().UTC()
+		event := s.event(next, "run_reconciled", "从外部实体证据创建恢复修订；只观察既有结果，不重放提交", next.Legs[resumeIndex].LegID, nil)
+		if err := s.store.Transition(ctx, run.RunID, run.Revision, next, event); err != nil {
+			return Run{}, err
+		}
+		return next, nil
 	}
 	for _, leg := range run.Legs {
 		if leg.Checkpoint == nil {
@@ -560,6 +621,31 @@ func (s *Service) RecordVisualCall(ctx context.Context, runID string, expectedRe
 	next.Revision++
 	next.UpdatedAt = s.now().UTC()
 	event := s.event(next, "visual_observation_recorded", "已记录一次时序视觉观察", legID, evidenceRefs)
+	if err := s.store.Transition(ctx, run.RunID, run.Revision, next, event); err != nil {
+		return Run{}, err
+	}
+	return next, nil
+}
+
+func (s *Service) RecordCapabilityScore(ctx context.Context, runID string, expectedRevision int, legID string, score CapabilitySummary, evidenceRefs []string) (Run, error) {
+	run, err := s.store.Get(ctx, runID)
+	if err != nil {
+		return Run{}, err
+	}
+	if run.Revision != expectedRevision || score.CoreScore < 0 || score.EnhancementScore < 0 || score.TotalScore != score.CoreScore+score.EnhancementScore || score.TotalScore > 100 {
+		return Run{}, errors.New("capability score requires the current revision and a bounded total")
+	}
+	index := legIndex(run, legID)
+	if index < 0 {
+		return Run{}, errors.New("experiment leg was not found")
+	}
+	next := run
+	copyScore := score
+	copyScore.Missing = append([]string{}, score.Missing...)
+	next.Legs[index].CapabilityScore = &copyScore
+	next.Revision++
+	next.UpdatedAt = s.now().UTC()
+	event := s.event(next, "capability_scored", "核心与增强能力已完成分层评分", legID, evidenceRefs)
 	if err := s.store.Transition(ctx, run.RunID, run.Revision, next, event); err != nil {
 		return Run{}, err
 	}
@@ -780,6 +866,12 @@ func buildReport(run Run) *RunReport {
 	report.Valid = run.State == RunStateSucceeded && report.Automation.OutOfBandBrowserActions == 0 && report.Automation.AllowedHumanGates <= 2
 	if report.Valid {
 		report.Scores = map[string]float64{"orchestration": 100, "product": 100, "evidence": 100, "film": 100, "recovery": 100}
+	}
+	if len(run.Legs) > 0 && run.Legs[0].CapabilityScore != nil {
+		report.Scores["evidence"] = float64(run.Legs[0].CapabilityScore.TotalScore)
+		if run.Legs[0].CapabilityScore.CorePassed {
+			report.Scores["product"] = 100
+		}
 	}
 	return report
 }

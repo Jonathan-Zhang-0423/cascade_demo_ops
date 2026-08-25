@@ -28,6 +28,7 @@ export type ExperimentRun = {
   run_id: string;
   definition_id: string;
   workflow_template_id: "async-product-build-demo-v1";
+  harness_profile?: "adaptive-business-harness-v1" | "cascade-flow-compat-v1";
   state: ExecutionPortState;
   phase: string;
   revision: number;
@@ -41,14 +42,14 @@ export type ExperimentRun = {
 };
 export type ExperimentEvent = { event_id: string; sequence: number; state: ExecutionPortState; phase: string; leg_id?: string; type: string; summary: string; evidence_refs?: string[]; created_at: string };
 
-export type StartExperimentRequest = { definition_ref: string; target_url: string; credential_ref: string; authorization_ref: string; idempotency_key: string };
+export type StartExperimentRequest = { definition_ref: string; target_url: string; credential_ref: string; authorization_ref: string; idempotency_key: string; harness_profile?: "adaptive-business-harness-v1" | "cascade-flow-compat-v1" };
 
 export type ExperimentRunClient = {
   mode: "local" | "unavailable";
   start(request: StartExperimentRequest): Promise<EditorClientResult<ExperimentRun>>;
   get(runID: string): Promise<EditorClientResult<ExperimentRun>>;
   events(runID: string): Promise<EditorClientResult<ExperimentEvent[]>>;
-  resume(runID: string, revision: number): Promise<EditorClientResult<ExperimentRun>>;
+  resume(runID: string, revision: number, strategy?: "reconcile_observed_state"): Promise<EditorClientResult<ExperimentRun>>;
   finalReview(runID: string, revision: number, finalFilmRevision: number, decision: "accept" | "reject", packageID: string, reviewerRef: string, reason?: string): Promise<EditorClientResult<ExperimentRun>>;
 };
 
@@ -76,7 +77,7 @@ export function createExperimentRunClient(): ExperimentRunClient {
     start: (value) => post<ExperimentRun>("/v1/experiment-runs", value),
     get: (runID) => request<ExperimentRun>(runPath(runID)),
     events: (runID) => request<ExperimentEvent[]>(runPath(runID, "/events")),
-    resume: (runID, revision) => post<ExperimentRun>(runPath(runID, "/resume"), { expected_revision: revision }),
+    resume: (runID, revision, strategy) => post<ExperimentRun>(runPath(runID, "/resume"), { expected_revision: revision, ...(strategy ? { strategy } : {}) }),
     finalReview: (runID, revision, finalFilmRevision, decision, packageID, reviewerRef, reason) => post<ExperimentRun>(runPath(runID, "/final-review"), { expected_revision: revision, final_film_revision: finalFilmRevision, decision, package_id: packageID, reviewer_ref: reviewerRef, ...(reason ? { reason } : {}) }),
   };
 }

@@ -13,7 +13,7 @@
   "heartbeat_ms": 60000,
   "warn_after_ms": 300000,
   "defer_after_ms": 1800000,
-  "max_visual_calls": 12,
+  "max_visual_calls": 2,
   "required_terminal_channels": 2,
   "failure_signals": ["明确的构建失败状态", "权限拒绝", "不可恢复异常", "任务已取消"]
 }

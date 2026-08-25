@@ -24,6 +24,9 @@ func ValidateCreateRequest(request CreateRunRequest) error {
 	if strings.Contains(request.DefinitionRef, "..") || strings.ContainsAny(request.DefinitionRef, `/\\`) {
 		return errors.New("definition_ref must be a single registered identifier")
 	}
+	if request.HarnessProfile != "" && request.HarnessProfile != HarnessProfileAdaptiveBusinessV1 && request.HarnessProfile != HarnessProfileCascadeFlowCompat {
+		return errors.New("unsupported harness_profile")
+	}
 	return nil
 }
 
@@ -38,7 +41,7 @@ func ValidateDefinition(value Definition) error {
 		return errors.New("experiment main target duration must be 100-110 seconds")
 	}
 	budget := value.AuthorizationBudget
-	if budget.TargetSubmissions != 2 || budget.FinalFilmJobs != 1 || budget.ProviderCalls != 8 || budget.VisualCallsPerRun != 12 {
+	if budget.TargetSubmissions != 2 || budget.FinalFilmJobs != 1 || budget.ProviderCalls != 8 || (budget.VisualCallsPerRun != 2 && budget.VisualCallsPerRun != 12) {
 		return errors.New("experiment authorization budget is not frozen")
 	}
 	if strings.TrimSpace(value.MainProjectName) == "" || strings.TrimSpace(value.RecoveryProjectName) == "" || value.MainProjectName == value.RecoveryProjectName {
@@ -119,6 +122,9 @@ func ValidateInteractionPlan(value InteractionPlan) error {
 		if step.ReplayPolicy != ReplayObserveOnly && step.ReplayPolicy != ReplayIdempotentWrite && step.ReplayPolicy != ReplayOnceEffect {
 			return errors.New("interaction evidence step has an invalid replay policy")
 		}
+		if step.CapabilityLayer != "" && (step.CapabilityLayer != "core" && step.CapabilityLayer != "enhancement" || step.CapabilityScore < 1 || step.CapabilityScore > 70) {
+			return errors.New("interaction evidence step has an invalid capability layer or score")
+		}
 		for _, proof := range step.ProofRequirements {
 			if !validProofRequirement(proof) {
 				return errors.New("interaction evidence step has an invalid proof requirement")
@@ -171,6 +177,9 @@ func ValidateRun(value Run) error {
 	}
 	if value.ProviderCallsUsed < 0 || value.ProviderCallsUsed > value.Budget.ProviderCalls {
 		return errors.New("experiment provider-call budget exceeded")
+	}
+	if value.HarnessProfile != "" && value.HarnessProfile != HarnessProfileAdaptiveBusinessV1 && value.HarnessProfile != HarnessProfileCascadeFlowCompat {
+		return errors.New("experiment run harness_profile is invalid")
 	}
 	for _, leg := range value.Legs {
 		if leg.VisualCallsUsed > value.Budget.VisualCallsPerRun || leg.TargetSubmissions > 1 || !validRunState(leg.State) {

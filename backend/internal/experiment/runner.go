@@ -26,6 +26,7 @@ type LegExecutionRequest struct {
 	InteractionPlan    InteractionPlan
 	VisualCallBudget   int
 	WorkflowTemplateID string
+	HarnessProfile     string
 }
 
 type LegExecutionUpdate struct {
@@ -45,6 +46,7 @@ type LegExecutionUpdate struct {
 	FinalFilmRevision   int
 	ProviderCallsUsed   int
 	FinalFilmPackageID  string
+	CapabilityScore     *CapabilitySummary
 }
 
 type LegExecutionAdapter interface {
@@ -125,6 +127,7 @@ func (r *Runner) RunLeg(ctx context.Context, runID, legID string, adapter LegExe
 		RunReport: *buildReport(run), ProductSpec: run.ProductSpec, ObservationPlan: run.ObservationPlan,
 		InteractionPlan: run.InteractionPlan, VisualCallBudget: run.Budget.VisualCallsPerRun - leg.VisualCallsUsed,
 		WorkflowTemplateID: run.WorkflowTemplate,
+		HarnessProfile:     run.HarnessProfile,
 	}
 	emit := func(update LegExecutionUpdate) error {
 		current, getErr := r.service.GetRun(ctx, runID)
@@ -152,6 +155,11 @@ func (r *Runner) RunLeg(ctx context.Context, runID, legID string, adapter LegExe
 			}
 		case "artifacts":
 			_, getErr = r.service.AppendLegArtifacts(ctx, runID, current.Revision, legID, update.Artifacts, "artifacts_materialized", requiredSummary(update.Summary, "模块 Artifact 已物化"))
+		case "capability_scored":
+			if update.CapabilityScore == nil {
+				return errors.New("capability_scored update requires a score")
+			}
+			_, getErr = r.service.RecordCapabilityScore(ctx, runID, current.Revision, legID, *update.CapabilityScore, update.EvidenceRefs)
 		case "final_film_bound":
 			_, getErr = r.service.BindFinalFilm(ctx, runID, current.Revision, update.FinalFilmJobID, update.FinalFilmRevision, update.ProviderCallsUsed, update.FinalFilmPackageID)
 		default:

@@ -12,5 +12,5 @@
   "run_set": ["main", "recovery"],
   "recovery_injection_phase": "once_effect_committed",
   "main_target_duration_ms": { "min": 100000, "max": 110000 },
-  "authorization_budget": { "target_submissions": 2, "final_film_jobs": 1, "provider_calls": 8, "visual_calls_per_run": 12 }
+  "authorization_budget": { "target_submissions": 2, "final_film_jobs": 1, "provider_calls": 8, "visual_calls_per_run": 2 }
 }
