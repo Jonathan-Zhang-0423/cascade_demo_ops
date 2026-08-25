@@ -23,6 +23,7 @@ type BrowserAgentRuntimePlan struct {
 	SourceBundleHashSHA256 string
 	SourcePlanHashSHA256   string
 	PolicyHashSHA256       string
+	HarnessProfile         string
 	// The verifier receives the approved contracts, never a browser/page
 	// object. This keeps Validation Agent decisions traceable to the package.
 	WorkflowGraph        *model.DemoWorkflowGraph
@@ -218,8 +219,10 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 	latestCompletedOrder := 0
 	latestReachedOrder := 0
 	interruptionConsumed := false
+	historyEvents := []model.StageExecutionEvent{}
 	if history, ok := sink.(stageExecutionEventHistory); ok {
-		for _, event := range history.Events() {
+		historyEvents = append(historyEvents, history.Events()...)
+		for _, event := range historyEvents {
 			if event.RunID != plan.RunID || event.SourcePackageID != plan.SourcePackageID || event.SourceBundleHashSHA256 != plan.SourceBundleHashSHA256 || event.PolicyHashSHA256 != plan.PolicyHashSHA256 {
 				continue
 			}
@@ -248,7 +251,7 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 	for _, stage := range plan.Stages {
 		attemptByStage[stage.ID] = 1
 	}
-	appendEvent := func(stage BrowserAgentRuntimeStage, eventType model.StageExecutionEventType, observation *model.RuntimeObservation, evidenceRefs []model.EvidenceRef) error {
+	appendEventDetails := func(stage BrowserAgentRuntimeStage, eventType model.StageExecutionEventType, observation *model.RuntimeObservation, evidenceRefs []model.EvidenceRef, decision *model.HarnessDecision, effect *model.ActionEffectCheckpoint, capability *model.CapabilityScore) error {
 		sequence++
 		event := model.StageExecutionEvent{
 			SchemaVersion: model.StageExecutionEventSchemaVersion,
@@ -259,6 +262,9 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			EventType: eventType, OccurredAt: timeNowUTC(),
 		}
 		event.Observation = observation
+		event.HarnessDecision = decision
+		event.ActionEffect = effect
+		event.CapabilityScore = capability
 		event.EvidenceRefs = append([]model.EvidenceRef{}, evidenceRefs...)
 		if eventType == model.StageExecutionEventTargetResolved || eventType == model.StageExecutionEventActionStarted || eventType == model.StageExecutionEventActionCompleted {
 			event.Action = runtimeActionForStage(stage)
@@ -270,6 +276,11 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		result.Events = append(result.Events, event)
 		return nil
 	}
+	appendEvent := func(stage BrowserAgentRuntimeStage, eventType model.StageExecutionEventType, observation *model.RuntimeObservation, evidenceRefs []model.EvidenceRef) error {
+		return appendEventDetails(stage, eventType, observation, evidenceRefs, nil, nil, nil)
+	}
+	absorbedStages := historicalAdaptiveAbsorptions(plan, historyEvents)
+	capabilityResults := []model.CapabilityResult{}
 	for _, stage := range plan.Stages {
 		stageEventStart := len(result.Events)
 		if err := ctx.Err(); err != nil {
@@ -310,6 +321,31 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 				return result, newRuntimeExecutionError("browser_agent_once_effect_replay_denied", fmt.Errorf("completed once-effect stage %s no longer matches its checkpoint and cannot be replayed", stage.ID))
 			}
 		}
+		if checkpoint, absorbed := absorbedStages[stage.ID]; absorbed {
+			if err := appendEvent(stage, model.StageExecutionEventStageStarted, nil, nil); err != nil {
+				return result, err
+			}
+			observation := checkpoint.Observed
+			observationRef := &model.RuntimeObservation{Source: model.RuntimeObservationArtifact, URL: checkpoint.EntityRef, BusinessState: &observation}
+			evidence := modelEvidenceRefs(checkpoint.EvidenceRefs)
+			decision := model.HarnessDecision{Kind: model.HarnessDecisionSkip, Confidence: observation.Confidence, Reason: "a prior action already crossed the required successor state", EvidenceRefs: append([]string{}, checkpoint.EvidenceRefs...), AbsorbedSteps: []string{stage.ID}}
+			if err := appendEventDetails(stage, model.StageExecutionEventBusinessStateObserved, observationRef, evidence, &decision, nil, nil); err != nil {
+				return result, err
+			}
+			if err := appendEventDetails(stage, model.StageExecutionEventActionEffectReclassified, observationRef, evidence, &decision, checkpoint, nil); err != nil {
+				return result, err
+			}
+			if err := appendEventDetails(stage, model.StageExecutionEventStepSatisfied, observationRef, evidence, &decision, checkpoint, nil); err != nil {
+				return result, err
+			}
+			if err := appendEventDetails(stage, model.StageExecutionEventTransitionAbsorbed, observationRef, evidence, &decision, checkpoint, nil); err != nil {
+				return result, err
+			}
+			if err := appendEvent(stage, model.StageExecutionEventStageCompleted, observationRef, evidence); err != nil {
+				return result, err
+			}
+			continue
+		}
 		if err := appendEvent(stage, model.StageExecutionEventStageStarted, nil, nil); err != nil {
 			return result, err
 		}
@@ -326,6 +362,29 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		}
 		if err := appendEvent(stage, model.StageExecutionEventObservationCollected, &observed.Observation, observed.EvidenceRefs); err != nil {
 			return result, err
+		}
+		if adaptiveBusinessHarnessEnabled(plan) {
+			snapshot := adaptiveBusinessSnapshot(stage, &observed.Observation, nil, observed.TargetResolved, timeNowUTC())
+			observed.Observation.BusinessState = &snapshot
+			decision := model.DecideBusinessTransition(snapshot, businessTransitionForStage(stage))
+			if err := appendEventDetails(stage, model.StageExecutionEventBusinessStateObserved, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil); err != nil {
+				return result, err
+			}
+			if !observed.TargetResolved && stage.StageKind == model.BusinessStageKindModeSelection {
+				decision.Kind, decision.Confidence, decision.Reason = model.HarnessDecisionSkip, 0.9, "optional configuration control is absent; no primary action is guessed"
+				if err := appendEventDetails(stage, model.StageExecutionEventStepSatisfied, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil); err != nil {
+					return result, err
+				}
+				completedObservation := optionalCompletionObservation(observed.Observation, "optional configuration was not required")
+				if err := appendEvent(stage, model.StageExecutionEventStageCompleted, &completedObservation, observed.EvidenceRefs); err != nil {
+					return result, err
+				}
+				continue
+			}
+			if decision.Kind == model.HarnessDecisionDefer {
+				_ = appendEventDetails(stage, model.StageExecutionEventConfidenceDeferred, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil)
+				return result, newRuntimeExecutionError("browser_agent_business_state_deferred", errors.New("business state confidence is too low for an action"))
+			}
 		}
 		activeStage := stage
 		if observed.PreferredSelectorAlternative != nil || observed.SuggestedWaitCondition != "" {
@@ -362,6 +421,20 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			activeStage = patchedStage
 		}
 		if !observed.TargetResolved {
+			if layer, _, capability := stageCapability(stage); capability && layer == "enhancement" {
+				decision := model.HarnessDecision{Kind: model.HarnessDecisionSkip, Confidence: 0.9, Reason: "optional enhancement control was not observed; core execution may continue", EvidenceRefs: evidenceStrings(observed.EvidenceRefs)}
+				if item, ok := capabilityResultForStage(stage, false, observed.EvidenceRefs, "enhancement target was not observed"); ok {
+					capabilityResults = append(capabilityResults, item)
+				}
+				if err := appendEventDetails(stage, model.StageExecutionEventStepSatisfied, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil); err != nil {
+					return result, err
+				}
+				completedObservation := optionalCompletionObservation(observed.Observation, "optional enhancement was not observed")
+				if err := appendEvent(stage, model.StageExecutionEventStageCompleted, &completedObservation, observed.EvidenceRefs); err != nil {
+					return result, err
+				}
+				continue
+			}
 			_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, observed.EvidenceRefs)
 			return result, newRuntimeExecutionError("browser_agent_target_not_resolved", errors.New("no approved selector candidate resolved the target"))
 		}
@@ -405,6 +478,10 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 				return result, newRuntimeExecutionError("outcome_verification_failed", err)
 			}
 			result.ValidationReports = append(result.ValidationReports, report)
+			if normalized, ok := normalizeEnhancementDecision(report, stage, actionResult.EvidenceRefs); ok {
+				report = normalized
+				result.ValidationReports[len(result.ValidationReports)-1] = report
+			}
 			if normalized, ok := normalizeWarningOnlyRepairDecision(report, actionResult.Observation, actionResult.EvidenceRefs); ok {
 				// The legacy Validation Agent maps warning-only feedback to
 				// repair_allowed even when every browser assertion passed. With no
@@ -444,18 +521,19 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 					return result, err
 				}
 				repairEventStart := len(result.Events)
-				if proposal.RepairKind != "capture_timing" {
+				revalidateOnly := proposal.RepairKind == "capture_timing" || stageHasExplicitOnceEffectPolicy(stage)
+				if !revalidateOnly {
 					if err := appendEvent(stage, model.StageExecutionEventActionStarted, actionResult.Observation, proposal.EvidenceRefs); err != nil {
 						return result, err
 					}
 				}
 				var repairActionResult BrowserAgentStageActionResult
 				var repairErr error
-				if proposal.RepairKind == "capture_timing" {
+				if revalidateOnly {
 					revalidator, ok := executor.(BrowserAgentStageOutcomeRevalidator)
 					if !ok {
 						_ = appendEvent(stage, model.StageExecutionEventStageFailed, actionResult.Observation, proposal.EvidenceRefs)
-						return result, newRuntimeExecutionError("browser_agent_revalidation_unavailable", errors.New("capture timing repair requires a non-action outcome revalidator"))
+						return result, newRuntimeExecutionError("browser_agent_revalidation_unavailable", errors.New("non-replayable outcome repair requires a non-action revalidator"))
 					}
 					repairActionResult, repairErr = revalidator.RevalidateStage(ctx, plan, patchedStage)
 				} else {
@@ -468,7 +546,7 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 					}
 					return result, newRuntimeExecutionError("browser_agent_repair_action_failed", errors.New("repaired stage did not provide real completion evidence"))
 				}
-				if proposal.RepairKind == "capture_timing" {
+				if revalidateOnly {
 					if err := appendEvent(stage, model.StageExecutionEventObservationCollected, repairActionResult.Observation, repairActionResult.EvidenceRefs); err != nil {
 						return result, err
 					}
@@ -498,13 +576,51 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 				return result, newRuntimeExecutionError("outcome_verification_failed", fmt.Errorf("outcome verifier stopped stage %s with decision %s", stage.ID, report.Decision))
 			}
 		}
-		if err := appendEvent(stage, model.StageExecutionEventStageCompleted, actionResult.Observation, actionResult.EvidenceRefs); err != nil {
+		passedCapability := runtimeObservationPassed(actionResult.Observation)
+		completionObservation := actionResult.Observation
+		if layer, _, capability := stageCapability(stage); capability && layer == "enhancement" && !passedCapability {
+			copyObservation := optionalCompletionObservation(*actionResult.Observation, "optional enhancement proof was incomplete")
+			completionObservation = &copyObservation
+		}
+		if err := appendEvent(stage, model.StageExecutionEventStageCompleted, completionObservation, actionResult.EvidenceRefs); err != nil {
 			return result, err
+		}
+		if item, ok := capabilityResultForStage(stage, passedCapability, actionResult.EvidenceRefs, ""); ok {
+			if !item.Passed && item.Layer == "enhancement" {
+				item.Warning = "enhancement proof was incomplete"
+			}
+			capabilityResults = append(capabilityResults, item)
+		}
+		if checkpoint, absorbedID := adaptiveTransitionAbsorption(plan, stage, &observed.Observation, actionResult.Observation, actionResult.EvidenceRefs); checkpoint != nil {
+			absorbedStages[absorbedID] = checkpoint
+			snapshot := checkpoint.Observed
+			actionResult.Observation.BusinessState = &snapshot
+			decision := model.HarnessDecision{Kind: model.HarnessDecisionAdvance, Confidence: snapshot.Confidence, Reason: "the observed effect crossed multiple planned business phases", EvidenceRefs: append([]string{}, checkpoint.EvidenceRefs...), AbsorbedSteps: append([]string{}, checkpoint.AbsorbedSteps...)}
+			if err := appendEventDetails(stage, model.StageExecutionEventActionEffectReclassified, actionResult.Observation, actionResult.EvidenceRefs, &decision, checkpoint, nil); err != nil {
+				return result, err
+			}
+			if err := appendEventDetails(stage, model.StageExecutionEventActionEffectCommitted, actionResult.Observation, actionResult.EvidenceRefs, &decision, checkpoint, nil); err != nil {
+				return result, err
+			}
+			if err := appendEventDetails(stage, model.StageExecutionEventTransitionAbsorbed, actionResult.Observation, actionResult.EvidenceRefs, &decision, checkpoint, nil); err != nil {
+				return result, err
+			}
 		}
 		if plan.InterruptAfterFirstOnceEffect && !interruptionConsumed && stageReplayPolicy(stage) == model.InteractionReplayOnceEffect {
 			interruptionConsumed = true
 			return result, newRuntimeExecutionError(runtimeErrorWorkerRestartInjected, errors.New("authorized recovery experiment interrupted the worker after a committed once-effect checkpoint"))
 		}
+	}
+	if len(capabilityResults) > 0 {
+		score := model.ScoreCapabilities(capabilityResults)
+		last := plan.Stages[len(plan.Stages)-1]
+		if err := appendEventDetails(last, model.StageExecutionEventCapabilityScored, nil, nil, nil, nil, &score); err != nil {
+			return result, err
+		}
+		// Capability failure is a completed, evidence-bearing business result.
+		// Keep the Direct package materializable and let the experiment adapter
+		// enforce the director gate from the persisted score. This preserves the
+		// fact track and quality report without spending H3/Seedance budget.
 	}
 	return result, nil
 }
@@ -603,6 +719,10 @@ func stageReplayPolicy(stage BrowserAgentRuntimeStage) model.InteractionReplayPo
 	default:
 		return model.InteractionReplayOnceEffect
 	}
+}
+
+func stageHasExplicitOnceEffectPolicy(stage BrowserAgentRuntimeStage) bool {
+	return stage.InteractionContract != nil && stage.InteractionContract.ReplayPolicy == model.InteractionReplayOnceEffect
 }
 
 func warningOnlyRepairDecisionCanContinue(report model.ValidationReport, observation *model.RuntimeObservation) bool {
@@ -815,7 +935,14 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 		ExplorationScope:       bundle.ScriptOutline.AllowedExplorationScope,
 		ForbiddenActions:       append([]string{}, bundle.ScriptOutline.ForbiddenActions...),
 		RepairPolicy:           bundle.BrowserAgentContract.RepairPolicy,
+		HarnessProfile:         packageMetadataString(pkg.Metadata, "harness_profile"),
 		Stages:                 make([]BrowserAgentRuntimeStage, 0, len(approvedStages)),
+	}
+	if plan.HarnessProfile == "" && packageMetadataString(pkg.Metadata, "experiment_run_id") != "" {
+		// Packages admitted by the earlier interactive experiment already carry a
+		// generic experiment binding. Treat them as adaptive during reconciliation
+		// so a known successor state can be recovered without another submission.
+		plan.HarnessProfile = model.AdaptiveBusinessHarnessProfileV1
 	}
 	for index, approved := range approvedStages {
 		outline, ok := outlineByNode[approved.NodeID]
@@ -880,6 +1007,14 @@ func compileBrowserAgentRuntimePlan(pkg *model.ClientExecutionPackage) (BrowserA
 		return BrowserAgentRuntimePlan{}, newRuntimeExecutionError(runtimeErrorBrowserAgentContractViolation, errors.New("script outline contains stages that were not approved"))
 	}
 	return plan, nil
+}
+
+func packageMetadataString(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	value, _ := metadata[key].(string)
+	return strings.TrimSpace(value)
 }
 
 func evidenceBoundSelectorCandidates(components []model.BrowserAgentComponentTarget, interactions []model.BrowserAgentInteraction) []model.SelectorCandidate {

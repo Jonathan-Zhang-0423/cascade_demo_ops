@@ -2509,6 +2509,7 @@ func compiledInteractionContractForStep(step model.ScriptStep, node *model.Graph
 		contract.ActionKind = step.Action.Type
 		contract.ActionTarget = step.Action.Target
 		contract.Parameters = step.Action.Parameters
+		contract.ReplayPolicy = interactionReplayPolicyForNode(node, step.Action.Type)
 		if model.ValidateInteractionContract(contract) == nil {
 			return &contract
 		}
@@ -2565,7 +2566,7 @@ func interactionContractForStep(step model.ScriptStep, node *model.GraphNode, ta
 		SchemaVersion: model.InteractionContractSchemaVersion,
 		ContractID:    "interaction_" + shortHash(step.NodeID+"|"+string(step.Action.Type)+"|"+target.SemanticID),
 		SemanticGoal:  firstNonEmpty(step.BusinessValue, step.ExpectedOutcome, step.Title),
-		Archetype:     model.ProductArchetypeUnknown, ActionKind: step.Action.Type, ReplayPolicy: interactionReplayPolicy(step.Action.Type), TargetSemanticID: target.SemanticID, ActionTarget: step.Action.Target, Parameters: step.Action.Parameters,
+		Archetype:     model.ProductArchetypeUnknown, ActionKind: step.Action.Type, ReplayPolicy: interactionReplayPolicyForNode(node, step.Action.Type), TargetSemanticID: target.SemanticID, ActionTarget: step.Action.Target, Parameters: step.Action.Parameters,
 		Preconditions: preconditions, ExpectedTransitions: predicates, EvidenceRefs: evidence, NonDestructive: true,
 	}
 	if err := model.ValidateInteractionContract(*contract); err != nil {
@@ -2583,6 +2584,19 @@ func interactionReplayPolicy(action model.GraphActionType) model.InteractionRepl
 	default:
 		return model.InteractionReplayOnceEffect
 	}
+}
+
+func interactionReplayPolicyForNode(node *model.GraphNode, action model.GraphActionType) model.InteractionReplayPolicy {
+	if businessStageKindForNode(node) == model.BusinessStageKindModeSelection {
+		return model.InteractionReplayIdempotentWrite
+	}
+	if node != nil && node.InteractionContract != nil {
+		switch node.InteractionContract.ReplayPolicy {
+		case model.InteractionReplayObserveOnly, model.InteractionReplayIdempotentWrite, model.InteractionReplayOnceEffect:
+			return node.InteractionContract.ReplayPolicy
+		}
+	}
+	return interactionReplayPolicy(action)
 }
 
 // productArchetypeForSteps classifies observed interaction structure only. It
@@ -2787,7 +2801,12 @@ func targetContractForNode(node *model.GraphNode, action model.ScriptActionInstr
 		allowedNames = uniqueStrings(nonEmptyStrings(target.Label, target.Text, node.Title))
 	}
 	allowedRoles := []string{}
-	if target.Role != "" {
+	if businessStageKindForNode(node) == model.BusinessStageKindModeSelection {
+		// Configuration intent may only bind to a state-setting control. A
+		// primary action button can submit the whole form and therefore belongs
+		// exclusively to the business-submit transition.
+		allowedRoles = append(allowedRoles, "checkbox", "switch", "radio", "combobox")
+	} else if target.Role != "" {
 		allowedRoles = append(allowedRoles, target.Role)
 	} else if action.Type == model.GraphActionClick {
 		allowedRoles = append(allowedRoles, "button", "link")

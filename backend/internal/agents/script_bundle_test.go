@@ -60,6 +60,32 @@ func TestScriptPackagerEmitsValidExecutableBundle(t *testing.T) {
 	}
 }
 
+func TestModeSelectionContractCannotBindPrimaryButton(t *testing.T) {
+	node := &model.GraphNode{
+		ID: "business_stage_select_mode", Title: "Configure execution mode",
+		Metadata: map[string]any{"business_stage_kind": string(model.BusinessStageKindModeSelection)},
+	}
+	contract := targetContractForNode(node, model.ScriptActionInstruction{Type: model.GraphActionClick, Target: model.ActionTarget{Label: "Configure mode"}}, model.ScriptPageTarget{}, nil)
+	if contract == nil {
+		t.Fatal("expected a target contract")
+	}
+	for _, role := range contract.AllowedRoles {
+		if role == "button" || role == "link" {
+			t.Fatalf("mode configuration must never fall back to a primary action: %+v", contract.AllowedRoles)
+		}
+	}
+	want := map[string]bool{"checkbox": true, "switch": true, "radio": true, "combobox": true}
+	for _, role := range contract.AllowedRoles {
+		delete(want, role)
+	}
+	if len(want) != 0 {
+		t.Fatalf("mode contract is missing state-setting roles: %+v", contract.AllowedRoles)
+	}
+	if got := interactionReplayPolicyForNode(node, model.GraphActionClick); got != model.InteractionReplayIdempotentWrite {
+		t.Fatalf("mode configuration must use idempotent_write, got %q", got)
+	}
+}
+
 func TestStructuredInteractionTargetContractKeepsSemanticIDAcrossCompilation(t *testing.T) {
 	node := &model.GraphNode{ID: "node-proof", InteractionContract: &model.InteractionContract{
 		SchemaVersion: model.InteractionContractSchemaVersion, ContractID: "contract-proof", SemanticGoal: "prove state", Archetype: model.ProductArchetypeInteractive,
@@ -84,7 +110,7 @@ func TestCompiledInteractionContractFallsBackWhenPlannerContractIsInvalid(t *tes
 			SemanticGoal:  "submit the approved request",
 			// Missing replay policy and expected transitions on purpose.
 			TargetSemanticID: "primary_submit",
-			NonDestructive:    true,
+			NonDestructive:   true,
 		},
 		EvidenceRefs: []model.EvidenceRef{{ID: "approved_request", Kind: model.EvidenceKindUserInput}},
 	}

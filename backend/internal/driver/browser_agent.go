@@ -46,6 +46,7 @@ type BrowserAgentWorkerOpenRequest struct {
 	ForbiddenKeywords     []string                  `json:"forbidden_keywords,omitempty"`
 	MaskSelectors         []string                  `json:"mask_selectors,omitempty"`
 	RecordingSensitive    *bool                     `json:"recording_sensitive,omitempty"`
+	VisualMaxCalls        int                       `json:"visual_max_calls,omitempty"`
 	// RecordTrace may be disabled only by the local dev-visible login handoff.
 	// It prevents credentials entered manually in that isolated window from
 	// being persisted in a Playwright trace.

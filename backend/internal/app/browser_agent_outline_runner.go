@@ -2,10 +2,12 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -761,6 +763,24 @@ func browserAgentWorkerOpenRequest(request BrowserAgentOutlineRunRequest) driver
 		ForbiddenKeywords:     append([]string{}, request.RuntimePlan.ExplorationScope.ForbiddenKeywords...),
 		MaskSelectors:         uniqueStrings(maskSelectors),
 		RecordingSensitive:    &recordingSensitive,
+		VisualMaxCalls:        packageMetadataInt(request.Package.Metadata, "visual_call_budget"),
+	}
+}
+
+func packageMetadataInt(metadata map[string]any, key string) int {
+	if metadata == nil {
+		return 0
+	}
+	switch value := metadata[key].(type) {
+	case int:
+		return value
+	case float64:
+		return int(value)
+	case json.Number:
+		parsed, _ := strconv.Atoi(value.String())
+		return parsed
+	default:
+		return 0
 	}
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvedKeyboardKeys, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, browserVisualTerminalWithStructuralEvidence, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -22,10 +22,19 @@ describe("browser visual polling terminal evidence", () => {
     expect(browserVisualNextDelayMultiplier("succeeded")).toBe(1);
     expect(browserVisualRefreshDue(1_000, 31_000, 30_000, false)).toBe(true);
     expect(browserVisualRefreshDue(1_000, 31_000, 30_000, true)).toBe(false);
+		expect(browserVisualTerminalWithStructuralEvidence([verdict("in_progress", .8), verdict("succeeded", .95)], 2)).toBe("succeeded");
   });
 });
 
 describe("browser agent target resolution feedback", () => {
+	it("requires the weighted threshold and a clear candidate margin", () => {
+		const strong = adaptiveTargetCandidateScore({ role_state: 1, semantic: 1, container_context: 1, uniqueness: 1, transition_feasibility: 1 });
+		const ambiguous = adaptiveTargetCandidateScore({ role_state: 1, semantic: .8, container_context: 1, uniqueness: .8, transition_feasibility: 1 });
+		expect(strong).toBe(1);
+		expect(adaptiveTargetCandidateExecutable(strong, .79)).toBe(true);
+		expect(adaptiveTargetCandidateExecutable(strong, ambiguous)).toBe(false);
+		expect(adaptiveTargetCandidateExecutable(.84)).toBe(false);
+	});
   it("keeps an unresolved target as a failed structured assertion", () => {
     expect(resolutionAssertions(undefined, "browser_agent_target_not_resolved: create; strategies=component_testid", "https://app.example.com/dashboard")).toEqual([
       { kind: "target_resolved", passed: false, actual: "browser_agent_target_not_resolved: create; strategies=component_testid" },
@@ -602,6 +611,7 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     const attempts: BrowserTargetResolutionAttempt[] = [];
     const stage = {
       id: "stage_submit",
+      stage_kind: "business_submit",
       order: 3,
       node_id: "submit_request",
       target_contract: {
@@ -634,6 +644,52 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     }));
   });
 
+  it("never binds a modal primary button for an optional mode configuration", async () => {
+    const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+    const primary = {
+      count: async () => 1,
+      nth: () => ({
+        isVisible: async () => true,
+        isDisabled: async () => false,
+        evaluate: async () => ({ role: "button", name: "Create", siblingButtonCount: 2 }),
+      }),
+    };
+    const page = {
+      getByRole: () => absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+      locator: () => primary,
+    };
+    const attempts: BrowserTargetResolutionAttempt[] = [];
+    const stage = {
+      id: "stage_mode",
+      stage_kind: "mode_selection",
+      order: 2,
+      node_id: "configure_mode",
+      target_contract: {
+        semantic_id: "mode_control",
+        allowed_roles: ["checkbox", "switch", "radio", "combobox"],
+        allowed_names: ["Direct mode"],
+        destructive: false,
+      },
+      interaction_contract: {
+        schema_version: "demoops.interaction_contract.v1" as const,
+        contract_id: "contract_mode",
+        semantic_goal: "configure optional mode",
+        action_kind: "click",
+        replay_policy: "idempotent_write" as const,
+        target_semantic_id: "mode_control",
+        expected_transitions: [],
+        non_destructive: true,
+      },
+      interactions: [{ kind: "click", non_destructive: true }],
+    };
+
+    await expect(resolveTarget(page, stage, stage.interactions[0], false, attempts)).rejects.toThrow("browser_agent_target_not_resolved");
+    expect(attempts.some((attempt) => attempt.strategy === "active_modal_unique_primary_action")).toBe(false);
+  });
+
   it("does not structurally bind a disabled once-effect submit control", async () => {
     const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
     const disabledButton = {
@@ -655,6 +711,7 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     const attempts: BrowserTargetResolutionAttempt[] = [];
     const stage = {
       id: "stage_submit",
+      stage_kind: "business_submit",
       order: 3,
       node_id: "submit_request",
       target_contract: {
@@ -706,6 +763,7 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     const attempts: BrowserTargetResolutionAttempt[] = [];
     const stage = {
       id: "stage_submit",
+      stage_kind: "business_submit",
       order: 3,
       node_id: "submit_request",
       target_contract: {

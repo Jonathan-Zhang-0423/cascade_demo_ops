@@ -156,6 +156,7 @@ export type BrowserAgentOpenRequest = {
   mask_selectors?: string[];
 	recording_sensitive?: boolean;
 	record_trace?: boolean;
+  visual_max_calls?: number;
   task_secrets?: Record<string, BrowserAgentTaskSecret>;
 };
 
@@ -296,9 +297,11 @@ type BrowserAgentSession = {
 	visualChangeByNodeID: Map<string, boolean>;
 	outcomeChangesByNodeID: Map<string, OutcomeChangeEvidence>;
 	interactionProofByNodeID: Map<string, InteractionProofEvidence>;
+	interactionProofBySessionID: Map<string, InteractionProofEvidence>;
 	interactionStateHistory: string[];
 	latestNumericIncrease: boolean;
 	latestFrameChange: boolean;
+	visualMaxCalls: number;
 	temporalSnapshotsByScopeID: Map<string, OutcomeSnapshot>;
 	visionPollArtifactsByNodeID: Map<string, ArtifactRef[]>;
 	visionPollEvidenceByNodeID: Map<string, EvidenceRef[]>;
@@ -341,6 +344,23 @@ export type BrowserVisualObservation = {
 };
 
 type ResolvedTarget = { locator: any; strategy: string; approvedAlternative?: { kind: string; value: string } };
+
+export type AdaptiveTargetCandidateScore = {
+  role_state: number;
+  semantic: number;
+  container_context: number;
+  uniqueness: number;
+  transition_feasibility: number;
+};
+
+export function adaptiveTargetCandidateScore(value: AdaptiveTargetCandidateScore): number {
+  const unit = (input: number) => Math.max(0, Math.min(1, Number.isFinite(input) ? input : 0));
+  return unit(value.role_state) * .30 + unit(value.semantic) * .25 + unit(value.container_context) * .20 + unit(value.uniqueness) * .15 + unit(value.transition_feasibility) * .10;
+}
+
+export function adaptiveTargetCandidateExecutable(best: number, secondBest?: number): boolean {
+  return best >= .85 && (secondBest === undefined || best - secondBest >= .20);
+}
 
 const sessions = new Map<string, BrowserAgentSession>();
 const targetProbeTimeoutMS = 2_000;
@@ -419,9 +439,11 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 	visualChangeByNodeID: new Map(),
 	outcomeChangesByNodeID: new Map(),
 	interactionProofByNodeID: new Map(),
+	interactionProofBySessionID: new Map(),
 	interactionStateHistory: [],
 	latestNumericIncrease: false,
 	latestFrameChange: false,
+	visualMaxCalls: Math.max(1, Math.min(12, Math.trunc(Number(request.visual_max_calls) || 12))),
 		temporalSnapshotsByScopeID: new Map(),
 		visionPollArtifactsByNodeID: new Map(),
 		visionPollEvidenceByNodeID: new Map(),
@@ -860,12 +882,17 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   const outcomeAfter = await captureOutcomeSnapshot(session.page);
   const changes = compareOutcomeSnapshots(outcomeBefore, outcomeAfter, networkSettled);
   if (changes.url) session.continuationURL = outcomeAfter.url;
-  const proof = session.interactionProofByNodeID.get(request.stage.node_id) || {};
+  const proofSession = stringParameter(request.stage.interactions[0]?.parameters, "proof_session_id");
+  const proof = {
+    ...(proofSession ? session.interactionProofBySessionID.get(proofSession) : undefined),
+    ...(session.interactionProofByNodeID.get(request.stage.node_id) || {}),
+  };
   const recipe = String(request.stage.interactions[0]?.parameters?.action_recipe || "");
   if (recipe === "observe" && (request.stage.validations || []).some((validation) => validation.kind === "numeric_increased")) {
     proof.numericIncreased = session.latestNumericIncrease;
     if (session.latestFrameChange) changes.frame = true;
   }
+  if (recipe === "observe" && proofSession && session.latestFrameChange) changes.frame = true;
   Object.assign(changes, proof);
   session.outcomeChangesByNodeID.set(request.stage.node_id, changes);
   if (changes.visual) session.visualChangeByNodeID.set(request.stage.node_id, true);
@@ -1074,23 +1101,36 @@ async function executeInteraction(
     if (stateBefore) session.interactionStateHistory.push(stateBefore);
     const delayMS = numericParameter(interaction.parameters, "inter_key_delay_ms", 350, 100, 1_000);
     const digests = new Set<string>([before]);
-    for (const key of keys) {
+    let currentDigest = before;
+    const successfulKeys = new Set<string>();
+    const maxAttempts = numericParameter(interaction.parameters, "max_attempts", keys.length, keys.length, 12);
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const key = keys[attempt % keys.length]!;
+      const priorDigest = currentDigest;
       if (playableTarget?.keyboardTarget?.press) {
         await playableTarget.keyboardTarget.press(key, { timeout }).catch(async () => session.page.keyboard.press(key));
       } else {
         await session.page.keyboard.press(key);
       }
       await session.page.waitForTimeout(delayMS);
-      digests.add(await visualDigest(session.page, playableTarget?.digestTarget));
+      const nextDigest = await visualDigest(session.page, playableTarget?.digestTarget);
+      digests.add(nextDigest);
+      if (nextDigest !== priorDigest) successfulKeys.add(key);
+      currentDigest = nextDigest;
       const state = await interactiveStateDigest(session.page, playableTarget?.digestTarget);
       if (state) session.interactionStateHistory.push(state);
+      const numericNow = await visibleNumericValues(session.page);
+      if (successfulKeys.size >= 2 && numericSeriesIncreased(numericBefore, numericNow)) break;
     }
     const numericAfter = await visibleNumericValues(session.page);
     const numericIncreased = numericSeriesIncreased(numericBefore, numericAfter);
     const changed = digests.size > 1;
     session.latestNumericIncrease = numericIncreased;
     session.latestFrameChange = changed;
-    session.interactionProofByNodeID.set(stage.node_id, { distinctActions: new Set(keys).size, numericIncreased });
+    const interactionProof = { distinctActions: successfulKeys.size, numericIncreased };
+    session.interactionProofByNodeID.set(stage.node_id, interactionProof);
+    const proofSession = stringParameter(interaction.parameters, "proof_session_id");
+    if (proofSession) session.interactionProofBySessionID.set(proofSession, interactionProof);
     session.visualChangeByNodeID.set(stage.node_id, changed);
     return;
   }
@@ -1119,7 +1159,10 @@ async function executeInteraction(
     await session.page.waitForTimeout(500);
     const changed = before !== await visualDigest(session.page, target.digestTarget);
     session.latestFrameChange = changed;
-    session.interactionProofByNodeID.set(stage.node_id, { inputModality: "touch" });
+    const gestureProof = { inputModality: "touch" };
+    session.interactionProofByNodeID.set(stage.node_id, gestureProof);
+    const gestureSession = stringParameter(interaction.parameters, "proof_session_id");
+    if (gestureSession) session.interactionProofBySessionID.set(gestureSession, { ...(session.interactionProofBySessionID.get(gestureSession) || {}), ...gestureProof });
     session.visualChangeByNodeID.set(stage.node_id, changed);
     return;
   }
@@ -1134,7 +1177,10 @@ async function executeInteraction(
       await session.page.waitForTimeout(400);
       observed.add(await interactiveStateDigest(session.page));
     }
-    session.interactionProofByNodeID.set(stage.node_id, { stateVariants: [...observed].filter(Boolean).length });
+    const variantProof = { stateVariants: [...observed].filter(Boolean).length };
+    session.interactionProofByNodeID.set(stage.node_id, variantProof);
+    const variantSession = stringParameter(interaction.parameters, "proof_session_id");
+    if (variantSession) session.interactionProofBySessionID.set(variantSession, { ...(session.interactionProofBySessionID.get(variantSession) || {}), ...variantProof });
     session.latestFrameChange = observed.size > 0;
     session.visualChangeByNodeID.set(stage.node_id, observed.size > 0);
     return;
@@ -1169,7 +1215,10 @@ async function executeInteraction(
 	if (interaction.kind === "click" && String(interaction.parameters?.action_recipe || "") === "activate_control") {
 		const restored = await interactiveStateDigest(session.page);
 		const history = session.interactionStateHistory.slice(0, -1);
-		session.interactionProofByNodeID.set(stage.node_id, { restoreSimilarity: restored && history.includes(restored) ? 1 : 0 });
+		const restoreProof = { restoreSimilarity: restored && history.includes(restored) ? 1 : 0 };
+		session.interactionProofByNodeID.set(stage.node_id, restoreProof);
+		const restoreSession = stringParameter(interaction.parameters, "proof_session_id");
+		if (restoreSession) session.interactionProofBySessionID.set(restoreSession, { ...(session.interactionProofBySessionID.get(restoreSession) || {}), ...restoreProof });
 	}
 	if (trackVisualChange) {
 		session.visualChangeByNodeID.set(stage.node_id, visualDigestBefore !== await pageVisualDigest(session.page));
@@ -1315,6 +1364,7 @@ function structuralInputLocator(page: any, stage: BrowserAgentWorkerStage, inter
 }
 
 function structuralModalSubmitLocator(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction): { strategy: string; locator: any } | undefined {
+	if (stage.stage_kind !== "business_submit") return undefined;
   if (interaction.kind !== "click" || stage.interaction_contract?.replay_policy !== "once_effect") return undefined;
   if (stage.target_contract.destructive) return undefined;
   const roles = new Set((stage.target_contract.allowed_roles || []).map((value) => value.trim().toLowerCase()));
@@ -1344,6 +1394,11 @@ async function resolveUniqueVisibleStructuralSubmitTarget(locator: any, strategy
     attempts.push(targetResolutionAttempt(strategy, eligible.length, false, false, false, eligible.length === 0 ? "no_candidates" : "ambiguous"));
     return undefined;
   }
+	const score = adaptiveTargetCandidateScore({ role_state: 1, semantic: .8, container_context: 1, uniqueness: 1, transition_feasibility: 1 });
+	if (!adaptiveTargetCandidateExecutable(score)) {
+		attempts.push(targetResolutionAttempt(strategy, 1, true, true, false, "name_mismatch", true, false));
+		return undefined;
+	}
   attempts.push(targetResolutionAttempt(strategy, 1, true, true, false, "resolved", true, true));
   return { locator: eligible[0]!.locator, strategy };
 }
@@ -1521,6 +1576,8 @@ async function resolveUniqueVisibleContractTarget(locator: any, strategy: string
     attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "name_mismatch", true, false));
     return undefined;
   }
+  const score = adaptiveTargetCandidateScore({ role_state: 1, semantic: 1, container_context: 1, uniqueness: 1, transition_feasibility: 1 });
+  if (!adaptiveTargetCandidateExecutable(score)) return undefined;
   attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "resolved", true, true));
   return { locator: unique, strategy };
 }
@@ -1791,6 +1848,14 @@ export function confirmedBrowserVisualTerminalDecision(observations: BrowserVisu
 	return latest.decision;
 }
 
+export function browserVisualTerminalWithStructuralEvidence(observations: BrowserVisualObservation[], maxCalls: number, minimumConfidence = 0.9): "succeeded" | "failed" | undefined {
+	const latest = observations.at(-1);
+	if (Math.trunc(maxCalls) <= 2 && latest && (latest.decision === "succeeded" || latest.decision === "failed") && latest.confidence >= minimumConfidence) {
+		return latest.decision;
+	}
+	return confirmedBrowserVisualTerminalDecision(observations, minimumConfidence);
+}
+
 export function browserVisualObservationAllocation(maxCalls: number, requireVisualTerminal: boolean): { heartbeatLimit: number; terminalReserve: number } {
 	const bounded = Math.max(1, Math.min(12, Math.trunc(Number(maxCalls) || 1)));
 	const terminalReserve = requireVisualTerminal ? Math.max(0, bounded - 1) : 0;
@@ -1810,8 +1875,9 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	stage: BrowserAgentWorkerStage,
 	timeout: number,
 ): Promise<{ surface: boolean; score: boolean; controls: boolean }> {
-	const config = browserVisionObserverConfig();
-	if (!config) return waitForPlayableSurface(session.page, timeout);
+	const baseConfig = browserVisionObserverConfig();
+	if (!baseConfig) return waitForPlayableSurface(session.page, timeout);
+	const config = { ...baseConfig, maxCalls: Math.min(baseConfig.maxCalls, session.visualMaxCalls) };
 	const deadline = Date.now() + interactiveSurfacePollTimeout(timeout);
 	const requireVisualTerminal = stage.interaction_contract?.parameters?.require_visual_terminal_confirmation === true;
 	const { heartbeatLimit } = browserVisualObservationAllocation(config.maxCalls, requireVisualTerminal);
@@ -1837,7 +1903,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 				}
 				return { surface: true, score: target.stateful, controls: target.focusable };
 			}
-			const terminal = confirmedBrowserVisualTerminalDecision(existing);
+			const terminal = browserVisualTerminalWithStructuralEvidence(existing, config.maxCalls);
 			if (terminal === "succeeded") return { surface: true, score: target.stateful, controls: target.focusable };
 			if (terminal === "failed") return { surface: false, score: false, controls: false };
 			if (Date.now() >= nextCaptureAt && existing.length < config.maxCalls) {
@@ -1845,7 +1911,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 				// Sparse in-progress polling preserves enough calls for a late result
 				// plus the mandatory independent terminal confirmation.
 				nextCaptureAt = Date.now() + config.intervalMS * browserVisualNextDelayMultiplier(observed.decision);
-				const updatedTerminal = confirmedBrowserVisualTerminalDecision(session.visionVerdictsByNodeID.get(stage.node_id) || []);
+				const updatedTerminal = browserVisualTerminalWithStructuralEvidence(session.visionVerdictsByNodeID.get(stage.node_id) || [], config.maxCalls);
 				if (updatedTerminal === "succeeded") return { surface: true, score: target.stateful, controls: target.focusable };
 				if (updatedTerminal === "failed") return { surface: false, score: false, controls: false };
 			}
@@ -2630,6 +2696,11 @@ function booleanParameter(parameters: Record<string, unknown> | undefined, key: 
     if (value.trim().toLowerCase() === "false") return false;
   }
   return fallback;
+}
+
+function stringParameter(parameters: Record<string, unknown> | undefined, key: string): string {
+  const value = parameters?.[key];
+  return typeof value === "string" ? value.trim().slice(0, 128) : "";
 }
 
 function approvedContinuationRouteVerified(

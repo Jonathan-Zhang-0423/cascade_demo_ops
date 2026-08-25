@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,62 @@ import (
 
 	"cascade-demoops/backend/internal/model"
 )
+
+func TestAdaptiveHarnessReplaysJobE1DAsOneSubmitAndSkipsStageFive(t *testing.T) {
+	file, err := os.Open(filepath.Join("testdata", "adaptive-harness", "job-e1d-stage-3-5-replay.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	events := []model.StageExecutionEvent{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var event model.StageExecutionEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	modeStage := BrowserAgentRuntimeStage{
+		ID: "stage_step_04_business_stage_select_build_mode", Order: 4, NodeID: "business_stage_select_build_mode",
+		StageKind: model.BusinessStageKindModeSelection, EntryRoute: "https://product.example/workspace",
+		InteractionContract: &model.InteractionContract{ReplayPolicy: model.InteractionReplayIdempotentWrite},
+	}
+	submitStage := BrowserAgentRuntimeStage{
+		ID: "stage_step_05_business_stage_start_agent_build", Order: 5, NodeID: "business_stage_start_agent_build",
+		StageKind: model.BusinessStageKindBusinessSubmit, EntryRoute: "https://product.example/workspace",
+		InteractionContract: &model.InteractionContract{ReplayPolicy: model.InteractionReplayOnceEffect},
+	}
+	plan := BrowserAgentRuntimePlan{
+		RunID: "run_replay", SourcePackageID: "pkg_replay", SourceBundleHashSHA256: "bundle-replay", PolicyHashSHA256: "policy-replay",
+		HarnessProfile: model.AdaptiveBusinessHarnessProfileV1, Stages: []BrowserAgentRuntimeStage{modeStage, submitStage},
+	}
+	absorbed := historicalAdaptiveAbsorptions(plan, events)
+	checkpoint := absorbed[submitStage.ID]
+	if checkpoint == nil || checkpoint.EntityRef != "https://product.example/entity/alpha" || !checkpoint.ActionOccurred {
+		t.Fatalf("stage four was not reclassified as the real submit effect: %+v", checkpoint)
+	}
+	sink := &memoryStageEventSink{events: events}
+	executor := &resumableStageExecutor{revalidatePass: true}
+	result, err := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{}).Run(context.Background(), plan, unresolvedStageObserver{}, executor, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executor.executeCalls != 0 {
+		t.Fatalf("replay must perform zero new clicks, got %d actions", executor.executeCalls)
+	}
+	foundSkip, foundAbsorption := false, false
+	for _, event := range result.Events {
+		foundSkip = foundSkip || event.StageID == submitStage.ID && event.EventType == model.StageExecutionEventStepSatisfied
+		foundAbsorption = foundAbsorption || event.StageID == submitStage.ID && event.EventType == model.StageExecutionEventTransitionAbsorbed
+	}
+	if !foundSkip || !foundAbsorption {
+		t.Fatalf("stage five was not auditably skipped by successor observation: %+v", result.Events)
+	}
+}
 
 func TestCompileBrowserAgentRuntimePlanKeepsApprovedStageOrderAndSemantics(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
@@ -424,6 +481,28 @@ func TestBrowserAgentStageOrchestratorCaptureTimingRepairDoesNotReplayAction(t *
 	}
 }
 
+func TestBrowserAgentStageOrchestratorOnceEffectRepairNeverReplaysAction(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Stages[0].InteractionContract = &model.InteractionContract{ReplayPolicy: model.InteractionReplayOnceEffect}
+	executor := &countingRevalidatingStageExecutor{}
+	result, err := newBrowserAgentStageOrchestratorWithVerifier(contractBrowserAgentPolicyGuard{}, &repairThenContinueVerifier{}).Run(context.Background(), plan, stubStageObserver{}, executor, &memoryStageEventSink{})
+	if err != nil {
+		t.Fatalf("once-effect outcome repair should revalidate: %v", err)
+	}
+	if executor.executeCalls != len(plan.Stages) || executor.revalidateCalls != 1 {
+		t.Fatalf("once-effect repair replayed the action: execute=%d revalidate=%d", executor.executeCalls, executor.revalidateCalls)
+	}
+	for _, event := range result.Events {
+		if event.StageID == plan.Stages[0].ID && event.Attempt == 2 && (event.EventType == model.StageExecutionEventActionStarted || event.EventType == model.StageExecutionEventActionCompleted) {
+			t.Fatalf("second once-effect action attempt was audited: %+v", event)
+		}
+	}
+}
+
 func TestBrowserAgentStageOrchestratorCaptureTimingRepairFailsClosedWithoutRevalidator(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	plan, err := compileBrowserAgentRuntimePlan(&pkg)
@@ -796,6 +875,21 @@ func (e *countingStageExecutor) ExecuteStage(_ context.Context, _ BrowserAgentRu
 type captureTimingStageExecutor struct {
 	executeCalls    int
 	revalidateCalls int
+}
+
+type countingRevalidatingStageExecutor struct {
+	executeCalls    int
+	revalidateCalls int
+}
+
+func (e *countingRevalidatingStageExecutor) ExecuteStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
+	e.executeCalls++
+	return BrowserAgentStageActionResult{Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "outcome", Passed: true}}}, EvidenceRefs: []model.EvidenceRef{{ID: fmt.Sprintf("once_action_%d", e.executeCalls), Kind: model.EvidenceKindBrowserTrace}}}, nil
+}
+
+func (e *countingRevalidatingStageExecutor) RevalidateStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
+	e.revalidateCalls++
+	return BrowserAgentStageActionResult{Observation: &model.RuntimeObservation{Source: model.RuntimeObservationAssertion, Assertions: []model.RuntimeAssertion{{Kind: "outcome", Passed: true}}}, EvidenceRefs: []model.EvidenceRef{{ID: "once_effect_revalidated", Kind: model.EvidenceKindBrowserTrace}}}, nil
 }
 
 func (e *captureTimingStageExecutor) ExecuteStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageActionResult, error) {
