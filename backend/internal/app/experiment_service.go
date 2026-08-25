@@ -8,7 +8,8 @@ import (
 )
 
 type ExperimentResumeRequest struct {
-	ExpectedRevision int `json:"expected_revision"`
+	ExpectedRevision int    `json:"expected_revision"`
+	Strategy         string `json:"strategy,omitempty"`
 }
 
 type ExperimentCancelRequest struct {
@@ -50,11 +51,15 @@ func (s *Service) ListExperimentEvents(ctx context.Context, runID string) ([]exp
 	return s.experiments.ListEvents(ctx, runID)
 }
 
-func (s *Service) ResumeExperimentRun(ctx context.Context, runID string, expectedRevision int) (experiment.Run, error) {
+func (s *Service) ResumeExperimentRun(ctx context.Context, runID string, expectedRevision int, strategies ...string) (experiment.Run, error) {
 	if s == nil || s.experiments == nil {
 		return experiment.Run{}, errors.New("experiment coordinator is unavailable")
 	}
-	run, err := s.experiments.Resume(ctx, runID, expectedRevision)
+	strategy := ""
+	if len(strategies) > 0 {
+		strategy = strategies[0]
+	}
+	run, err := s.experiments.Resume(ctx, runID, expectedRevision, strategy)
 	if err == nil && s.experimentAutoStart && run.State == experiment.RunStateQueued {
 		s.enqueueExperimentRun(run.RunID)
 	}

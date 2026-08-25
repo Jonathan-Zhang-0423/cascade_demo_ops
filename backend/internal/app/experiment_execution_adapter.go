@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -66,6 +67,10 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 			if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "resume_external_task", Summary: "续接已持久化的 Direct 任务，不重新规划或提交", EvidenceRefs: []string{jobID}}); err != nil {
 				return err
 			}
+			status, statusErr := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
+			if statusErr == nil && status.Status == "failed" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
+			}
 			status, err := a.waitForDirectResult(ctx, projectID, jobID, request.ObservationPlan, emit)
 			if err != nil {
 				return err
@@ -105,6 +110,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 	effectKey := "submit-" + safePathSegment(request.RunID) + "-" + safePathSegment(request.LegID)
 	runtimeMetadata := map[string]any{
 		"experiment_run_id": request.RunID, "experiment_leg_id": request.LegID,
+		"harness_profile":  request.HarnessProfile,
 		"observation_plan": request.ObservationPlan, "interaction_plan": request.InteractionPlan,
 		"visual_call_budget": request.VisualCallBudget, "expected_product_summary": experimentProductEvidenceSummary(request.ProductSpec),
 	}
@@ -146,6 +152,41 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		return err
 	}
 	return a.completeDirectLeg(ctx, request, prepared.State.ProjectID, jobID, status, true, emit)
+}
+
+func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, emit func(experiment.LegExecutionUpdate) error) error {
+	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "reconcile_observed_state", Summary: "失败诊断显示业务已进入后继实体；正在生成只观察续接包", EvidenceRefs: []string{sourceJobID}}); err != nil {
+		return err
+	}
+	prepared, err := a.service.prepareAdaptiveDirectReconciliation(ctx, projectID, sourceJobID, request.InteractionPlan, request.ObservationPlan)
+	if err != nil || prepared.State == nil || prepared.Build.Package.ConfidenceSummary == nil {
+		return &experiment.AdapterError{Code: "observed_successor_reconciliation_unavailable", Phase: "reconcile_observed_state", State: experiment.RunStateWaitingInput, Retryable: false, EvidenceRefs: []string{sourceJobID}, Cause: err}
+	}
+	runtimeMetadata := map[string]any{
+		"experiment_run_id": request.RunID, "experiment_leg_id": request.LegID,
+		"harness_profile": request.HarnessProfile, "observation_plan": request.ObservationPlan, "interaction_plan": request.InteractionPlan,
+		"visual_call_budget": request.VisualCallBudget, "expected_product_summary": experimentProductEvidenceSummary(request.ProductSpec),
+		"reconciles_direct_job": sourceJobID,
+	}
+	reconcileKey := "reconcile-" + safePathSegment(request.RunID) + "-" + safePathSegment(request.LegID) + fmt.Sprintf("-%d", request.BrowserAttempt)
+	upload, err := a.service.UploadDirectExecutionPackage(ctx, projectID, DirectTransportUploadRequest{
+		OrgID: defaultDesktopOrgID, PackageDigestSHA256: prepared.Build.PackageDigestSHA256,
+		ApprovalSubjectDigestSHA256: prepared.Build.ApprovalSubjectDigestSHA256,
+		ConfidenceAssessmentHash:    prepared.Build.Package.ConfidenceSummary.AssessmentHash,
+		RiskConfirmed:               true, IdempotencyKey: reconcileKey, RuntimeMetadata: runtimeMetadata,
+	})
+	if err != nil {
+		return &experiment.AdapterError{Code: "adaptive_reconciliation_upload_failed", Phase: "reconcile_observed_state", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{sourceJobID}, Cause: err}
+	}
+	jobID := upload.Receipt.JobID
+	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "resume_observe_only", Summary: "只观察续接任务已启动；不会执行创建或提交", EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
+		return err
+	}
+	status, err := a.waitForDirectResult(ctx, projectID, jobID, request.ObservationPlan, emit)
+	if err != nil {
+		return err
+	}
+	return a.completeDirectLeg(ctx, request, projectID, jobID, status, true, emit)
 }
 
 func experimentProductEvidenceSummary(spec experiment.ProductSpec) string {
@@ -198,6 +239,11 @@ func compileExperimentInteractionContracts(plan experiment.InteractionPlan, obse
 		parameters := map[string]any{
 			"evidence_step_id": step.StepID, "evidence_slots": append([]string{}, step.EvidenceSlots...),
 			"max_attempts": step.MaxAttempts, "action_recipe": step.Action.Kind,
+		}
+		if step.CapabilityLayer != "" {
+			parameters["capability_layer"] = step.CapabilityLayer
+			parameters["capability_score"] = step.CapabilityScore
+			parameters["proof_session_id"] = step.ProofSessionID
 		}
 		if len(step.Action.Keys) > 0 {
 			parameters["keys"] = append([]string{}, step.Action.Keys...)
@@ -316,6 +362,22 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 			return err
 		}
 	}
+	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+		score, scoreEvidence, scoreErr := readAdaptiveCapabilityScore(downloads)
+		if scoreErr != nil {
+			return &experiment.AdapterError{Code: "capability_score_invalid", Phase: "interaction_verification", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: evidenceRefs, Cause: scoreErr}
+		}
+		if score == nil {
+			return &experiment.AdapterError{Code: "capability_score_missing", Phase: "interaction_verification", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: evidenceRefs}
+		}
+		summary := &experiment.CapabilitySummary{CoreScore: score.CoreScore, EnhancementScore: score.EnhancementScore, TotalScore: score.TotalScore, CorePassed: score.CorePassed, EligibleForFilm: score.EligibleForFilm, Missing: append([]string{}, score.Missing...)}
+		if err := emit(experiment.LegExecutionUpdate{Kind: "capability_scored", Summary: "核心能力与增强能力已完成分层评分", EvidenceRefs: []string{scoreEvidence}, CapabilityScore: summary}); err != nil {
+			return err
+		}
+		if !score.CorePassed || !score.EligibleForFilm {
+			return &experiment.AdapterError{Code: "core_capability_gate_failed", Phase: "interaction_verification", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: []string{scoreEvidence}}
+		}
+	}
 	visualArtifacts := []experiment.ArtifactRef{}
 	liveVisualCalls, liveTerminal, liveErr := recordLiveBrowserVisualObservations(downloads, emit)
 	if liveErr != nil {
@@ -351,6 +413,46 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 		return a.runFinalFilm(ctx, request, projectID, result, materialized.SessionID, downloads, emit)
 	}
 	return nil
+}
+
+func readAdaptiveCapabilityScore(downloads []CloudDeliverableDownloadResult) (*model.CapabilityScore, string, error) {
+	var latest *model.CapabilityScore
+	evidence := ""
+	for _, item := range downloads {
+		if item.Kind != "browser_agent_stage_event_log" {
+			continue
+		}
+		file, err := os.Open(item.LocalPath)
+		if err != nil {
+			return nil, "", err
+		}
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 64*1024), experiment.MaxEventBodyBytes)
+		for scanner.Scan() {
+			var event model.StageExecutionEvent
+			if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+				_ = file.Close()
+				return nil, "", err
+			}
+			if event.EventType == model.StageExecutionEventCapabilityScored && event.CapabilityScore != nil {
+				copyScore := *event.CapabilityScore
+				latest = &copyScore
+				evidence = item.ArtifactID
+			}
+		}
+		scanErr := scanner.Err()
+		_ = file.Close()
+		if scanErr != nil {
+			return nil, "", scanErr
+		}
+	}
+	if latest == nil {
+		return nil, "", nil
+	}
+	if latest.SchemaVersion != "demoops.capability_score.v1" || latest.CoreScore < 0 || latest.EnhancementScore < 0 || latest.TotalScore != latest.CoreScore+latest.EnhancementScore || latest.TotalScore > 100 || latest.EligibleForFilm != latest.CorePassed {
+		return nil, "", errors.New("stage event log contains an invalid capability score")
+	}
+	return latest, evidence, nil
 }
 
 func recordLiveBrowserVisualObservations(downloads []CloudDeliverableDownloadResult, emit func(experiment.LegExecutionUpdate) error) (int, bool, error) {

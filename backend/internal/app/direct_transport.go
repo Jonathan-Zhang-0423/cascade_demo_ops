@@ -455,6 +455,7 @@ func bindExperimentRuntimeMetadata(build ClientExecutionPackageBuild, phase stri
 	allowed := map[string]bool{
 		"experiment_run_id": true, "experiment_leg_id": true, "observation_plan": true,
 		"interaction_plan": true, "visual_call_budget": true, "expected_product_summary": true,
+		"harness_profile": true, "reconciles_direct_job": true,
 	}
 	for key, value := range metadata {
 		if !allowed[key] {

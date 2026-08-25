@@ -221,7 +221,7 @@ func (s *DevHTTPServer) handleExperimentRunRoute(w http.ResponseWriter, r *http.
 			writeBridgeValue(w, nil, err)
 			return
 		}
-		run, err := s.service.ResumeExperimentRun(r.Context(), runID, request.ExpectedRevision)
+		run, err := s.service.ResumeExperimentRun(r.Context(), runID, request.ExpectedRevision, request.Strategy)
 		writeBridgeValue(w, run, err)
 	case r.Method == http.MethodPost && suffix == "/cancel":
 		var request ExperimentCancelRequest

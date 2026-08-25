@@ -56,7 +56,7 @@ func TestCompileExperimentInteractionContractsPreservesExecutableProofSemantics(
 	if len(contracts) != len(loaded.InteractionPlan.Steps) {
 		t.Fatalf("contracts=%d steps=%d", len(contracts), len(loaded.InteractionPlan.Steps))
 	}
-	wantActions := []model.GraphActionType{model.GraphActionInspect, model.GraphActionPress, model.GraphActionInspect, model.GraphActionClick, model.GraphActionGesture, model.GraphActionClick}
+	wantActions := []model.GraphActionType{model.GraphActionInspect, model.GraphActionPress, model.GraphActionInspect, model.GraphActionInspect, model.GraphActionClick, model.GraphActionGesture, model.GraphActionClick}
 	for index, contract := range contracts {
 		if contract.ActionKind != wantActions[index] {
 			t.Fatalf("contract %d action=%s want=%s", index, contract.ActionKind, wantActions[index])
@@ -83,7 +83,7 @@ func TestCompileExperimentInteractionContractsPreservesExecutableProofSemantics(
 	if got := contracts[2].ExpectedTransitions; !interactionPredicatesContain(got, "numeric_increased") || !interactionPredicatesContain(got, "state_changed") {
 		t.Fatalf("numeric proof predicates=%+v", got)
 	}
-	if got := contracts[4].ExpectedTransitions; !interactionPredicatesContain(got, "input_modality_used") {
+	if got := contracts[5].ExpectedTransitions; !interactionPredicatesContain(got, "input_modality_used") {
 		t.Fatalf("touch proof predicates=%+v", got)
 	}
 }
@@ -126,6 +126,22 @@ func TestRecordLiveBrowserVisualObservationsCountsCallsAndRequiresConfidentTermi
 	})
 	if err != nil || calls != 4 || emitted != 3 || !terminal {
 		t.Fatalf("live observations calls=%d emitted=%d terminal=%t err=%v", calls, emitted, terminal, err)
+	}
+}
+
+func TestReadAdaptiveCapabilityScoreUsesPersistedStageEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stage-events.jsonl")
+	event := model.StageExecutionEvent{
+		SchemaVersion: model.StageExecutionEventSchemaVersion, EventType: model.StageExecutionEventCapabilityScored,
+		CapabilityScore: &model.CapabilityScore{SchemaVersion: "demoops.capability_score.v1", CoreScore: 70, EnhancementScore: 18, TotalScore: 88, CorePassed: true, EligibleForFilm: true},
+	}
+	payload, _ := json.Marshal(event)
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	score, evidence, err := readAdaptiveCapabilityScore([]CloudDeliverableDownloadResult{{ArtifactID: "events", Kind: "browser_agent_stage_event_log", LocalPath: path}})
+	if err != nil || score == nil || score.TotalScore != 88 || evidence != "events" {
+		t.Fatalf("capability score was not recovered from stage events: score=%+v evidence=%q err=%v", score, evidence, err)
 	}
 }
 

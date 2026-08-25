@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"cascade-demoops/backend/internal/config"
+	"cascade-demoops/backend/internal/experiment"
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 	"cascade-demoops/backend/internal/store"
@@ -108,6 +110,107 @@ func TestTerminalInteractionRepairGraphResumesObservedRouteWithoutReplayingWrite
 	}}
 	if _, eligible, err := terminalInteractionVerificationRepairGraph(&orchestrator.CascadeState{ProjectContext: state.ProjectContext, WorkflowGraph: repaired}, navigationFailure, time.Now()); !eligible || err == nil {
 		t.Fatalf("a failed generic route restore must stop for re-understanding instead of synthesizing a site selector: eligible=%v err=%v", eligible, err)
+	}
+}
+
+func TestAdaptiveSuccessorRepairSkipsMissingSubmitAndKeepsVerificationSuffix(t *testing.T) {
+	const observedURL = "https://app.example.com/entity/already-created"
+	node := func(id string, action model.GraphActionType, replay model.InteractionReplayPolicy) *model.GraphNode {
+		value := &model.GraphNode{ID: id, Type: model.GraphNodeTypeAction, Action: string(action), ActionSpec: &model.GraphAction{Type: action}, PageRef: "/workspace"}
+		if replay != "" {
+			value.InteractionContract = &model.InteractionContract{ReplayPolicy: replay}
+		}
+		return value
+	}
+	graph := model.NewDemoWorkflowGraph("graph_before_successor", "project", "https://app.example.com/workspace")
+	graph.Nodes = []*model.GraphNode{
+		node("open_creation", model.GraphActionClick, model.InteractionReplayOnceEffect),
+		node("fill_request", model.GraphActionFill, model.InteractionReplayIdempotentWrite),
+		node("missing_submit", model.GraphActionClick, model.InteractionReplayOnceEffect),
+		node("observe_progress", model.GraphActionWait, model.InteractionReplayObserveOnly),
+		node("verify_surface", model.GraphActionInspect, model.InteractionReplayObserveOnly),
+		node("prove_interaction", model.GraphActionPress, model.InteractionReplayIdempotentWrite),
+	}
+	bundle := &model.ExecutableRecordingScriptBundle{ScriptOutline: &model.BrowserAgentScriptOutline{Stages: []model.BrowserAgentOutlineStage{{NodeID: "missing_submit", StageKind: model.BusinessStageKindBusinessSubmit}}}}
+	state := &orchestrator.CascadeState{
+		ProjectContext:         &model.ProjectContext{ProductURL: "https://app.example.com"},
+		WorkflowGraph:          graph,
+		ExecutableScriptBundle: bundle,
+	}
+	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{FailedNodeID: "missing_submit", CurrentURL: observedURL}}
+	repaired, eligible, err := terminalInteractionVerificationRepairGraph(state, result, time.Now())
+	if err != nil || !eligible {
+		t.Fatalf("adaptive successor repair was not created: eligible=%t err=%v", eligible, err)
+	}
+	if len(repaired.Nodes) != 4 || repaired.Nodes[0].ActionSpec.Type != model.GraphActionNavigate || repaired.Nodes[0].ActionSpec.Target.URL != observedURL {
+		t.Fatalf("repair did not begin at the observed entity: %+v", repaired.Nodes)
+	}
+	for _, repairedNode := range repaired.Nodes {
+		if repairedNode.ID == "open_creation" || repairedNode.ID == "fill_request" || (repairedNode.ActionSpec != nil && repairedNode.ActionSpec.Type == model.GraphActionClick) {
+			t.Fatalf("repair retained a creation or submit action: %+v", repairedNode)
+		}
+	}
+}
+
+func TestPrepareAdaptiveDirectReconciliationBuildsObserveOnlyPackage(t *testing.T) {
+	service, states, state, build := newDirectReunderstandingTestState(t)
+	result := directReunderstandingFailedResult(build, false)
+	failedNode := ""
+	for _, stage := range build.Package.ExecutableScriptBundle.ScriptOutline.Stages {
+		if stage.StageKind == model.BusinessStageKindBusinessSubmit {
+			failedNode = stage.NodeID
+			break
+		}
+	}
+	if failedNode == "" {
+		t.Fatal("fixture has no business submit stage")
+	}
+	result.FailureDiagnostic.FailedNodeID = failedNode
+	result.FailureDiagnostic.CurrentURL = strings.TrimSuffix(state.ProjectContext.ProductURL, "/") + "/result/already-created"
+	result.FailureDiagnostic.ScreenshotRefs = []model.PackageArtifactDescriptor{{ID: "observed_successor", Kind: "screenshot", URI: "artifact://observed-successor", SHA256: strings.Repeat("a", 64), SizeBytes: 128}}
+	if err := service.persistCloudResult(t.Context(), state.ProjectID, defaultDesktopOrgID, result); err != nil {
+		t.Fatal(err)
+	}
+	definition, err := experiment.LoadDefinition("../../../experiments", "2048-v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := service.prepareAdaptiveDirectReconciliation(t.Context(), state.ProjectID, result.CloudJobID, definition.InteractionPlan, definition.ObservationPlan)
+	if err != nil {
+		persisted, _ := states.Load(t.Context(), state.ProjectID)
+		var terminal any
+		var nonDestructive any
+		if persisted != nil && persisted.ExecutableScriptBundle != nil && persisted.ExecutableScriptBundle.PlanJSON != nil {
+			for _, step := range persisted.ExecutableScriptBundle.PlanJSON.Steps {
+				if strings.Contains(step.NodeID, "terminal_scenes") {
+					terminal = step.Validations
+				}
+			}
+			bundle := persisted.ExecutableScriptBundle
+			for index, step := range bundle.PlanJSON.Steps {
+				if strings.Contains(step.NodeID, "surface_ready") && bundle.StageApprovalPlan != nil && bundle.ScriptOutline != nil {
+					nonDestructive = []any{step.NonDestructive, bundle.StageApprovalPlan.Stages[index].Interaction.NonDestructive, bundle.ScriptOutline.Stages[index].Interactions[0].NonDestructive}
+				}
+			}
+		}
+		t.Fatalf("%v terminal_validations=%+v non_destructive=%+v", err, terminal, nonDestructive)
+	}
+	if prepared.Build.Package.ExecutableScriptBundle == nil || prepared.Build.Package.ExecutableScriptBundle.ScriptOutline == nil {
+		t.Fatal("adaptive reconciliation package is incomplete")
+	}
+	seenCapabilities := 0
+	for _, stage := range prepared.Build.Package.ExecutableScriptBundle.ScriptOutline.Stages {
+		if stage.StageKind == model.BusinessStageKindBusinessSubmit || stage.StageKind == model.BusinessStageKindBusinessInput || stage.StageKind == model.BusinessStageKindModeSelection {
+			t.Fatalf("continuation package retained a creation write stage: %+v", stage)
+		}
+		if len(stage.Interactions) > 0 {
+			if _, ok := stage.Interactions[0].Parameters["capability_layer"]; ok {
+				seenCapabilities++
+			}
+		}
+	}
+	if seenCapabilities != len(definition.InteractionPlan.Steps) {
+		t.Fatalf("continuation package capability contracts=%d want=%d", seenCapabilities, len(definition.InteractionPlan.Steps))
 	}
 }
 

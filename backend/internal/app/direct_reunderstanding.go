@@ -320,6 +320,9 @@ func terminalInteractionVerificationRepairGraph(state *orchestrator.CascadeState
 	if strings.HasPrefix(state.WorkflowGraph.ID, "graph_terminal_interaction_repair_") && failedAction == model.GraphActionNavigate {
 		return nil, true, fmt.Errorf("terminal interaction repair could not restore the previously observed runtime route")
 	}
+	if failedAction == model.GraphActionClick && browserAgentStageKindForNode(state.ExecutableScriptBundle, result.FailureDiagnostic.FailedNodeID) == model.BusinessStageKindBusinessSubmit {
+		return adaptiveSuccessorObservationRepairGraph(state, result, failedIndex, now)
+	}
 	isTerminalInteraction := failedAction == model.GraphActionPress || failedAction == model.GraphActionGesture || failedAction == model.GraphActionInspect || failedAction == model.GraphActionWait
 	if !isTerminalInteraction {
 		return nil, false, nil
@@ -434,6 +437,123 @@ func terminalInteractionVerificationRepairGraph(state *orchestrator.CascadeState
 	graph.CreatedAt = now
 	graph.UpdatedAt = now
 	return graph, true, nil
+}
+
+// adaptiveSuccessorObservationRepairGraph handles the generic failure window
+// where an earlier action already crossed into the successor entity but the
+// next planned submit control no longer exists. The repair starts at the
+// concrete same-origin entity URL and retains only observation/interaction
+// verification nodes after the failed submit. Creation and submission nodes
+// are never copied into the continuation graph.
+func adaptiveSuccessorObservationRepairGraph(state *orchestrator.CascadeState, result model.RecordingResultPackage, failedIndex int, now time.Time) (*model.DemoWorkflowGraph, bool, error) {
+	if state == nil || state.ProjectContext == nil || state.WorkflowGraph == nil || result.FailureDiagnostic == nil {
+		return nil, true, fmt.Errorf("adaptive successor repair is missing persisted state")
+	}
+	observedURL, err := approvedTerminalProjectURL(state.ProjectContext, result.FailureDiagnostic.CurrentURL)
+	if err != nil {
+		return nil, true, err
+	}
+	graph, err := cloneWorkflowGraphForPackage(state.WorkflowGraph)
+	if err != nil {
+		return nil, true, err
+	}
+	if failedIndex < 0 || failedIndex >= len(graph.Nodes) {
+		return nil, true, fmt.Errorf("adaptive successor repair has no failed stage")
+	}
+	resume := graph.Nodes[failedIndex]
+	resume.Type = model.GraphNodeTypeStart
+	resume.Title = "恢复已观察到的后继业务状态"
+	resume.Goal = "进入动作完成后已经存在的业务实体，只继续观察和验证。"
+	resume.Action = string(model.GraphActionNavigate)
+	resume.Selector = ""
+	resume.PageRef = observedURL
+	resume.ActionSpec = &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: observedURL, EvidenceRefs: append([]model.EvidenceRef(nil), resume.EvidenceRefs...)}, TimeoutMS: 30_000, WaitUntil: "domcontentloaded"}
+	resume.InteractionContract = nil
+	resume.StateBefore = nil
+	resume.StateAfter = nil
+	resume.Validations = []model.ValidationSpec{{
+		ID: "validate_adaptive_successor_route", Kind: "url_matches", Target: model.ActionTarget{URL: observedURL},
+		Expected: observedURL, Required: true, Severity: "blocking", EvidenceRefs: append([]model.EvidenceRef(nil), resume.EvidenceRefs...),
+	}}
+	if resume.Metadata == nil {
+		resume.Metadata = map[string]any{}
+	}
+	resume.Metadata["adaptive_successor_resume"] = true
+	resume.Metadata["runtime_adaptive"] = true
+	resume.Metadata["non_destructive"] = true
+	resume.Metadata["verification_status"] = "runtime_adaptive"
+	resume.Metadata["business_stage_kind"] = string(model.BusinessStageKindObserveProgress)
+	resume.Metadata["business_route_state"] = string(model.BusinessRouteStateBuildRunning)
+	resume.Metadata["expected_route_after_action"] = observedURL
+	resume.Metadata["replay_policy"] = string(model.InteractionReplayObserveOnly)
+
+	retained := []*model.GraphNode{resume}
+	for index := failedIndex + 1; index < len(graph.Nodes); index++ {
+		node := graph.Nodes[index]
+		if node == nil || node.ActionSpec == nil {
+			continue
+		}
+		replay := model.InteractionReplayOnceEffect
+		if node.InteractionContract != nil {
+			replay = node.InteractionContract.ReplayPolicy
+		} else if node.ActionSpec.Type == model.GraphActionInspect || node.ActionSpec.Type == model.GraphActionWait || node.ActionSpec.Type == model.GraphActionPress || node.ActionSpec.Type == model.GraphActionGesture {
+			replay = model.InteractionReplayObserveOnly
+		}
+		if replay == model.InteractionReplayOnceEffect {
+			return nil, true, fmt.Errorf("adaptive successor repair would replay a once-effect action %s", node.ID)
+		}
+		node.Type = model.GraphNodeTypeAction
+		node.PageRef = observedURL
+		if node.ActionSpec.Target.URL != "" {
+			node.ActionSpec.Target.URL = observedURL
+		}
+		for validationIndex := range node.Validations {
+			if node.Validations[validationIndex].Kind == "url_matches" {
+				node.Validations[validationIndex].Target.URL = observedURL
+				node.Validations[validationIndex].Expected = observedURL
+			}
+		}
+		retained = append(retained, node)
+	}
+	if len(retained) < 2 {
+		return nil, true, fmt.Errorf("adaptive successor repair has no observation suffix")
+	}
+	retained[len(retained)-1].Type = model.GraphNodeTypeEnd
+	wanted := map[string]bool{}
+	for _, node := range retained {
+		wanted[node.ID] = true
+	}
+	graph.ID = fmt.Sprintf("graph_adaptive_successor_repair_%d", now.UnixNano())
+	graph.Version = 1
+	graph.Status = model.GraphStatusReviewReady
+	graph.Name = "后继业务状态续接"
+	graph.Summary = "从已观察到的同源实体继续验证，不重放创建或提交动作。"
+	graph.EntryPoint = observedURL
+	graph.Nodes = retained
+	graph.Edges = make([]*model.GraphEdge, 0, len(retained)-1)
+	for index := 1; index < len(retained); index++ {
+		graph.Edges = append(graph.Edges, &model.GraphEdge{ID: fmt.Sprintf("edge_adaptive_successor_%02d", index), FromNode: retained[index-1].ID, ToNode: retained[index].ID, Condition: "validated", Priority: index})
+	}
+	for index := range graph.Requirements {
+		graph.Requirements[index].NodeRefs = retainedNodeRefs(graph.Requirements[index].NodeRefs, wanted)
+	}
+	graph.Narratives = nil
+	graph.Review = nil
+	graph.CreatedAt = now
+	graph.UpdatedAt = now
+	return graph, true, nil
+}
+
+func browserAgentStageKindForNode(bundle *model.ExecutableRecordingScriptBundle, nodeID string) model.BusinessStageKind {
+	if bundle == nil || bundle.ScriptOutline == nil {
+		return ""
+	}
+	for _, stage := range bundle.ScriptOutline.Stages {
+		if stage.NodeID == nodeID {
+			return stage.StageKind
+		}
+	}
+	return ""
 }
 
 func approvedTerminalProjectURL(project *model.ProjectContext, raw string) (string, error) {
