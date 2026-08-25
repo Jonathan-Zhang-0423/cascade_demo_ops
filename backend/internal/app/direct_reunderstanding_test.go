@@ -159,7 +159,7 @@ func TestPrependReusableSessionSetupRestoresOnlyApprovedAuthentication(t *testin
 	evidence := model.EvidenceRef{ID: "evidence_login_form", Kind: "page_snapshot", ArtifactID: "login-form"}
 	sourceGraph := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/login")
 	sourceGraph.Nodes = []*model.GraphNode{{
-		ID: "session", Type: model.GraphNodeTypeStart, Action: "inspect", Metadata: map[string]any{
+		ID: "session", Type: model.GraphNodeTypeStart, Action: "inspect", Selector: "[data-stale-login-projection]", Metadata: map[string]any{
 			"business_stage_kind": string(model.BusinessStageKindSessionSetup),
 		},
 	}}
@@ -191,6 +191,9 @@ func TestPrependReusableSessionSetupRestoresOnlyApprovedAuthentication(t *testin
 	}
 	if adaptive, _ := destination.Nodes[0].Metadata["runtime_adaptive"].(bool); !adaptive {
 		t.Fatalf("restored session lost runtime-adaptive login discovery: %+v", destination.Nodes[0].Metadata)
+	}
+	if destination.Nodes[0].Selector != "" {
+		t.Fatalf("restored session promoted a compact graph selector over the approved executable target: %q", destination.Nodes[0].Selector)
 	}
 	for _, node := range destination.Nodes[1:] {
 		if node.ActionSpec != nil && (node.ActionSpec.Type == model.GraphActionClick || node.ActionSpec.Type == model.GraphActionFill || node.ActionSpec.Type == model.GraphActionSelect) {

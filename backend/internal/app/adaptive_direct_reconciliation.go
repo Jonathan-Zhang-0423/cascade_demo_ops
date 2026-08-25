@@ -286,6 +286,11 @@ func prependReusableSessionSetup(graph *model.DemoWorkflowGraph, source model.Cl
 		sourceNode.Title = firstNonEmptyString(step.Title, "恢复已批准的业务会话")
 		sourceNode.Goal = firstNonEmptyString(step.BusinessValue, "恢复原任务已批准的登录会话。")
 		sourceNode.Action = string(action.Type)
+		// The source workflow graph is a compact compatibility projection and may
+		// retain a stale primary selector even when the approved executable step
+		// intentionally uses selector-free runtime login discovery. Reuse the exact
+		// executable target below and never promote that projection into authority.
+		sourceNode.Selector = ""
 		sourceNode.PageRef = firstNonEmptyString(step.PageTarget.URL, step.PageTarget.PageRef, action.Target.URL, source.ProjectContextSummary.ProductURL)
 		sourceNode.ActionSpec = &model.GraphAction{
 			Type: action.Type, Target: action.Target, Value: action.Value, InputRef: action.InputRef, SecretRef: action.SecretRef,
