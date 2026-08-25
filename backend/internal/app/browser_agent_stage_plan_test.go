@@ -106,6 +106,37 @@ func TestAdaptiveHarnessPersistsOptionalModeSkipWhenControlIsAbsent(t *testing.T
 	}
 }
 
+func TestAdaptiveHarnessSkipsAbsentOptionalExecutionContinuation(t *testing.T) {
+	stage := BrowserAgentRuntimeStage{
+		ID: "stage_optional_continue", Order: 1, NodeID: "node_optional_continue",
+		StageKind: model.BusinessStageKindBusinessSubmit, EntryRoute: "https://product.example/entity/1",
+		TargetContract: model.BrowserAgentTargetContract{SemanticID: "continue_execution", Destructive: false, Confidence: .76},
+		Interactions:   []model.BrowserAgentInteraction{{Kind: model.GraphActionClick, NonDestructive: true, Parameters: map[string]any{"optional_when_target_absent": "true"}}},
+	}
+	plan := BrowserAgentRuntimePlan{
+		RunID: "run_optional_continue", SourcePackageID: "pkg_optional_continue",
+		SourceBundleHashSHA256: "bundle_optional_continue", PolicyHashSHA256: "policy_optional_continue",
+		HarnessProfile: model.AdaptiveBusinessHarnessProfileV1, Stages: []BrowserAgentRuntimeStage{stage},
+	}
+	observer := unresolvedOptionalModeObserver{}
+	executor := &countingStageExecutor{}
+	sink, err := newStageEventAuditLog(t.TempDir(), "job_optional_continue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{}).Run(context.Background(), plan, observer, executor, sink)
+	if err != nil || result.AuditError != nil || executor.calls != 0 {
+		t.Fatalf("optional continuation must be skipped without action: err=%v calls=%d audit=%v", err, executor.calls, result.AuditError)
+	}
+	foundSkip := false
+	for _, event := range result.Events {
+		foundSkip = foundSkip || event.EventType == model.StageExecutionEventStepSatisfied
+	}
+	if !foundSkip {
+		t.Fatalf("optional continuation skip was not recorded: %+v", result.Events)
+	}
+}
+
 type unresolvedOptionalModeObserver struct{}
 
 func (unresolvedOptionalModeObserver) ObserveStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageObservation, error) {

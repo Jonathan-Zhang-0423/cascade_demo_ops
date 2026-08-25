@@ -203,7 +203,21 @@ func startBrowserVisualObserverBridge(parent context.Context, client llm.Client,
 		providerCalls := 1
 		var output browserVisualObservationModelOutput
 		callCtx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
-		trace, callErr := client.GenerateMultimodal(callCtx, config.ModelTaskBrowserVisualObservation, modelRequest, &output)
+		var trace *llm.CallTrace
+		var callErr error
+		if !allowProviderFallback {
+			if textClient, ok := client.(browserVisualMultimodalTextClient); ok {
+				var textOutput string
+				textOutput, trace, callErr = textClient.GenerateMultimodalText(callCtx, config.ModelTaskBrowserVisualObservation, browserVisualLineFallbackRequest(modelRequest))
+				if callErr == nil {
+					output, callErr = parseBrowserVisualLineProtocol(textOutput)
+				}
+			} else {
+				trace, callErr = client.GenerateMultimodal(callCtx, config.ModelTaskBrowserVisualObservation, modelRequest, &output)
+			}
+		} else {
+			trace, callErr = client.GenerateMultimodal(callCtx, config.ModelTaskBrowserVisualObservation, modelRequest, &output)
+		}
 		cancel()
 		if callErr != nil && allowProviderFallback && browserVisualObserverMayFallback(trace) && r.Context().Err() == nil {
 			providerCalls++

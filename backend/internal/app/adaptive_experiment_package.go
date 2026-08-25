@@ -57,7 +57,7 @@ func (s *Service) prepareAdaptiveExperimentRun(ctx context.Context, request expe
 			WorkflowExecution: &model.WorkflowExecutionHints{
 				TaskPackID: request.WorkflowTemplateID, RequiresFreshEntity: true,
 				EntityName: request.ProjectName, PrimaryInputSemantic: "product_spec",
-				DirectExecution: true, RequiresSubmission: true, ObserveAsyncResult: true,
+				DirectExecution: true, RequiresSubmission: true, MayRequireExecutionConfirmation: true, ObserveAsyncResult: true,
 			},
 			RawUserPrompt: request.BuildPrompt,
 			Metadata: map[string]any{

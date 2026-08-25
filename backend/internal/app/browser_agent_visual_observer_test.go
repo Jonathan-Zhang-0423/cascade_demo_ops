@@ -141,7 +141,7 @@ func TestBrowserVisualObserverUsesBoundedLineFallbackAfterJSONShapeFailure(t *te
 	}
 }
 
-func TestBrowserVisualObserverTwoCallBudgetDoesNotSpendFallback(t *testing.T) {
+func TestBrowserVisualObserverTwoCallBudgetUsesOneParseableLineCall(t *testing.T) {
 	client := &browserVisualFallbackTestLLM{}
 	bridge, err := startBrowserVisualObserverBridge(t.Context(), client, 10, "A complete interactive product", 2, nil)
 	if err != nil {
@@ -163,7 +163,11 @@ func TestBrowserVisualObserverTwoCallBudgetDoesNotSpendFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusServiceUnavailable || client.multimodalCalls != 1 || client.textCalls != 0 {
-		t.Fatalf("two-call budget spent a fallback: status=%d calls=%d/%d", response.StatusCode, client.multimodalCalls, client.textCalls)
+	var result browserVisualObservationResponse
+	if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&result) != nil {
+		t.Fatalf("unexpected bounded line response: status=%d", response.StatusCode)
+	}
+	if result.Decision != "succeeded" || result.ProviderCalls != 1 || client.multimodalCalls != 0 || client.textCalls != 1 {
+		t.Fatalf("two-call budget did not use one parseable provider call: result=%+v calls=%d/%d", result, client.multimodalCalls, client.textCalls)
 	}
 }

@@ -381,6 +381,17 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 				}
 				continue
 			}
+			if !observed.TargetResolved && adaptiveStageOptionalWhenTargetAbsent(stage) {
+				decision.Kind, decision.Confidence, decision.Reason = model.HarnessDecisionSkip, 0.9, "optional continuation control is absent; observed execution state will be reconciled by following stages"
+				if err := appendEventDetails(stage, model.StageExecutionEventStepSatisfied, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil); err != nil {
+					return result, err
+				}
+				completedObservation := optionalCompletionObservation(observed.Observation, "optional execution confirmation was not required")
+				if err := appendEvent(stage, model.StageExecutionEventStageCompleted, &completedObservation, observed.EvidenceRefs); err != nil {
+					return result, err
+				}
+				continue
+			}
 			if decision.Kind == model.HarnessDecisionDefer {
 				_ = appendEventDetails(stage, model.StageExecutionEventConfidenceDeferred, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil)
 				return result, newRuntimeExecutionError("browser_agent_business_state_deferred", errors.New("business state confidence is too low for an action"))
@@ -623,6 +634,15 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		// fact track and quality report without spending H3/Seedance budget.
 	}
 	return result, nil
+}
+
+func adaptiveStageOptionalWhenTargetAbsent(stage BrowserAgentRuntimeStage) bool {
+	for _, interaction := range stage.Interactions {
+		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(interaction.Parameters["optional_when_target_absent"])), "true") {
+			return true
+		}
+	}
+	return false
 }
 
 func validResumedStageObservation(result BrowserAgentStageActionResult, previous *model.RuntimeObservation, replayPolicy model.InteractionReplayPolicy, allowConsumedCheckpointRoute bool) bool {

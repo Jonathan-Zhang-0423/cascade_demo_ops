@@ -99,13 +99,14 @@ type ProjectInputBundle struct {
 // compatibility planners. It describes the operation shape, never a hostname,
 // route, selector, or product keyword.
 type WorkflowExecutionHints struct {
-	TaskPackID           string `json:"task_pack_id,omitempty"`
-	RequiresFreshEntity  bool   `json:"requires_fresh_entity,omitempty"`
-	EntityName           string `json:"entity_name,omitempty"`
-	PrimaryInputSemantic string `json:"primary_input_semantic,omitempty"`
-	DirectExecution      bool   `json:"direct_execution,omitempty"`
-	RequiresSubmission   bool   `json:"requires_submission,omitempty"`
-	ObserveAsyncResult   bool   `json:"observe_async_result,omitempty"`
+	TaskPackID                      string `json:"task_pack_id,omitempty"`
+	RequiresFreshEntity             bool   `json:"requires_fresh_entity,omitempty"`
+	EntityName                      string `json:"entity_name,omitempty"`
+	PrimaryInputSemantic            string `json:"primary_input_semantic,omitempty"`
+	DirectExecution                 bool   `json:"direct_execution,omitempty"`
+	RequiresSubmission              bool   `json:"requires_submission,omitempty"`
+	MayRequireExecutionConfirmation bool   `json:"may_require_execution_confirmation,omitempty"`
+	ObserveAsyncResult              bool   `json:"observe_async_result,omitempty"`
 }
 
 type PresentationGenerationIntent struct {

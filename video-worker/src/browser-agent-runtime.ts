@@ -306,6 +306,7 @@ type BrowserAgentSession = {
 	visionPollArtifactsByNodeID: Map<string, ArtifactRef[]>;
 	visionPollEvidenceByNodeID: Map<string, EvidenceRef[]>;
 	visionVerdictsByNodeID: Map<string, BrowserVisualObservation[]>;
+	resultSurfaceBaselineDigest?: string;
   // A verified action may move an application from its entry route to a
   // newly-created result route. Subsequent non-navigation stages must keep
   // that live route instead of treating their planning-time entry route as a
@@ -1186,6 +1187,11 @@ async function executeInteraction(
     return;
   }
   const resolved = await resolveTarget(session.page, stage, interaction, true, resolutionAttempts);
+	if (booleanParameter(interaction.parameters, "capture_result_surface_baseline", false)) {
+		const existingSurface = await interactiveSurfaceTargetOnce(session.page);
+		if (existingSurface) session.resultSurfaceBaselineDigest = await visualDigest(session.page, existingSurface.digestTarget);
+		else delete session.resultSurfaceBaselineDigest;
+	}
   if (interaction.secret_ref) await prepareSecretTarget(session, resolved.locator);
   const targetArtifact = await captureScreenshot(session, stage, "target");
   const targetGeometry = await captureTargetGeometry(session, stage, resolved, targetArtifact.id);
@@ -1337,7 +1343,54 @@ export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, i
     );
     if (resolved) return resolved;
   }
+	if (String(interaction.parameters?.action_recipe || "") === "continue_execution") {
+		const resolved = await firstRuntimeExecutionContinuationLocator(page, stage, attempts);
+		if (resolved) return resolved;
+		seen.add("runtime_execution_continuation");
+	}
   throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=${[...seen].join(",") || "none"}`);
+}
+
+export function runtimeExecutionContinuationScore(label: string, role: string, inPrimaryContainer: boolean, uniqueSemanticCandidate: boolean): number {
+	const normalized = String(label || "").trim().toLowerCase();
+	const allowedRole = role === "button" || role === "link";
+	const continuation = /continue|confirm|proceed|execute|build|generate|run|start|继续|确认|执行|构建|生成|开始|启动/.test(normalized);
+	const abort = /cancel|close|dismiss|back|stop|delete|remove|取消|关闭|返回|停止|删除|移除/.test(normalized);
+	return adaptiveTargetCandidateScore({
+		role_state: allowedRole && !abort ? 1 : 0,
+		semantic: continuation && !abort ? 1 : 0,
+		container_context: inPrimaryContainer ? 1 : .4,
+		uniqueness: uniqueSemanticCandidate ? 1 : 0,
+		transition_feasibility: allowedRole && continuation && !abort ? 1 : 0,
+	});
+}
+
+async function firstRuntimeExecutionContinuationLocator(page: any, stage: BrowserAgentWorkerStage, attempts: BrowserTargetResolutionAttempt[]): Promise<ResolvedTarget | undefined> {
+	if (stage.target_contract.destructive || stage.interactions.some((item) => item.non_destructive !== true)) return undefined;
+	const locator = page.locator('button, [role="button"], a[href]');
+	const rawCount = Math.min(await locator.count().catch(() => 0), 64);
+	const values: Array<{ locator: any; score: number }> = [];
+	for (let index = 0; index < rawCount; index += 1) {
+		const item = locator.nth(index);
+		if (!await item.isVisible().catch(() => false) || !await item.isEnabled().catch(() => false)) continue;
+		const metadata = await item.evaluate((element: any) => ({
+			role: String(element.getAttribute?.("role") || (String(element.tagName || "").toLowerCase() === "a" ? "link" : "button")).toLowerCase(),
+			label: String(element.getAttribute?.("aria-label") || element.innerText || element.textContent || ""),
+			inPrimaryContainer: Boolean(element.closest("main, article, section, [role='main'], [role='region']")),
+		})).catch(() => ({ role: "", label: "", inPrimaryContainer: false }));
+		if (forbiddenName(metadata.label, stage.target_contract.forbidden_names || [])) continue;
+		if (!/continue|confirm|proceed|execute|build|generate|run|start|继续|确认|执行|构建|生成|开始|启动/i.test(metadata.label)) continue;
+		values.push({ locator: item, score: runtimeExecutionContinuationScore(metadata.label, metadata.role, metadata.inPrimaryContainer, true) });
+	}
+	values.sort((left, right) => right.score - left.score);
+	const best = values[0];
+	const second = values[1];
+	if (!best || !adaptiveTargetCandidateExecutable(best.score, second?.score)) {
+		attempts.push(targetResolutionAttempt("runtime_execution_continuation", values.length, values.length === 1, Boolean(best), false, values.length === 0 ? "no_candidates" : "ambiguous"));
+		return undefined;
+	}
+	attempts.push(targetResolutionAttempt("runtime_execution_continuation", values.length, true, true, false, "resolved", true, true));
+	return { locator: best.locator, strategy: "runtime_execution_continuation" };
 }
 
 // A newly opened modal often contains an input that could not have appeared in
@@ -1894,6 +1947,12 @@ async function waitForPlayableSurfaceWithVisualObservation(
 		}
 		const target = await interactiveSurfaceTargetOnce(session.page);
 		if (target) {
+			const surfaceDigest = session.resultSurfaceBaselineDigest ? await visualDigest(session.page, target.digestTarget) : "";
+			const surfaceChanged = Boolean(session.resultSurfaceBaselineDigest && surfaceDigest && surfaceDigest !== session.resultSurfaceBaselineDigest);
+			if (session.resultSurfaceBaselineDigest && !surfaceChanged) {
+				await session.page.waitForTimeout(Math.min(1_000, Math.max(100, deadline - Date.now())));
+				continue;
+			}
 			const existing = session.visionVerdictsByNodeID.get(stage.node_id) || [];
 			if (!requireVisualTerminal) {
 				// Compatibility mode: the visual result is supporting evidence and
@@ -1914,6 +1973,9 @@ async function waitForPlayableSurfaceWithVisualObservation(
 				const updatedTerminal = browserVisualTerminalWithStructuralEvidence(session.visionVerdictsByNodeID.get(stage.node_id) || [], config.maxCalls);
 				if (updatedTerminal === "succeeded") return { surface: true, score: target.stateful, controls: target.focusable };
 				if (updatedTerminal === "failed") return { surface: false, score: false, controls: false };
+				if (observed.decision === "unknown" && surfaceChanged && target.stateful && target.focusable) {
+					return { surface: true, score: true, controls: true };
+				}
 			}
 			if ((session.visionVerdictsByNodeID.get(stage.node_id)?.length || 0) >= config.maxCalls) {
 				return { surface: false, score: false, controls: false };

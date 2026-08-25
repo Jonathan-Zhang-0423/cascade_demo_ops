@@ -61,6 +61,16 @@ func TestAdaptiveExperimentPackageCompilesWithoutCascadeFlow(t *testing.T) {
 	if got := len(prepared.Build.Package.ExecutableScriptBundle.PlanJSON.Steps); got < len(loaded.InteractionPlan.Steps) {
 		t.Fatalf("compiled steps=%d interaction contracts=%d", got, len(loaded.InteractionPlan.Steps))
 	}
+	foundContinuation := false
+	for _, stage := range prepared.Build.Package.ExecutableScriptBundle.StageApprovalPlan.Stages {
+		if stage.NodeID != "business_stage_continue_prepared_execution" {
+			continue
+		}
+		foundContinuation = stage.Interaction.Parameters["action_recipe"] == "continue_execution" && stage.Interaction.Parameters["optional_when_target_absent"] == "true" && stage.Interaction.Parameters["capture_result_surface_baseline"] == "true"
+	}
+	if !foundContinuation {
+		t.Fatal("adaptive async package did not include the optional runtime execution continuation")
+	}
 }
 
 func TestExperimentDirectBindingRoundTripAndRuntimeMetadataStayInProcessOnly(t *testing.T) {
