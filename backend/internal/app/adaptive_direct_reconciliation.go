@@ -29,16 +29,20 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	if err != nil {
 		return adaptiveDirectReconciliationBuild{}, err
 	}
-	if state.DesktopCloudRun == nil || state.DesktopCloudRun.ResultPackage == nil {
-		return adaptiveDirectReconciliationBuild{}, errors.New("adaptive reconciliation requires a persisted failed result")
+	if state.DesktopCloudRun == nil {
+		return adaptiveDirectReconciliationBuild{}, errors.New("adaptive reconciliation requires a persisted Direct run")
 	}
-	result := *state.DesktopCloudRun.ResultPackage
+	var result model.RecordingResultPackage
+	hasPersistedResult := state.DesktopCloudRun.ResultPackage != nil
+	if hasPersistedResult {
+		result = *state.DesktopCloudRun.ResultPackage
+	}
 	repairState := state
 	var sourcePackage *model.ClientExecutionPackage
 	loadedPackage, packageErr := s.GetDirectSourcePackage(ctx, projectID, sourceJobID)
 	if packageErr == nil {
 		sourcePackage = &loadedPackage
-		if result.CloudJobID != strings.TrimSpace(sourceJobID) {
+		if !hasPersistedResult || result.CloudJobID != strings.TrimSpace(sourceJobID) {
 			result, err = s.getDirectHistoricalResult(ctx, projectID, sourceJobID)
 			if err != nil {
 				return adaptiveDirectReconciliationBuild{}, fmt.Errorf("load adaptive reconciliation source result: %w", err)
@@ -55,7 +59,7 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		repairCopy.WorkflowGraph = hydratedGraph
 		repairCopy.ExecutableScriptBundle = loadedPackage.ExecutableScriptBundle
 		repairState = &repairCopy
-	} else if adaptiveReconciliationNeedsAuthentication(state) || result.CloudJobID != strings.TrimSpace(sourceJobID) {
+	} else if adaptiveReconciliationNeedsAuthentication(state) || !hasPersistedResult || result.CloudJobID != strings.TrimSpace(sourceJobID) {
 		return adaptiveDirectReconciliationBuild{}, fmt.Errorf("load adaptive reconciliation source package: %w", packageErr)
 	}
 	if result.Status != model.RecordingResultStatusFailed || result.CloudJobID != strings.TrimSpace(sourceJobID) || result.FailureDiagnostic == nil {
