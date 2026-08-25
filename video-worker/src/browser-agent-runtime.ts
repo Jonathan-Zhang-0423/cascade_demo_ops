@@ -374,6 +374,7 @@ const actionTimeoutMS = 10_000;
 const screenshotTimeoutMS = 8_000;
 const standardValidationTimeoutMS = 30_000;
 const finalCompletionValidationTimeoutMS = 35 * 60 * 1000;
+const adaptiveObservationAbsoluteMaxMS = 90 * 60 * 1000;
 const secretInputMaskSelector = '[data-cascade-secret-input="true"]';
 
 export async function openBrowserAgentSession(request: BrowserAgentOpenRequest): Promise<{ session_id: string; runtime_versions: Record<string, string> }> {
@@ -2001,11 +2002,40 @@ export function browserVisualFinalObservationDue(input: {
 	const nearDeadline = input.deadlineMS - input.nowMS <= 30_000;
 	const busyTransitionCompleted = input.sawBusy && !input.busyNow;
 	const scheduledRefresh = !input.busyNow && (input.refreshAfterMS <= 0 || input.nowMS - input.startedAtMS >= input.refreshAfterMS);
-	return busyTransitionCompleted || scheduledRefresh || nearDeadline;
+	// The final reserved call is useful only after the business process has
+	// become idle. Spending it merely because an active build reached a wall
+	// clock boundary leaves no visual confirmation for the actual result.
+	return busyTransitionCompleted || scheduledRefresh || (nearDeadline && !input.busyNow);
 }
 
 export function browserVisualUnchangedSurfaceObservationDue(existingCount: number, maxCalls: number, nowMS: number, deadlineMS: number): boolean {
 	return existingCount < maxCalls && deadlineMS-nowMS <= 30_000;
+}
+
+export function adaptiveObservationDeadline(startedAtMS: number, lastProgressAtMS: number, idleTimeoutMS: number): number {
+	const boundedIdle = interactiveSurfacePollTimeout(idleTimeoutMS);
+	const absoluteDeadline = startedAtMS + Math.min(adaptiveObservationAbsoluteMaxMS, boundedIdle * 3);
+	return Math.min(absoluteDeadline, lastProgressAtMS + boundedIdle);
+}
+
+async function businessProgressDigest(page: any): Promise<string> {
+	const snapshot = await page.evaluate(() => {
+		const doc = (globalThis as any).document;
+		const bodyText = String(doc?.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 48_000);
+		const lifecycle = Array.from(doc?.querySelectorAll?.('progress,[role="progressbar"],[role="status"],[aria-live],[aria-busy]') || [])
+			.slice(0, 160)
+			.map((element: any) => ({
+				tag: String(element.tagName || "").toLowerCase(),
+				role: String(element.getAttribute?.("role") || ""),
+				busy: String(element.getAttribute?.("aria-busy") || ""),
+				now: String(element.getAttribute?.("aria-valuenow") || ""),
+				valueText: String(element.getAttribute?.("aria-valuetext") || ""),
+				text: String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 1_000),
+			}));
+		return { url: String((globalThis as any).location?.href || ""), readyState: String(doc?.readyState || ""), bodyText, lifecycle };
+	}).catch(() => undefined);
+	if (!snapshot) return "";
+	return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
 }
 
 async function waitForPlayableSurfaceWithVisualObservation(
@@ -2016,15 +2046,30 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	const baseConfig = browserVisionObserverConfig();
 	if (!baseConfig) return waitForPlayableSurface(session.page, timeout);
 	const config = { ...baseConfig, maxCalls: Math.min(baseConfig.maxCalls, session.visualMaxCalls) };
-	const deadline = Date.now() + interactiveSurfacePollTimeout(timeout);
+	const idleTimeoutMS = interactiveSurfacePollTimeout(timeout);
 	const { requireVisualTerminal, refreshAfterMS } = browserVisualTerminalPolicy(stage);
 	const { heartbeatLimit } = browserVisualObservationAllocation(config.maxCalls, requireVisualTerminal);
 	const startedAtMS = Date.now();
+	let lastProgressAtMS = startedAtMS;
+	let deadline = adaptiveObservationDeadline(startedAtMS, lastProgressAtMS, idleTimeoutMS);
+	let progressDigest = await businessProgressDigest(session.page);
+	let nextProgressProbeAtMS = startedAtMS + 5_000;
 	let refreshed = false;
 	let sawBusy = false;
 	let nextCaptureAt = Date.now();
 	while (Date.now() < deadline) {
-		if (requireVisualTerminal && browserVisualRefreshDue(startedAtMS, Date.now(), refreshAfterMS, refreshed)) {
+		const nowMS = Date.now();
+		if (nowMS >= nextProgressProbeAtMS) {
+			const nextDigest = await businessProgressDigest(session.page);
+			if (nextDigest && progressDigest && nextDigest !== progressDigest) {
+				lastProgressAtMS = Date.now();
+				deadline = adaptiveObservationDeadline(startedAtMS, lastProgressAtMS, idleTimeoutMS);
+				refreshed = false;
+			}
+			if (nextDigest) progressDigest = nextDigest;
+			nextProgressProbeAtMS = Date.now() + 5_000;
+		}
+		if (requireVisualTerminal && browserVisualRefreshDue(lastProgressAtMS, Date.now(), refreshAfterMS, refreshed)) {
 			refreshed = true;
 			const busyBeforeRefresh = await pageStillBusy(session.page);
 			if (browserVisualRefreshShouldReload(busyBeforeRefresh) && !await refreshAndRestoreObservedEntry(session)) {
@@ -2039,7 +2084,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			const surfaceDigest = session.resultSurfaceBaselineDigest ? await visualDigest(session.page, target.digestTarget) : "";
 			const surfaceChanged = Boolean(session.resultSurfaceBaselineDigest && surfaceDigest && surfaceDigest !== session.resultSurfaceBaselineDigest);
 			const existing = session.visionVerdictsByNodeID.get(stage.node_id) || [];
-			const unchangedObservationDue = browserVisualUnchangedSurfaceObservationDue(existing.length, config.maxCalls, Date.now(), deadline);
+			const unchangedObservationDue = !busyNow && browserVisualUnchangedSurfaceObservationDue(existing.length, config.maxCalls, Date.now(), deadline);
 			if (session.resultSurfaceBaselineDigest && !surfaceChanged && !unchangedObservationDue) {
 				await session.page.waitForTimeout(Math.min(1_000, Math.max(100, deadline - Date.now())));
 				continue;
