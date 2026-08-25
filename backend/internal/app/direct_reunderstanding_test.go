@@ -189,6 +189,9 @@ func TestPrependReusableSessionSetupRestoresOnlyApprovedAuthentication(t *testin
 	if len(destination.Nodes[0].ActionSpec.Target.SelectorAlternatives) != 1 || destination.Nodes[1].ID != "resume" {
 		t.Fatalf("session provenance or continuation ordering changed: %+v", destination.Nodes)
 	}
+	if adaptive, _ := destination.Nodes[0].Metadata["runtime_adaptive"].(bool); !adaptive {
+		t.Fatalf("restored session lost runtime-adaptive login discovery: %+v", destination.Nodes[0].Metadata)
+	}
 	for _, node := range destination.Nodes[1:] {
 		if node.ActionSpec != nil && (node.ActionSpec.Type == model.GraphActionClick || node.ActionSpec.Type == model.GraphActionFill || node.ActionSpec.Type == model.GraphActionSelect) {
 			t.Fatalf("session restoration introduced a business write: %+v", node)

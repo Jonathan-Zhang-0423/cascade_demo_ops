@@ -308,6 +308,9 @@ func prependReusableSessionSetup(graph *model.DemoWorkflowGraph, source model.Cl
 		sourceNode.Metadata["business_stage_kind"] = string(model.BusinessStageKindSessionSetup)
 		sourceNode.Metadata["business_route_state"] = string(step.RouteState)
 		sourceNode.Metadata["replay_policy"] = string(model.InteractionReplayObserveOnly)
+		sourceNode.Metadata["runtime_adaptive"] = true
+		sourceNode.Metadata["verification_status"] = "runtime_adaptive"
+		sourceNode.Metadata["non_destructive"] = true
 		sourceNode.Metadata["adaptive_session_restore"] = true
 		graph.Nodes = append([]*model.GraphNode{sourceNode}, graph.Nodes...)
 		return true, nil
