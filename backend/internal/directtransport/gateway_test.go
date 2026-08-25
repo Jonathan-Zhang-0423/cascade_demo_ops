@@ -78,6 +78,31 @@ func TestGatewayAllocatesDedicatedPortAndHandsValidatedPackageToWorker(t *testin
 	if receipt.PackageID != pkg.PackageID || receipt.JobID == "" || receipt.Status != "queued" {
 		t.Fatalf("unexpected receipt: %+v", receipt)
 	}
+	packageRequest, err := http.NewRequest(http.MethodGet, lease.DataURL+"/v1/direct/jobs/"+receipt.JobID+"/package", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signDirectRequest(t, packageRequest, lease, nil, now, "request_source_package_1")
+	packageResponse, err := http.DefaultClient.Do(packageRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer packageResponse.Body.Close()
+	if packageResponse.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(packageResponse.Body)
+		t.Fatalf("source package status %d: %s", packageResponse.StatusCode, payload)
+	}
+	var encryptedPackage model.DirectEncryptedMessage
+	if err := json.NewDecoder(packageResponse.Body).Decode(&encryptedPackage); err != nil {
+		t.Fatal(err)
+	}
+	var restoredPackage model.ClientExecutionPackage
+	if err := model.DecryptDirectTransportJSON(encryptedPackage, lease, "source_execution_package", model.DirectTransportDirectionResult, now, &restoredPackage); err != nil {
+		t.Fatal(err)
+	}
+	if restoredPackage.PackageID != pkg.PackageID || restoredPackage.ProjectID != pkg.ProjectID {
+		t.Fatalf("source package identity changed: %+v", restoredPackage)
+	}
 
 	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/worker/jobs/claim", nil)
 	claimRequest.Header.Set("Authorization", "Bearer "+testWorkerToken)

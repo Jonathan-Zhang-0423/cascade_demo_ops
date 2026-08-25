@@ -452,6 +452,7 @@ func (g *Gateway) dataHandler(lease *leaseRuntime) http.Handler {
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/credentials", func(w http.ResponseWriter, r *http.Request) { g.handleCredential(w, r, lease) })
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/ack", func(w http.ResponseWriter, r *http.Request) { g.handleResultAck(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}", func(w http.ResponseWriter, r *http.Request) { g.handleJobStatus(w, r, lease) })
+	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/package", func(w http.ResponseWriter, r *http.Request) { g.handleJobPackage(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/result", func(w http.ResponseWriter, r *http.Request) { g.handleJobResult(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/artifacts/{artifact_id}", func(w http.ResponseWriter, r *http.Request) { g.handleArtifact(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/artifacts/{artifact_id}/chunks/{chunk_index}", func(w http.ResponseWriter, r *http.Request) { g.handleArtifactChunk(w, r, lease) })
@@ -710,6 +711,24 @@ func (g *Gateway) handleJobStatus(w http.ResponseWriter, r *http.Request, lease 
 		return
 	}
 	g.writeEncrypted(w, http.StatusOK, lease, "job_status", record.Status)
+}
+
+func (g *Gateway) handleJobPackage(w http.ResponseWriter, r *http.Request, lease *leaseRuntime) {
+	if err := g.authenticateDataRequest(r, lease, nil); err != nil {
+		writeError(w, http.StatusUnauthorized, "direct_request_invalid", err.Error())
+		return
+	}
+	record, ok := g.jobForLease(r.PathValue("job_id"), lease.lease.LeaseID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "job_not_found", "Browser Agent job was not found.")
+		return
+	}
+	pkg, err := readStoredPackage(record.PackagePath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "package_invalid", "Stored source package is invalid.")
+		return
+	}
+	g.writeEncrypted(w, http.StatusOK, lease, "source_execution_package", pkg)
 }
 
 func (g *Gateway) handleJobResult(w http.ResponseWriter, r *http.Request, lease *leaseRuntime) {
