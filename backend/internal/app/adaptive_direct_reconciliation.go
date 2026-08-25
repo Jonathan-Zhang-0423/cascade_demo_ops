@@ -357,9 +357,18 @@ func syncAdaptiveBusinessStagePlan(state *orchestrator.CascadeState, graph *mode
 		if value, ok := node.Metadata["business_route_state"].(string); ok && strings.TrimSpace(value) != "" {
 			routeState = model.BusinessRouteState(value)
 		}
+		expectedRoute := node.PageRef
+		if kind == model.BusinessStageKindSessionSetup {
+			for _, validation := range node.Validations {
+				if validation.Required && validation.Kind == "url_matches" && strings.TrimSpace(validation.Target.URL) != "" {
+					expectedRoute = validation.Target.URL
+					break
+				}
+			}
+		}
 		stage := model.BusinessStage{
 			ID: stageID, Order: index + 1, Kind: kind, Title: node.Title, Objective: node.Goal,
-			UserIntent: node.Goal, RouteState: routeState, EntryRoute: node.PageRef, ExpectedRouteAfterAction: node.PageRef,
+			UserIntent: node.Goal, RouteState: routeState, EntryRoute: node.PageRef, ExpectedRouteAfterAction: expectedRoute,
 			DurationMS: firstPositiveInt(node.DurationHintMS, 1_000), EvidenceRefs: append([]model.EvidenceRef(nil), node.EvidenceRefs...), Confidence: 1,
 			Action: model.BusinessActionSemantics{Type: string(node.ActionSpec.Type), Label: node.Title, SuccessState: node.ExpectedOutcome, NonDestructive: true},
 		}

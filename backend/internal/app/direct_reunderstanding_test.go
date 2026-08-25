@@ -225,6 +225,25 @@ func TestHydrateAdaptiveSourceGraphRestoresCompactedExecutableAction(t *testing.
 	}
 }
 
+func TestSyncAdaptiveBusinessStagePlanKeepsDistinctLoginSuccessRoute(t *testing.T) {
+	state := &orchestrator.CascadeState{ProjectIntelligence: &model.ProjectIntelligencePack{BusinessStagePlan: &model.BusinessStagePlan{}}}
+	graph := model.NewDemoWorkflowGraph("continuation", "project", "https://app.example.com/entity/current")
+	graph.Nodes = []*model.GraphNode{{
+		ID: "session", Title: "Restore session", Goal: "Log in", PageRef: "/login", ActionSpec: &model.GraphAction{Type: model.GraphActionInspect},
+		Validations: []model.ValidationSpec{{ID: "login_success", Kind: "url_matches", Target: model.ActionTarget{URL: "/app"}, Required: true}},
+		Metadata: map[string]any{"business_stage_kind": string(model.BusinessStageKindSessionSetup), "business_route_state": string(model.BusinessRouteStateUnauthenticated)},
+	}, {
+		ID: "resume", PageRef: "/entity/current", ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate},
+	}}
+	if err := syncAdaptiveBusinessStagePlan(state, graph); err != nil {
+		t.Fatal(err)
+	}
+	stage := state.ProjectIntelligence.BusinessStagePlan.Stages[0]
+	if stage.EntryRoute != "/login" || stage.ExpectedRouteAfterAction != "/app" {
+		t.Fatalf("login route transition collapsed during reconciliation: %+v", stage)
+	}
+}
+
 func TestNormalizeAdaptiveReconciliationResumeAcceptsTerminalInteractionFailure(t *testing.T) {
 	graph := model.NewDemoWorkflowGraph("graph_terminal_interaction_repair_1", "project", "https://app.example.com/workspace")
 	graph.Nodes = []*model.GraphNode{{

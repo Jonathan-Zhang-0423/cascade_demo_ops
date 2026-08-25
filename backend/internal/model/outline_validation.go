@@ -59,7 +59,16 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 		if stageRequiresAuthenticationContext(step, stage, outline) {
 			if !runtimeAdaptiveAuthenticationBootstrap(step, stage, outline) {
 				if !stageHasLoginEntryEvidence(step, stage, outline) {
-					return &OutlineConsistencyError{Code: "login_entry_evidence_missing", NodeID: step.NodeID, Reason: "does not bind the approved authentication entry route to formal page-scan evidence"}
+					authRoute := firstNonEmptyOutlineRoute(step.PageTarget.URL, stage.EntryRoute, outline.Route)
+					successRoute := ""
+					for _, validation := range step.Validations {
+						if validation.Required && validation.Kind == "url_matches" {
+							successRoute = firstNonEmptyOutlineRoute(validation.Target.URL, stringExpected(validation.Expected))
+							break
+						}
+					}
+					reason := fmt.Sprintf("does not bind the approved authentication entry route to formal page-scan evidence (runtime_adaptive=%t/%t/%t secret_bound=%t primary_selector=%t distinct_success_route=%t)", step.RuntimeAdaptive, stage.RuntimeAdaptive, outline.RuntimeAdaptive, stageHasSecretRef(step, stage), firstPrimarySelector(step, stage, outline) != "", authRoute != "" && successRoute != "" && !routesEquivalent(authRoute, successRoute))
+					return &OutlineConsistencyError{Code: "login_entry_evidence_missing", NodeID: step.NodeID, Reason: reason}
 				}
 				if !stageHasVerifiedAuthenticationContext(step, stage, outline) {
 					return &OutlineConsistencyError{Code: "authentication_context_unverified", NodeID: step.NodeID, Reason: "does not prove an authentication page and password-bearing authentication form, or includes marketing email semantics"}
