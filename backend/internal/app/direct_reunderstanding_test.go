@@ -180,7 +180,7 @@ func TestInsertPendingAdaptiveContinuationRestoresOnlySkippedUnstartedEffect(t *
 		{NodeID: "continue_one", EventType: model.StageExecutionEventActionStarted},
 		{NodeID: "continue_two", EventType: model.StageExecutionEventStepSatisfied, HarnessDecision: &model.HarnessDecision{Kind: model.HarnessDecisionSkip}},
 	}
-	inserted, err := insertPendingAdaptiveContinuation(repair, source, events, "https://app.example.com/entity/runtime-42")
+	inserted, err := insertPendingAdaptiveContinuation(repair, source, events, "https://app.example.com/entity/runtime-42", "verify")
 	if err != nil || !inserted {
 		t.Fatalf("pending continuation was not restored: inserted=%t err=%v", inserted, err)
 	}
@@ -191,6 +191,35 @@ func TestInsertPendingAdaptiveContinuationRestoresOnlySkippedUnstartedEffect(t *
 		if node.ID == "continue_one" {
 			t.Fatal("an already-started continuation effect was restored")
 		}
+	}
+}
+
+func TestInsertPendingAdaptiveContinuationRetriesConfirmedRollbackOnce(t *testing.T) {
+	continuation := &model.GraphNode{
+		ID: "continue_execution", Type: model.GraphNodeTypeAction,
+		ActionSpec:          &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "continue_execution"}},
+		InteractionContract: &model.InteractionContract{SchemaVersion: model.InteractionContractSchemaVersion, ContractID: "continue", ReplayPolicy: model.InteractionReplayOnceEffect},
+	}
+	failedObserve := &model.GraphNode{
+		ID: "observe_result", Type: model.GraphNodeTypeEnd, ActionSpec: &model.GraphAction{Type: model.GraphActionInspect},
+		InteractionContract: &model.InteractionContract{SchemaVersion: model.InteractionContractSchemaVersion, ContractID: "observe", ReplayPolicy: model.InteractionReplayObserveOnly},
+	}
+	source := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/entity/runtime-42")
+	source.Nodes = []*model.GraphNode{continuation, failedObserve}
+	resume := &model.GraphNode{ID: "resume", Type: model.GraphNodeTypeStart, ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate}}
+	verify := &model.GraphNode{ID: "verify", Type: model.GraphNodeTypeEnd, ActionSpec: &model.GraphAction{Type: model.GraphActionInspect}}
+	repair := model.NewDemoWorkflowGraph("repair", "project", "https://app.example.com/entity/runtime-42")
+	repair.Nodes = []*model.GraphNode{resume, verify}
+	events := []model.StageExecutionEvent{
+		{NodeID: continuation.ID, EventType: model.StageExecutionEventActionStarted},
+		{NodeID: continuation.ID, EventType: model.StageExecutionEventActionCompleted},
+	}
+	inserted, err := insertPendingAdaptiveContinuation(repair, source, events, "https://app.example.com/entity/runtime-42", failedObserve.ID)
+	if err != nil || !inserted || len(repair.Nodes) != 3 || repair.Nodes[1].ID != continuation.ID {
+		t.Fatalf("confirmed rollback continuation was not restored: inserted=%t nodes=%+v err=%v", inserted, repair.Nodes, err)
+	}
+	if retried, _ := repair.Nodes[1].Metadata["adaptive_interrupted_continuation_retry"].(bool); !retried {
+		t.Fatalf("restored continuation did not retain bounded retry provenance: %+v", repair.Nodes[1].Metadata)
 	}
 }
 

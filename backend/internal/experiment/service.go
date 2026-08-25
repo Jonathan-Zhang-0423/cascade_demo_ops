@@ -544,6 +544,14 @@ func (s *Service) Resume(ctx context.Context, runID string, expectedRevision int
 		}
 	}
 	next := run
+	if strategy == "reconcile_observed_state" && run.HarnessProfile == HarnessProfileAdaptiveBusinessV1 {
+		if loaded, loadErr := LoadDefinition(s.definitionRoot, run.DefinitionRef); loadErr == nil {
+			next.ProductSpec = loaded.ProductSpec
+			next.ObservationPlan = loaded.ObservationPlan
+			next.InteractionPlan = loaded.InteractionPlan
+			next.Budget.VisualCallsPerRun = loaded.Definition.AuthorizationBudget.VisualCallsPerRun
+		}
+	}
 	next.State, next.Phase = RunStateQueued, "resume_checkpoint_verification"
 	next.Waiting = nil
 	next.LastError = nil

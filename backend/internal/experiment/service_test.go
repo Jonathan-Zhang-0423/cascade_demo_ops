@@ -142,6 +142,48 @@ func TestResumeBoundExternalTaskSelectsWaitingMainLeg(t *testing.T) {
 	}
 }
 
+func TestExplicitAdaptiveReconcileRefreshesObservationBudgetForWaitingRun(t *testing.T) {
+	service := testService(t)
+	loaded, err := LoadDefinition(service.definitionRoot, "2048-v2")
+	if err != nil || loaded.ObservationPlan.DeferAfterMS != 1_800_000 {
+		t.Fatalf("updated observation definition did not load: plan=%+v err=%v", loaded.ObservationPlan, err)
+	}
+	request := testCreateRequest()
+	request.HarnessProfile = HarnessProfileAdaptiveBusinessV1
+	run, err := service.CreateRun(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run = mustTransitionLeg(t, service, run, run.Legs[0].LegID, RunStateRunning, "target_submission")
+	legID := run.Legs[0].LegID
+	started, err := service.BeginOnceEffect(t.Context(), run.RunID, run.Revision, legID, "target_submit", "target_submission", "idem-refresh-plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := service.BindOnceEffectExternalTask(t.Context(), run.RunID, started.Revision, legID, "target_submit", "direct:project-one:job-one", []string{"job-one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := service.TransitionLeg(t.Context(), run.RunID, LegTransitionRequest{ExpectedRevision: bound.Revision, LegID: legID, State: RunStateWaitingInput, Phase: "observation_deferred", EventType: "module_interrupted", Summary: "waiting"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := waiting
+	stale.ObservationPlan.DeferAfterMS = 600_000
+	stale.Revision++
+	stale.UpdatedAt = service.now().UTC()
+	if err := service.store.Transition(t.Context(), run.RunID, waiting.Revision, stale, service.event(stale, "stale_plan_fixture", "simulate an older frozen plan", legID, nil)); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := service.Resume(t.Context(), run.RunID, stale.Revision, "reconcile_observed_state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.ObservationPlan.DeferAfterMS != 1_800_000 || resumed.Legs[0].Phase != "resume_external_task" {
+		t.Fatalf("explicit adaptive reconciliation did not refresh the observation plan: %+v", resumed.ObservationPlan)
+	}
+}
+
 func TestReconcileObservedStateCreatesRevisionFromFailedBoundRun(t *testing.T) {
 	service := testService(t)
 	run := mustCreateRun(t, service)
