@@ -172,6 +172,9 @@ func normalizeAdaptiveReconciliationResume(graph *model.DemoWorkflowGraph, obser
 		}
 		node.Metadata["adaptive_successor_resume"] = true
 		node.Metadata["terminal_repair_resume"] = false
+		node.Metadata["runtime_adaptive"] = true
+		node.Metadata["verification_status"] = "runtime_adaptive"
+		node.Metadata["non_destructive"] = true
 		node.Metadata["replay_policy"] = string(model.InteractionReplayObserveOnly)
 		node.Metadata["expected_route_after_action"] = observedURL
 		return nil
@@ -312,6 +315,13 @@ func prependReusableSessionSetup(graph *model.DemoWorkflowGraph, source model.Cl
 		sourceNode.Metadata["business_stage_id"] = step.NodeID
 		sourceNode.Metadata["business_stage_kind"] = string(model.BusinessStageKindSessionSetup)
 		sourceNode.Metadata["business_route_state"] = string(step.RouteState)
+		sourceNode.Metadata["business_stage_entry_route"] = sourceNode.PageRef
+		for _, validation := range sourceNode.Validations {
+			if validation.Required && validation.Kind == "url_matches" && strings.TrimSpace(validation.Target.URL) != "" {
+				sourceNode.Metadata["expected_route_after_action"] = validation.Target.URL
+				break
+			}
+		}
 		sourceNode.Metadata["replay_policy"] = string(model.InteractionReplayObserveOnly)
 		sourceNode.Metadata["runtime_adaptive"] = true
 		sourceNode.Metadata["verification_status"] = "runtime_adaptive"
@@ -422,8 +432,10 @@ func applyAdaptiveInteractionContracts(graph *model.DemoWorkflowGraph, plan expe
 			}
 			continue
 		}
-		node.Type = model.GraphNodeTypeAction
-		base = append(base, node)
+		// The source failure suffix can contain legacy progress/final-observe
+		// placeholders without an Interaction Contract. They are not independent
+		// runtime evidence and must not survive into the continuation: the frozen
+		// experiment plan below rebuilds every required observation and proof.
 	}
 	for index := range contracts {
 		contract := contracts[index]

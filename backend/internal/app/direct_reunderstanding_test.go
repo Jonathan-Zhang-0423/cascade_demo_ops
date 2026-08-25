@@ -195,6 +195,9 @@ func TestPrependReusableSessionSetupRestoresOnlyApprovedAuthentication(t *testin
 	if destination.Nodes[0].Selector != "" {
 		t.Fatalf("restored session promoted a compact graph selector over the approved executable target: %q", destination.Nodes[0].Selector)
 	}
+	if destination.Nodes[0].Metadata["business_stage_entry_route"] != "https://app.example.com/login" {
+		t.Fatalf("restored session lost its explicit authentication entry route: %+v", destination.Nodes[0].Metadata)
+	}
 	for _, node := range destination.Nodes[1:] {
 		if node.ActionSpec != nil && (node.ActionSpec.Type == model.GraphActionClick || node.ActionSpec.Type == model.GraphActionFill || node.ActionSpec.Type == model.GraphActionSelect) {
 			t.Fatalf("session restoration introduced a business write: %+v", node)
@@ -267,6 +270,9 @@ func TestNormalizeAdaptiveReconciliationResumeAcceptsTerminalInteractionFailure(
 	if value, _ := resume.Metadata["adaptive_successor_resume"].(bool); !value {
 		t.Fatalf("normalized resume is not recognized by the adaptive graph compiler: %+v", resume.Metadata)
 	}
+	if adaptive, _ := resume.Metadata["runtime_adaptive"].(bool); !adaptive {
+		t.Fatalf("normalized resume lost runtime page discovery authority: %+v", resume.Metadata)
+	}
 }
 
 func TestPrepareAdaptiveDirectReconciliationBuildsObserveOnlyPackage(t *testing.T) {
@@ -321,6 +327,9 @@ func TestPrepareAdaptiveDirectReconciliationBuildsObserveOnlyPackage(t *testing.
 	seenCapabilities := 0
 	seenObserveOnlyResume := false
 	for _, stage := range prepared.Build.Package.ExecutableScriptBundle.ScriptOutline.Stages {
+		if stage.NodeID == "business_stage_observe_agent_progress" || stage.NodeID == "business_stage_final_observe" {
+			t.Fatalf("continuation package retained an unbound legacy observation placeholder: %+v", stage)
+		}
 		if stage.StageKind == model.BusinessStageKindBusinessSubmit || stage.StageKind == model.BusinessStageKindBusinessInput || stage.StageKind == model.BusinessStageKindModeSelection {
 			t.Fatalf("continuation package retained a creation write stage: %+v", stage)
 		}

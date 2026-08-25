@@ -67,7 +67,7 @@ func ValidateBrowserAgentOutlineConsistency(bundle *ExecutableRecordingScriptBun
 							break
 						}
 					}
-					reason := fmt.Sprintf("does not bind the approved authentication entry route to formal page-scan evidence (runtime_adaptive=%t/%t/%t secret_bound=%t primary_selector=%t distinct_success_route=%t)", step.RuntimeAdaptive, stage.RuntimeAdaptive, outline.RuntimeAdaptive, stageHasSecretRef(step, stage), firstPrimarySelector(step, stage, outline) != "", authRoute != "" && successRoute != "" && !routesEquivalent(authRoute, successRoute))
+					reason := fmt.Sprintf("does not bind the approved authentication entry route to formal page-scan evidence (runtime_adaptive=%t/%t/%t secret_bound=%t primary_selector=%t distinct_success_route=%t routes=%q->%q)", step.RuntimeAdaptive, stage.RuntimeAdaptive, outline.RuntimeAdaptive, stageHasSecretRef(step, stage), firstPrimarySelector(step, stage, outline) != "", authRoute != "" && successRoute != "" && !routesEquivalent(authRoute, successRoute), authRoute, successRoute)
 					return &OutlineConsistencyError{Code: "login_entry_evidence_missing", NodeID: step.NodeID, Reason: reason}
 				}
 				if !stageHasVerifiedAuthenticationContext(step, stage, outline) {
