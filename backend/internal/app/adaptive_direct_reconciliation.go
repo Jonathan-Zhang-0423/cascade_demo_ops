@@ -66,10 +66,13 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		return adaptiveDirectReconciliationBuild{}, errors.New("adaptive reconciliation source result does not match the failed Direct job")
 	}
 	graph, eligible, err := terminalInteractionVerificationRepairGraph(repairState, result, time.Now().UTC())
-	if err != nil || !eligible || graph == nil || !strings.HasPrefix(graph.ID, "graph_adaptive_successor_repair_") {
+	if err != nil || !eligible || !adaptiveReconciliationGraphSupported(graph) {
 		if err == nil {
 			err = errors.New("failed Direct job has no observed successor state")
 		}
+		return adaptiveDirectReconciliationBuild{}, err
+	}
+	if err := normalizeAdaptiveReconciliationResume(graph, result.FailureDiagnostic.CurrentURL, directDiagnosticRefs(*result.FailureDiagnostic)); err != nil {
 		return adaptiveDirectReconciliationBuild{}, err
 	}
 	if sourcePackage != nil {
@@ -129,6 +132,51 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		return adaptiveDirectReconciliationBuild{}, fmt.Errorf("build adaptive successor package: %w", err)
 	}
 	return adaptiveDirectReconciliationBuild{State: next, Build: build, SourceResult: result}, nil
+}
+
+func adaptiveReconciliationGraphSupported(graph *model.DemoWorkflowGraph) bool {
+	if graph == nil {
+		return false
+	}
+	return strings.HasPrefix(graph.ID, "graph_adaptive_successor_repair_") || strings.HasPrefix(graph.ID, "graph_terminal_interaction_repair_")
+}
+
+// A failure after the successor route was reached may be reported by an
+// interaction proof rather than the submit stage itself. Normalize the first
+// same-run navigation into the same observe-only resume contract so the
+// continuation cannot accidentally fall back to the old workflow entry point.
+func normalizeAdaptiveReconciliationResume(graph *model.DemoWorkflowGraph, observedURL string, evidence []model.EvidenceRef) error {
+	if graph == nil || strings.TrimSpace(observedURL) == "" {
+		return errors.New("adaptive reconciliation resume requires an observed entity URL")
+	}
+	for _, node := range graph.Nodes {
+		if node == nil || node.ActionSpec == nil || node.ActionSpec.Type != model.GraphActionNavigate {
+			continue
+		}
+		node.PageRef = observedURL
+		node.ActionSpec.Target.URL = observedURL
+		node.InteractionContract = &model.InteractionContract{
+			SchemaVersion: model.InteractionContractSchemaVersion,
+			ContractID: "interaction_adaptive_observed_resume_" + node.ID,
+			SemanticGoal: "进入已观察到的业务实体，只继续观察和验证。",
+			ActionKind: model.GraphActionNavigate, ReplayPolicy: model.InteractionReplayObserveOnly,
+			TargetSemanticID: "observed_successor_entity", ActionTarget: node.ActionSpec.Target,
+			ExpectedTransitions: []model.InteractionPredicate{{
+				ID: "observe_adaptive_successor_route", Kind: "url_matches", Target: model.ActionTarget{URL: observedURL},
+				Expected: observedURL, Required: true, TimeoutMS: 30_000, EvidenceRefs: append([]model.EvidenceRef(nil), evidence...),
+			}},
+			EvidenceRefs: append([]model.EvidenceRef(nil), evidence...), NonDestructive: true,
+		}
+		if node.Metadata == nil {
+			node.Metadata = map[string]any{}
+		}
+		node.Metadata["adaptive_successor_resume"] = true
+		node.Metadata["terminal_repair_resume"] = false
+		node.Metadata["replay_policy"] = string(model.InteractionReplayObserveOnly)
+		node.Metadata["expected_route_after_action"] = observedURL
+		return nil
+	}
+	return errors.New("adaptive reconciliation graph has no observed-route navigation")
 }
 
 // hydrateAdaptiveSourceGraph restores executable fields that are compacted out

@@ -219,6 +219,31 @@ func TestHydrateAdaptiveSourceGraphRestoresCompactedExecutableAction(t *testing.
 	}
 }
 
+func TestNormalizeAdaptiveReconciliationResumeAcceptsTerminalInteractionFailure(t *testing.T) {
+	graph := model.NewDemoWorkflowGraph("graph_terminal_interaction_repair_1", "project", "https://app.example.com/workspace")
+	graph.Nodes = []*model.GraphNode{{
+		ID: "resume_terminal", ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: "https://app.example.com/old"}},
+		InteractionContract: &model.InteractionContract{ContractID: "stale_interaction_contract", ReplayPolicy: model.InteractionReplayIdempotentWrite},
+		Metadata: map[string]any{"terminal_repair_resume": true},
+	}, {
+		ID: "verify", ActionSpec: &model.GraphAction{Type: model.GraphActionInspect},
+	}}
+	if !adaptiveReconciliationGraphSupported(graph) {
+		t.Fatal("terminal interaction repair should be eligible for adaptive reconciliation")
+	}
+	observedURL := "https://app.example.com/entity/already-created"
+	if err := normalizeAdaptiveReconciliationResume(graph, observedURL, []model.EvidenceRef{{ID: "runtime-route"}}); err != nil {
+		t.Fatal(err)
+	}
+	resume := graph.Nodes[0]
+	if resume.PageRef != observedURL || resume.ActionSpec.Target.URL != observedURL || resume.InteractionContract == nil || resume.InteractionContract.ReplayPolicy != model.InteractionReplayObserveOnly {
+		t.Fatalf("terminal resume was not normalized to the observed entity: %+v", resume)
+	}
+	if value, _ := resume.Metadata["adaptive_successor_resume"].(bool); !value {
+		t.Fatalf("normalized resume is not recognized by the adaptive graph compiler: %+v", resume.Metadata)
+	}
+}
+
 func TestPrepareAdaptiveDirectReconciliationBuildsObserveOnlyPackage(t *testing.T) {
 	service, states, state, build := newDirectReunderstandingTestState(t)
 	result := directReunderstandingFailedResult(build, false)
