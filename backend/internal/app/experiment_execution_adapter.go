@@ -592,9 +592,10 @@ func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context,
 			warned = true
 			_ = emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "build_progress_warning", Summary: "五分钟内未观察到足够进展，继续在预算内等待", EvidenceRefs: []string{jobID}})
 		}
-		// Let the Worker publish its deterministic timeout result, but do not turn
-		// a ten-minute business deadline into another long polling window.
-		if elapsed >= time.Duration(plan.DeferAfterMS)*time.Millisecond+30*time.Second {
+		// The adaptive Worker owns the no-progress clock because only it can see
+		// DOM/ARIA and business-surface changes. The transport poller uses a wider
+		// absolute bound so it cannot cancel a page that is still making progress.
+		if elapsed >= directObservationTransportTimeout(request) {
 			return status, &experiment.AdapterError{Code: "observation_deadline_reached", Phase: "observation_deferred", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: []string{jobID}}
 		}
 		select {
@@ -603,6 +604,21 @@ func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context,
 		case <-time.After(a.pollInterval):
 		}
 	}
+}
+
+func directObservationTransportTimeout(request experiment.LegExecutionRequest) time.Duration {
+	idleTimeout := time.Duration(request.ObservationPlan.DeferAfterMS) * time.Millisecond
+	if idleTimeout <= 0 {
+		idleTimeout = 10 * time.Minute
+	}
+	if request.HarnessProfile != experiment.HarnessProfileAdaptiveBusinessV1 {
+		return idleTimeout + 30*time.Second
+	}
+	absolute := idleTimeout * 3
+	if absolute > 90*time.Minute {
+		absolute = 90 * time.Minute
+	}
+	return absolute + time.Minute
 }
 
 func (a *appExperimentExecutionAdapter) downloadDirectArtifacts(ctx context.Context, projectID, jobID string, artifacts []model.DirectArtifact) ([]CloudDeliverableDownloadResult, error) {
