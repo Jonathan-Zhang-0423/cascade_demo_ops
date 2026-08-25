@@ -57,6 +57,7 @@ func (s *DirectHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/direct/packages", s.handleDirectPackage)
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/credentials", s.handleDirectCredentials)
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}", s.handleDirectJob)
+	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/package", s.handleDirectSourcePackage)
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/result", s.handleDirectResult)
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/ack", s.handleDirectAck)
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/artifacts/{artifact_id}", s.handleDirectArtifactWhole)
@@ -91,6 +92,7 @@ func (s *DirectHTTPServer) dataHandler(port int) http.Handler {
 	mux.HandleFunc("POST /v1/direct/packages", bound.handleDirectPackage)
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/credentials", bound.handleDirectCredentials)
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}", bound.handleDirectJob)
+	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/package", bound.handleDirectSourcePackage)
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/result", bound.handleDirectResult)
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/ack", bound.handleDirectAck)
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/artifacts/{artifact_id}", bound.handleDirectArtifactWhole)
@@ -396,6 +398,25 @@ func (s *DirectHTTPServer) handleDirectResult(w http.ResponseWriter, r *http.Req
 	s.handleDirectJobMessage(w, r, true)
 }
 
+func (s *DirectHTTPServer) handleDirectSourcePackage(w http.ResponseWriter, r *http.Request) {
+	lease, err := s.directReadRequest(r)
+	if err != nil {
+		s.directError(w, directStatus(err), directCode(err), err.Error())
+		return
+	}
+	jobID := r.PathValue("job_id")
+	job, err := s.gateway.JobForInstallation(jobID, lease.InstallationID)
+	if err != nil {
+		s.directError(w, directStatus(err), directCode(err), err.Error())
+		return
+	}
+	if len(job.PackageJSON) == 0 {
+		s.directError(w, http.StatusConflict, "source_package_unavailable", "source execution package is unavailable")
+		return
+	}
+	s.encryptedResponse(w, lease, "source_execution_package", "source_package_"+jobID, json.RawMessage(job.PackageJSON))
+}
+
 func (s *DirectHTTPServer) handleDirectAck(w http.ResponseWriter, r *http.Request) {
 	message, plain, lease, err := s.directMessage(r)
 	if err != nil {
@@ -450,7 +471,7 @@ func (s *DirectHTTPServer) handleDirectJobMessage(w http.ResponseWriter, r *http
 		return
 	}
 	jobID := r.PathValue("job_id")
-	job, err := s.gateway.Job(jobID, lease.LeaseID)
+	job, err := s.gateway.JobForInstallation(jobID, lease.InstallationID)
 	if err != nil {
 		s.directError(w, directStatus(err), directCode(err), err.Error())
 		return

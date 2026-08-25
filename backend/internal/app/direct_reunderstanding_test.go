@@ -145,9 +145,53 @@ func TestAdaptiveSuccessorRepairSkipsMissingSubmitAndKeepsVerificationSuffix(t *
 	if len(repaired.Nodes) != 4 || repaired.Nodes[0].ActionSpec.Type != model.GraphActionNavigate || repaired.Nodes[0].ActionSpec.Target.URL != observedURL {
 		t.Fatalf("repair did not begin at the observed entity: %+v", repaired.Nodes)
 	}
+	if repaired.Nodes[0].InteractionContract == nil || repaired.Nodes[0].InteractionContract.ReplayPolicy != model.InteractionReplayObserveOnly {
+		t.Fatalf("successor navigation must remain observe-only: %+v", repaired.Nodes[0].InteractionContract)
+	}
 	for _, repairedNode := range repaired.Nodes {
 		if repairedNode.ID == "open_creation" || repairedNode.ID == "fill_request" || (repairedNode.ActionSpec != nil && repairedNode.ActionSpec.Type == model.GraphActionClick) {
 			t.Fatalf("repair retained a creation or submit action: %+v", repairedNode)
+		}
+	}
+}
+
+func TestPrependReusableSessionSetupRestoresOnlyApprovedAuthentication(t *testing.T) {
+	evidence := model.EvidenceRef{ID: "evidence_login_form", Kind: "page_snapshot", ArtifactID: "login-form"}
+	sourceGraph := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/login")
+	sourceGraph.Nodes = []*model.GraphNode{{
+		ID: "session", Type: model.GraphNodeTypeStart, Action: "inspect", Metadata: map[string]any{
+			"business_stage_kind": string(model.BusinessStageKindSessionSetup),
+		},
+	}}
+	source := model.ClientExecutionPackage{
+		ProjectContextSummary: model.ProjectContextSummary{ProductURL: "https://app.example.com"},
+		WorkflowGraph:         sourceGraph,
+		CredentialGrants:      []model.CredentialGrant{{CloudSecretRef: "credential://demo/session"}},
+		ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{PlanJSON: &model.ExecutionScriptDocument{Steps: []model.ScriptStep{{
+			NodeID: "session", StageKind: model.BusinessStageKindSessionSetup, RouteState: model.BusinessRouteStateWorkspace,
+			Title: "Restore session", BusinessValue: "Reuse the approved authenticated session.", NonDestructive: true,
+			PageTarget: model.ScriptPageTarget{URL: "https://app.example.com/login"},
+			Action: model.ScriptActionInstruction{Type: model.GraphActionInspect, SecretRef: "credential://demo/session", Target: model.ActionTarget{
+				URL: "https://app.example.com/login", SelectorAlternatives: []model.SelectorCandidate{{Kind: "css", Value: "[data-runtime-login]", EvidenceID: evidence.ID, EvidenceRefs: []model.EvidenceRef{evidence}}},
+			}},
+			ExpectedOutcome: "authenticated workspace visible", EvidenceRefs: []model.EvidenceRef{evidence},
+		}}}},
+	}
+	destination := model.NewDemoWorkflowGraph("continuation", "project", "https://app.example.com/entity/current")
+	destination.Nodes = []*model.GraphNode{{ID: "resume", ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate}}, {ID: "verify", ActionSpec: &model.GraphAction{Type: model.GraphActionInspect}}}
+	added, err := prependReusableSessionSetup(destination, source)
+	if err != nil || !added {
+		t.Fatalf("approved session setup was not restored: added=%t err=%v", added, err)
+	}
+	if len(destination.Nodes) != 3 || destination.Nodes[0].ID != "session" || destination.Nodes[0].ActionSpec == nil || destination.Nodes[0].ActionSpec.SecretRef != "credential://demo/session" {
+		t.Fatalf("restored session step lost its approved action: %+v", destination.Nodes)
+	}
+	if len(destination.Nodes[0].ActionSpec.Target.SelectorAlternatives) != 1 || destination.Nodes[1].ID != "resume" {
+		t.Fatalf("session provenance or continuation ordering changed: %+v", destination.Nodes)
+	}
+	for _, node := range destination.Nodes[1:] {
+		if node.ActionSpec != nil && (node.ActionSpec.Type == model.GraphActionClick || node.ActionSpec.Type == model.GraphActionFill || node.ActionSpec.Type == model.GraphActionSelect) {
+			t.Fatalf("session restoration introduced a business write: %+v", node)
 		}
 	}
 }

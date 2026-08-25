@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -32,15 +33,41 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		return adaptiveDirectReconciliationBuild{}, errors.New("adaptive reconciliation requires a persisted failed result")
 	}
 	result := *state.DesktopCloudRun.ResultPackage
+	repairState := state
+	var sourcePackage *model.ClientExecutionPackage
+	loadedPackage, packageErr := s.GetDirectSourcePackage(ctx, projectID, sourceJobID)
+	if packageErr == nil {
+		sourcePackage = &loadedPackage
+		if result.CloudJobID != strings.TrimSpace(sourceJobID) {
+			result, err = s.getDirectHistoricalResult(ctx, projectID, sourceJobID)
+			if err != nil {
+				return adaptiveDirectReconciliationBuild{}, fmt.Errorf("load adaptive reconciliation source result: %w", err)
+			}
+		}
+		if result.SourcePackageID != loadedPackage.PackageID {
+			return adaptiveDirectReconciliationBuild{}, errors.New("adaptive reconciliation source package does not match the failed result")
+		}
+		repairCopy := *state
+		repairCopy.WorkflowGraph = loadedPackage.WorkflowGraph
+		repairCopy.ExecutableScriptBundle = loadedPackage.ExecutableScriptBundle
+		repairState = &repairCopy
+	} else if adaptiveReconciliationNeedsAuthentication(state) || result.CloudJobID != strings.TrimSpace(sourceJobID) {
+		return adaptiveDirectReconciliationBuild{}, fmt.Errorf("load adaptive reconciliation source package: %w", packageErr)
+	}
 	if result.Status != model.RecordingResultStatusFailed || result.CloudJobID != strings.TrimSpace(sourceJobID) || result.FailureDiagnostic == nil {
 		return adaptiveDirectReconciliationBuild{}, errors.New("adaptive reconciliation source result does not match the failed Direct job")
 	}
-	graph, eligible, err := terminalInteractionVerificationRepairGraph(state, result, time.Now().UTC())
+	graph, eligible, err := terminalInteractionVerificationRepairGraph(repairState, result, time.Now().UTC())
 	if err != nil || !eligible || graph == nil || !strings.HasPrefix(graph.ID, "graph_adaptive_successor_repair_") {
 		if err == nil {
 			err = errors.New("failed Direct job has no observed successor state")
 		}
 		return adaptiveDirectReconciliationBuild{}, err
+	}
+	if sourcePackage != nil {
+		if _, err := prependReusableSessionSetup(graph, *sourcePackage); err != nil {
+			return adaptiveDirectReconciliationBuild{}, err
+		}
 	}
 	if err := applyAdaptiveInteractionContracts(graph, interactionPlan, observationPlan, result.FailureDiagnostic.CurrentURL, directDiagnosticRefs(*result.FailureDiagnostic)); err != nil {
 		return adaptiveDirectReconciliationBuild{}, err
@@ -76,6 +103,98 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		return adaptiveDirectReconciliationBuild{}, fmt.Errorf("build adaptive successor package: %w", err)
 	}
 	return adaptiveDirectReconciliationBuild{State: next, Build: build, SourceResult: result}, nil
+}
+
+func adaptiveReconciliationNeedsAuthentication(state *orchestrator.CascadeState) bool {
+	if state == nil || state.ProjectContext == nil || state.ProjectContext.DemoAccount == nil {
+		return false
+	}
+	account := state.ProjectContext.DemoAccount
+	return strings.TrimSpace(account.UsernameSecretRef) != "" && strings.TrimSpace(account.PasswordSecretRef) != ""
+}
+
+// prependReusableSessionSetup reconstructs only the approved authentication
+// stage from the source package's executable step. Creation, form input and
+// submission stages are deliberately never copied into a reconciliation run.
+func prependReusableSessionSetup(graph *model.DemoWorkflowGraph, source model.ClientExecutionPackage) (bool, error) {
+	if graph == nil || source.ExecutableScriptBundle == nil || source.ExecutableScriptBundle.PlanJSON == nil {
+		return false, nil
+	}
+	for _, existing := range graph.Nodes {
+		if isSessionSetupGraphNode(existing) {
+			return false, nil
+		}
+	}
+	var sourceNode *model.GraphNode
+	for _, step := range source.ExecutableScriptBundle.PlanJSON.Steps {
+		if step.StageKind != model.BusinessStageKindSessionSetup || strings.TrimSpace(step.Action.SecretRef) == "" {
+			continue
+		}
+		grantBound := false
+		for _, grant := range source.CredentialGrants {
+			if strings.TrimSpace(grant.CloudSecretRef) == strings.TrimSpace(step.Action.SecretRef) {
+				grantBound = true
+				break
+			}
+		}
+		if !grantBound {
+			return false, errors.New("adaptive reconciliation session setup is not bound to an approved credential grant")
+		}
+		for _, candidate := range source.WorkflowGraph.Nodes {
+			if candidate != nil && candidate.ID == step.NodeID {
+				encoded, marshalErr := json.Marshal(candidate)
+				if marshalErr != nil {
+					return false, marshalErr
+				}
+				if unmarshalErr := json.Unmarshal(encoded, &sourceNode); unmarshalErr != nil {
+					return false, unmarshalErr
+				}
+				break
+			}
+		}
+		if sourceNode == nil {
+			sourceNode = &model.GraphNode{ID: step.NodeID}
+		}
+		action := step.Action
+		sourceNode.Type = model.GraphNodeTypeAction
+		sourceNode.Title = firstNonEmptyString(step.Title, "恢复已批准的业务会话")
+		sourceNode.Goal = firstNonEmptyString(step.BusinessValue, "恢复原任务已批准的登录会话。")
+		sourceNode.Action = string(action.Type)
+		sourceNode.PageRef = firstNonEmptyString(step.PageTarget.URL, step.PageTarget.PageRef, action.Target.URL, source.ProjectContextSummary.ProductURL)
+		sourceNode.ActionSpec = &model.GraphAction{
+			Type: action.Type, Target: action.Target, Value: action.Value, InputRef: action.InputRef, SecretRef: action.SecretRef,
+			Parameters: action.Parameters, TimeoutMS: action.TimeoutMS, WaitUntil: action.WaitUntil, Preconditions: append([]model.StateAssertion(nil), action.Preconditions...),
+		}
+		sourceNode.ExpectedOutcome = step.ExpectedOutcome
+		sourceNode.Validations = append([]model.ValidationSpec(nil), step.Validations...)
+		sourceNode.EvidenceRefs = append([]model.EvidenceRef(nil), step.EvidenceRefs...)
+		sourceNode.DurationHintMS = firstPositiveInt(step.Timing.DurationMS, 6_000)
+		capture, narrative := step.Capture, step.Narrative
+		sourceNode.Capture, sourceNode.Narrative = &capture, &narrative
+		if step.InteractionContract != nil {
+			contract := *step.InteractionContract
+			sourceNode.InteractionContract = &contract
+		}
+		if sourceNode.Metadata == nil {
+			sourceNode.Metadata = map[string]any{}
+		}
+		sourceNode.Metadata["business_stage_id"] = step.NodeID
+		sourceNode.Metadata["business_stage_kind"] = string(model.BusinessStageKindSessionSetup)
+		sourceNode.Metadata["business_route_state"] = string(step.RouteState)
+		sourceNode.Metadata["replay_policy"] = string(model.InteractionReplayObserveOnly)
+		sourceNode.Metadata["adaptive_session_restore"] = true
+		graph.Nodes = append([]*model.GraphNode{sourceNode}, graph.Nodes...)
+		return true, nil
+	}
+	return false, nil
+}
+
+func isSessionSetupGraphNode(node *model.GraphNode) bool {
+	if node == nil || node.Metadata == nil {
+		return false
+	}
+	kind, _ := node.Metadata["business_stage_kind"].(string)
+	return model.BusinessStageKind(kind) == model.BusinessStageKindSessionSetup
 }
 
 func syncAdaptiveBusinessStagePlan(state *orchestrator.CascadeState, graph *model.DemoWorkflowGraph) error {
@@ -146,6 +265,11 @@ func applyAdaptiveInteractionContracts(graph *model.DemoWorkflowGraph, plan expe
 	base := make([]*model.GraphNode, 0, len(graph.Nodes)+len(contracts))
 	for _, node := range graph.Nodes {
 		if node == nil {
+			continue
+		}
+		if isSessionSetupGraphNode(node) {
+			node.Type = model.GraphNodeTypeAction
+			base = append(base, node)
 			continue
 		}
 		if node.InteractionContract != nil {

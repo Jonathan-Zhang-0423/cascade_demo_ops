@@ -322,6 +322,23 @@ func (g *Gateway) Job(jobID, leaseID string) (*Job, error) {
 	return &copy, nil
 }
 
+// JobForInstallation lets a renewed lease read jobs that were created by the
+// same installation. Terminal jobs are intentionally not rebound when a lease
+// is renewed, but their source package and result remain valid recovery input.
+// Callers must authenticate the current lease before using this method.
+func (g *Gateway) JobForInstallation(jobID, installationID string) (*Job, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	job := g.jobs[jobID]
+	if job == nil || strings.TrimSpace(installationID) == "" || job.InstallationID != installationID {
+		return nil, ErrJobNotFound
+	}
+	copy := *job
+	copy.PackageJSON = append([]byte{}, job.PackageJSON...)
+	copy.ResultJSON = append([]byte{}, job.ResultJSON...)
+	return &copy, nil
+}
+
 func (g *Gateway) WorkerJob(jobID string) (*Job, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

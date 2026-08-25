@@ -888,6 +888,34 @@ func (s *Service) GetDirectResult(ctx context.Context, projectID, jobID string) 
 	return result, nil
 }
 
+// GetDirectSourcePackage returns the exact approved package persisted by the
+// Gateway for a previous job. It contains opaque credential references only;
+// plaintext credentials never enter the package or this recovery path.
+func (s *Service) GetDirectSourcePackage(ctx context.Context, projectID, jobID string) (model.ClientExecutionPackage, error) {
+	var pkg model.ClientExecutionPackage
+	if err := s.directProjectRead(ctx, projectID, "/v1/direct/jobs/"+url.PathEscape(jobID)+"/package", "source_execution_package", &pkg); err != nil {
+		return pkg, err
+	}
+	if strings.TrimSpace(pkg.PackageID) == "" || strings.TrimSpace(pkg.ProjectID) != strings.TrimSpace(projectID) || pkg.WorkflowGraph == nil || pkg.ExecutableScriptBundle == nil {
+		return pkg, errors.New("direct source package binding is invalid")
+	}
+	return pkg, nil
+}
+
+func (s *Service) getDirectHistoricalResult(ctx context.Context, projectID, jobID string) (model.RecordingResultPackage, error) {
+	var result model.RecordingResultPackage
+	if err := s.directProjectRead(ctx, projectID, "/v1/direct/jobs/"+url.PathEscape(jobID)+"/result", "recording_result", &result); err != nil {
+		return result, err
+	}
+	if result.CloudJobID != jobID || strings.TrimSpace(result.SourcePackageID) == "" {
+		return result, errors.New("direct historical result job binding mismatch")
+	}
+	if err := result.ValidateStatusContract(); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
 func (s *Service) DownloadDirectArtifact(ctx context.Context, projectID string, request DirectArtifactDownloadRequest) (CloudDeliverableDownloadResult, error) {
 	if strings.TrimSpace(request.JobID) == "" || strings.TrimSpace(request.Artifact.ArtifactID) == "" {
 		return CloudDeliverableDownloadResult{}, errors.New("job_id and artifact are required")

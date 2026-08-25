@@ -56,6 +56,57 @@ func TestDirectPackageIdempotencyConflictUsesStableHTTPError(t *testing.T) {
 	}
 }
 
+func TestDirectSourcePackageReadIsBoundToInstallation(t *testing.T) {
+	server := NewDirectHTTPServer(nil, "gateway.example", "bootstrap", "worker")
+	lease := allocateDirectHTTPTestLease(t, server)
+	pkg := completeDirectHTTPPackageFixture(t, lease.InstallationID)
+	upload := uploadDirectHTTPPackageFixture(t, server, lease, pkg, "source-package-upload")
+	if upload.Code != http.StatusOK {
+		t.Fatalf("package upload status=%d body=%s", upload.Code, upload.Body.String())
+	}
+	var encryptedReceipt direct.DirectEncryptedMessage
+	if err := json.Unmarshal(upload.Body.Bytes(), &encryptedReceipt); err != nil {
+		t.Fatal(err)
+	}
+	receiptBytes, err := encryptedReceipt.Decrypt(lease.LeaseToken, lease.InstallationID, lease.DataPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt model.DirectPackageReceipt
+	if err := json.Unmarshal(receiptBytes, &receipt); err != nil {
+		t.Fatal(err)
+	}
+
+	read := signedDirectTestRead(t, server, lease, "/v1/direct/jobs/"+receipt.JobID+"/package", "source-package-read")
+	if read.Code != http.StatusOK {
+		t.Fatalf("source package read status=%d body=%s", read.Code, read.Body.String())
+	}
+	var encryptedPackage direct.DirectEncryptedMessage
+	if err := json.Unmarshal(read.Body.Bytes(), &encryptedPackage); err != nil {
+		t.Fatal(err)
+	}
+	if encryptedPackage.MessageType != "source_execution_package" {
+		t.Fatalf("source package response type=%q", encryptedPackage.MessageType)
+	}
+	packageBytes, err := encryptedPackage.Decrypt(lease.LeaseToken, lease.InstallationID, lease.DataPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored model.ClientExecutionPackage
+	if err := json.Unmarshal(packageBytes, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.PackageID != pkg.PackageID || restored.ProjectID != pkg.ProjectID {
+		t.Fatalf("source package identity changed: %+v", restored)
+	}
+
+	foreign := allocateDirectHTTPTestLease(t, server)
+	denied := signedDirectTestRead(t, server, foreign, "/v1/direct/jobs/"+receipt.JobID+"/package", "foreign-source-read")
+	if denied.Code != http.StatusNotFound {
+		t.Fatalf("foreign installation source read status=%d body=%s", denied.Code, denied.Body.String())
+	}
+}
+
 func TestDirectHealthReportsWorkerReadinessWithoutSecrets(t *testing.T) {
 	server := NewDirectHTTPServer(nil, "gateway.example", "bootstrap", "worker")
 	health := httptest.NewRequest(http.MethodGet, "/v1/direct/health", nil)
@@ -1116,6 +1167,22 @@ func uploadDirectHTTPPackageFixture(t *testing.T, server *DirectHTTPServer, leas
 	request.Header.Set("X-Cascade-Nonce", nonce)
 	request.Header.Set("X-Cascade-Body-SHA256", digest)
 	request.Header.Set("X-Cascade-Signature", direct.SignDataRequest(http.MethodPost, (&url.URL{Path: path}).EscapedPath(), stamp, nonce, digest, lease.LeaseToken, lease.InstallationID, lease.LeaseID, lease.DataPort))
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	return response
+}
+
+func signedDirectTestRead(t *testing.T, server *DirectHTTPServer, lease direct.DirectPortLease, path, nonce string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "https://gateway.example"+path, nil)
+	request.Host = "gateway.example:" + fmt.Sprint(lease.DataPort)
+	request.RemoteAddr = "127.0.0.1:54321"
+	stamp := time.Now().UnixMilli()
+	digest := direct.HashSHA256(nil)
+	request.Header.Set("X-Cascade-Timestamp", fmt.Sprint(stamp))
+	request.Header.Set("X-Cascade-Nonce", nonce)
+	request.Header.Set("X-Cascade-Body-SHA256", digest)
+	request.Header.Set("X-Cascade-Signature", direct.SignDataRequest(http.MethodGet, (&url.URL{Path: path}).EscapedPath(), stamp, nonce, digest, lease.LeaseToken, lease.InstallationID, lease.LeaseID, lease.DataPort))
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
 	return response

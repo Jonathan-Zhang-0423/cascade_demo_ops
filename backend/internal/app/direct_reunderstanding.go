@@ -475,6 +475,20 @@ func adaptiveSuccessorObservationRepairGraph(state *orchestrator.CascadeState, r
 		ID: "validate_adaptive_successor_route", Kind: "url_matches", Target: model.ActionTarget{URL: observedURL},
 		Expected: observedURL, Required: true, Severity: "blocking", EvidenceRefs: append([]model.EvidenceRef(nil), resume.EvidenceRefs...),
 	}}
+	resume.InteractionContract = &model.InteractionContract{
+		SchemaVersion:    model.InteractionContractSchemaVersion,
+		ContractID:       "interaction_adaptive_successor_resume_" + resume.ID,
+		SemanticGoal:     resume.Goal,
+		ActionKind:       model.GraphActionNavigate,
+		ReplayPolicy:     model.InteractionReplayObserveOnly,
+		TargetSemanticID: "observed_successor_entity",
+		ActionTarget:     resume.ActionSpec.Target,
+		ExpectedTransitions: []model.InteractionPredicate{{
+			ID: "observe_adaptive_successor_route", Kind: "url_matches", Target: model.ActionTarget{URL: observedURL},
+			Expected: observedURL, Required: true, TimeoutMS: 30_000, EvidenceRefs: append([]model.EvidenceRef(nil), resume.EvidenceRefs...),
+		}},
+		EvidenceRefs: append([]model.EvidenceRef(nil), resume.EvidenceRefs...), NonDestructive: true,
+	}
 	if resume.Metadata == nil {
 		resume.Metadata = map[string]any{}
 	}
