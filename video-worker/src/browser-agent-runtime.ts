@@ -1954,6 +1954,37 @@ export function browserVisualRefreshDue(startedAtMS: number, nowMS: number, refr
 	return !refreshed && refreshAfterMS > 0 && nowMS - startedAtMS >= refreshAfterMS;
 }
 
+export function browserVisualTerminalPolicy(stage: BrowserAgentWorkerStage): { requireVisualTerminal: boolean; refreshAfterMS: number } {
+	// Compatible RPC/package paths may carry the approved parameters on the
+	// immutable interaction even when the duplicated stage contract is omitted.
+	// Both representations express the same approved policy.
+	const parameters = stage.interaction_contract?.parameters
+		|| stage.interactions.find((interaction) => interaction.parameters)?.parameters;
+	return {
+		requireVisualTerminal: parameters?.require_visual_terminal_confirmation === true,
+		refreshAfterMS: Math.max(0, Math.trunc(Number(parameters?.refresh_after_ms) || 0)),
+	};
+}
+
+export function browserVisualFinalObservationDue(input: {
+	existingCount: number;
+	maxCalls: number;
+	nowMS: number;
+	nextCaptureAtMS: number;
+	startedAtMS: number;
+	refreshAfterMS: number;
+	deadlineMS: number;
+	sawBusy: boolean;
+	busyNow: boolean;
+}): boolean {
+	if (input.existingCount >= input.maxCalls || input.nowMS < input.nextCaptureAtMS) return false;
+	if (input.existingCount === 0) return true;
+	const nearDeadline = input.deadlineMS - input.nowMS <= 30_000;
+	const busyTransitionCompleted = input.sawBusy && !input.busyNow;
+	const scheduledRefresh = !input.busyNow && (input.refreshAfterMS <= 0 || input.nowMS - input.startedAtMS >= input.refreshAfterMS);
+	return busyTransitionCompleted || scheduledRefresh || nearDeadline;
+}
+
 async function waitForPlayableSurfaceWithVisualObservation(
 	session: BrowserAgentSession,
 	stage: BrowserAgentWorkerStage,
@@ -1963,11 +1994,11 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	if (!baseConfig) return waitForPlayableSurface(session.page, timeout);
 	const config = { ...baseConfig, maxCalls: Math.min(baseConfig.maxCalls, session.visualMaxCalls) };
 	const deadline = Date.now() + interactiveSurfacePollTimeout(timeout);
-	const requireVisualTerminal = stage.interaction_contract?.parameters?.require_visual_terminal_confirmation === true;
+	const { requireVisualTerminal, refreshAfterMS } = browserVisualTerminalPolicy(stage);
 	const { heartbeatLimit } = browserVisualObservationAllocation(config.maxCalls, requireVisualTerminal);
 	const startedAtMS = Date.now();
-	const refreshAfterMS = Math.max(0, Math.trunc(Number(stage.interaction_contract?.parameters?.refresh_after_ms) || 0));
 	let refreshed = false;
+	let sawBusy = false;
 	let nextCaptureAt = Date.now();
 	while (Date.now() < deadline) {
 		if (requireVisualTerminal && browserVisualRefreshDue(startedAtMS, Date.now(), refreshAfterMS, refreshed)) {
@@ -1978,6 +2009,8 @@ async function waitForPlayableSurfaceWithVisualObservation(
 		}
 		const target = await interactiveSurfaceTargetOnce(session.page);
 		if (target) {
+			const busyNow = await pageStillBusy(session.page);
+			if (busyNow) sawBusy = true;
 			const surfaceDigest = session.resultSurfaceBaselineDigest ? await visualDigest(session.page, target.digestTarget) : "";
 			const surfaceChanged = Boolean(session.resultSurfaceBaselineDigest && surfaceDigest && surfaceDigest !== session.resultSurfaceBaselineDigest);
 			if (session.resultSurfaceBaselineDigest && !surfaceChanged) {
@@ -1996,7 +2029,10 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			const terminal = browserVisualTerminalWithStructuralEvidence(existing, config.maxCalls);
 			if (terminal === "succeeded") return { surface: true, score: target.stateful, controls: target.focusable };
 			if (terminal === "failed") return { surface: false, score: false, controls: false };
-			if (Date.now() >= nextCaptureAt && existing.length < config.maxCalls) {
+			if (browserVisualFinalObservationDue({
+				existingCount: existing.length, maxCalls: config.maxCalls, nowMS: Date.now(), nextCaptureAtMS: nextCaptureAt,
+				startedAtMS, refreshAfterMS, deadlineMS: deadline, sawBusy, busyNow,
+			})) {
 				const observed = await captureAndUnderstandVisionPoll(session, stage, config, Math.max(0, Date.now() - session.openedAtMS));
 				// Sparse in-progress polling preserves enough calls for a late result
 				// plus the mandatory independent terminal confirmation.
@@ -2846,10 +2882,22 @@ function suggestedEntryWaitCondition(stage: BrowserAgentWorkerStage): string | u
 
 async function pageStillBusy(page: any): Promise<boolean> {
   return page.evaluate(() => {
-    const pageDocument = (globalThis as unknown as { document: { readyState?: string; querySelector?: (selector: string) => unknown } }).document;
+    const pageDocument = (globalThis as any).document;
     const documentBusy = pageDocument.readyState !== "complete";
     const ariaBusy = Boolean(pageDocument.querySelector?.('[aria-busy="true"]'));
-    return documentBusy || ariaBusy;
+    const visibleText = (element: any): string => {
+      const style = (globalThis as any).getComputedStyle?.(element);
+      const rect = element.getBoundingClientRect?.();
+      if (style?.display === "none" || style?.visibility === "hidden" || Number(style?.opacity) === 0 || !rect || rect.width <= 0 || rect.height <= 0) return "";
+      return String(element.getAttribute?.("aria-label") || element.innerText || element.textContent || "").trim().toLowerCase();
+    };
+    const lifecycleNodes = Array.from(pageDocument.querySelectorAll?.('progress,[role="progressbar"],[role="status"],[aria-live],button,[role="button"]') || []).slice(0, 160) as any[];
+    const activeLifecycleSignal = lifecycleNodes.some((element) => {
+      const text = visibleText(element);
+      if (!text) return element.matches?.('progress:not([value]),[role="progressbar"]') || false;
+      return /\b(running|in progress|generating|building|executing)\b|执行中|生成中|构建中|处理中|正在执行|正在生成|正在构建/.test(text);
+    });
+    return documentBusy || ariaBusy || activeLifecycleSignal;
   }).catch(() => false);
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, browserVisualTerminalWithStructuralEvidence, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationPollDecision, runtimeExecutionContinuationScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationPollDecision, runtimeExecutionContinuationScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -24,6 +24,21 @@ describe("browser visual polling terminal evidence", () => {
     expect(browserVisualRefreshDue(1_000, 31_000, 30_000, true)).toBe(false);
 		expect(browserVisualTerminalWithStructuralEvidence([verdict("in_progress", .8), verdict("succeeded", .95)], 2)).toBe("succeeded");
   });
+
+	it("retains the visual Gate when compatible RPC stages carry policy on the interaction", () => {
+		expect(browserVisualTerminalPolicy({
+			id: "surface", order: 1, node_id: "surface", target_contract: { semantic_id: "surface", destructive: false },
+			interactions: [{ kind: "inspect", parameters: { require_visual_terminal_confirmation: true, refresh_after_ms: 300_000 } }],
+		})).toEqual({ requireVisualTerminal: true, refreshAfterMS: 300_000 });
+	});
+
+	it("spends the final visual call only after busy completion, scheduled refresh, or the deadline", () => {
+		const base = { existingCount: 1, maxCalls: 2, nowMS: 120_000, nextCaptureAtMS: 90_000, startedAtMS: 0, refreshAfterMS: 300_000, deadlineMS: 600_000 };
+		expect(browserVisualFinalObservationDue({ ...base, sawBusy: true, busyNow: true })).toBe(false);
+		expect(browserVisualFinalObservationDue({ ...base, sawBusy: true, busyNow: false })).toBe(true);
+		expect(browserVisualFinalObservationDue({ ...base, nowMS: 300_000, sawBusy: false, busyNow: false })).toBe(true);
+		expect(browserVisualFinalObservationDue({ ...base, nowMS: 575_000, sawBusy: false, busyNow: true })).toBe(true);
+	});
 });
 
 describe("browser agent target resolution feedback", () => {
