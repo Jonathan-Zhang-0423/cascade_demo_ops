@@ -2022,7 +2022,8 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	while (Date.now() < deadline) {
 		if (requireVisualTerminal && browserVisualRefreshDue(startedAtMS, Date.now(), refreshAfterMS, refreshed)) {
 			refreshed = true;
-			if (!await refreshAndRestoreObservedEntry(session)) {
+			const busyBeforeRefresh = await pageStillBusy(session.page);
+			if (browserVisualRefreshShouldReload(busyBeforeRefresh) && !await refreshAndRestoreObservedEntry(session)) {
 				return { surface: false, score: false, controls: false };
 			}
 			nextCaptureAt = Date.now();
@@ -2075,6 +2076,14 @@ async function waitForPlayableSurfaceWithVisualObservation(
 		await session.page.waitForTimeout(Math.min(1_000, Math.max(100, deadline - Date.now())));
 	}
 	return { surface: false, score: false, controls: false };
+}
+
+export function browserVisualRefreshShouldReload(busy: boolean): boolean {
+	// Reloading an explicitly active SPA can destroy the client-side entity
+	// route or the only live progress subscription. The periodic structural
+	// observer already proves liveness, so physical reload is reserved for an
+	// idle page whose result cannot otherwise be disambiguated.
+	return !busy;
 }
 
 export function browserVisualRefreshRecoveryRequired(observedEntryURL: string, currentURL: string): boolean {
