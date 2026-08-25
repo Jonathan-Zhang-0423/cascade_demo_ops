@@ -368,13 +368,22 @@ func (s *Service) DiagnosePlanningModel(ctx context.Context) llm.DiagnosticResul
 }
 
 func (s *Service) CreateProject(ctx context.Context, input orchestrator.UserInput) (*orchestrator.CascadeState, error) {
+	return s.createProject(ctx, input, true)
+}
+
+// createProject runs the analysis flow and persists successful states. Initial
+// project creation also persists a failed state so the App can offer repair
+// actions. A regeneration of an existing project passes persistFailure=false:
+// a transient model, browser, or network failure must not replace the last
+// complete and auditable project state with a partially initialized rerun.
+func (s *Service) createProject(ctx context.Context, input orchestrator.UserInput, persistFailure bool) (*orchestrator.CascadeState, error) {
 	hydrated, err := s.hydrateDemoCredentialInput(input)
 	if err != nil {
 		return nil, err
 	}
 	state, err := s.flow.Start(ctx, hydrated)
 	if err != nil {
-		if state != nil && state.ProjectID != "" {
+		if persistFailure && state != nil && state.ProjectID != "" {
 			_ = s.states.Save(ctx, state)
 		}
 		return state, err
@@ -594,7 +603,16 @@ func projectStatusFromState(state *orchestrator.CascadeState) string {
 }
 
 func (s *Service) GenerateExecutionPackage(ctx context.Context, input orchestrator.UserInput) (*orchestrator.CascadeState, error) {
-	state, err := s.CreateProject(ctx, input)
+	// Existing-project regeneration is transactional at the state-store
+	// boundary: only a successful rerun replaces the previous state. This also
+	// keeps confirmed SourceBinding authorization available for later retries.
+	persistFailure := true
+	if strings.TrimSpace(input.ProjectID) != "" {
+		if _, err := s.states.Load(ctx, input.ProjectID); err == nil {
+			persistFailure = false
+		}
+	}
+	state, err := s.createProject(ctx, input, persistFailure)
 	if err != nil {
 		return state, err
 	}
@@ -616,7 +634,7 @@ func (s *Service) RegenerateExecutionPackage(ctx context.Context, projectID stri
 	if err != nil {
 		return nil, err
 	}
-	return s.CreateProject(ctx, input)
+	return s.GenerateExecutionPackage(ctx, input)
 }
 
 func stateHasNoCoreBusinessAction(state *orchestrator.CascadeState) bool {

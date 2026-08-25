@@ -134,62 +134,39 @@ func (s *Service) RunGeneratedCandidates(ctx context.Context, jobID string, expe
 	}
 	record.StartedAt = s.now().UTC()
 	for _, intent := range record.Intents {
-		adapter, _, selectErr := s.providers.Select(ctx, intent, preferredProvider)
-		if selectErr != nil {
-			record.Executions = append(record.Executions, media.GeneratedShotProviderExecutionResult{
-				SchemaVersion: media.GeneratedShotProviderExecutionSchemaVersion, IntentID: intent.IntentID,
-				Status: media.GeneratedShotFailureContinue, FailurePolicy: media.GeneratedShotFailureContinue,
-				ErrorClass: "provider_selection_failed", ErrorMessage: selectErr.Error(),
-			})
-			continue
-		}
-		if adapter.Descriptor().Provider != media.GeneratedShotProviderSeedance25 && hasOpaqueAssetReference(intent) {
-			record.Executions = append(record.Executions, media.GeneratedShotProviderExecutionResult{
-				SchemaVersion: media.GeneratedShotProviderExecutionSchemaVersion, Provider: adapter.Descriptor().Provider,
-				Model: adapter.Descriptor().Model, IntentID: intent.IntentID, Status: media.GeneratedShotFailureContinue,
-				FailurePolicy: media.GeneratedShotFailureContinue, ErrorClass: "provider_reference_unpublished",
-				ErrorMessage: "local asset:// references can only be published by the Seedance 2.5 reference bridge",
-			})
-			continue
-		}
-		providerIntent := intent
-		if adapter.Descriptor().Provider == media.GeneratedShotProviderSeedance25 {
-			operationID := generatedShotIdempotencyKey(job, intent)
-			prepared, audit, prepareErr := s.prepareSeedance25Reference(ctx, job, intent, operationID)
-			record.SeedanceReferenceAudits = append(record.SeedanceReferenceAudits, audit)
-			if prepareErr != nil {
-				record.Executions = append(record.Executions, media.GeneratedShotProviderExecutionResult{
-					SchemaVersion: media.GeneratedShotProviderExecutionSchemaVersion, Provider: adapter.Descriptor().Provider,
-					Model: adapter.Descriptor().Model, IntentID: intent.IntentID, Status: media.GeneratedShotFailureContinue,
-					FailurePolicy: media.GeneratedShotFailureContinue, ErrorClass: "seedance_reference_preparation_failed", ErrorMessage: prepareErr.Error(),
-				})
-				continue
-			}
-			providerIntent = prepared
-		}
 		idempotencyKey := generatedShotIdempotencyKey(job, intent)
-		result, executeErr := adapter.Execute(ctx, media.GeneratedShotProviderExecutionRequest{
-			Intent: providerIntent, GenerationAuthorized: true, AuthorizationRef: job.GenerationAuthorizationRef,
+		result, attempts := s.providers.ExecuteWithFallbackPrepared(ctx, media.GeneratedShotProviderExecutionRequest{
+			Intent: intent, GenerationAuthorized: true, AuthorizationRef: job.GenerationAuthorizationRef,
 			IdempotencyKey: idempotencyKey, AdmissionScope: job.JobID,
-			OutputDir: filepath.Join(s.outputRoot, job.JobID, "generated", intent.IntentID, adapter.Descriptor().Provider),
-			Timeout:   s.providerTimeout,
+			OutputDir: filepath.Join(s.outputRoot, job.JobID, "generated", intent.IntentID), Timeout: s.providerTimeout,
+		}, preferredProvider, func(prepareCtx context.Context, adapter media.GeneratedShotProviderAdapter, original media.GeneratedShotIntent) (media.GeneratedShotIntent, error) {
+			if adapter.Descriptor().Provider != media.GeneratedShotProviderSeedance25 && hasOpaqueAssetReference(original) {
+				return media.GeneratedShotIntent{}, errors.New("provider_reference_unpublished: local asset:// references require the Seedance 2.5 reference bridge")
+			}
+			if adapter.Descriptor().Provider != media.GeneratedShotProviderSeedance25 {
+				return original, nil
+			}
+			operationID := generatedShotIdempotencyKey(job, original)
+			prepared, audit, prepareErr := s.prepareSeedance25Reference(prepareCtx, job, original, operationID)
+			record.SeedanceReferenceAudits = append(record.SeedanceReferenceAudits, audit)
+			return prepared, prepareErr
 		})
-		if executeErr != nil && result.ErrorMessage == "" {
-			result.ErrorMessage = executeErr.Error()
+		for _, attempt := range attempts {
+			// Preserve the established FinalFilm audit vocabulary while the
+			// ProviderPool exposes its more precise compatibility classification.
+			if attempt.ErrorClass == "no_compatible_provider" {
+				attempt.ErrorClass = "provider_selection_failed"
+			}
+			record.Executions = append(record.Executions, redactGeneratedProviderExecutionFailure(attempt))
 		}
-		// Provider adapters can include request URLs in transport errors. A
-		// Seedance private-TOS URL is a short-lived credential, so the durable
-		// generated-track audit may retain the classification but never such a
-		// location. The job/intent/operation identities already provide the
-		// operator with a safe correlation path into secured provider telemetry.
-		result = redactGeneratedProviderExecutionFailure(result)
-		record.Executions = append(record.Executions, result)
 		if result.Candidate == nil {
 			continue
 		}
 		if err := media.ValidateGeneratedShotCandidate(*result.Candidate); err != nil {
-			record.Executions[len(record.Executions)-1].ErrorClass = "candidate_validation_failed"
-			record.Executions[len(record.Executions)-1].ErrorMessage = err.Error()
+			if len(record.Executions) > 0 {
+				record.Executions[len(record.Executions)-1].ErrorClass = "candidate_validation_failed"
+				record.Executions[len(record.Executions)-1].ErrorMessage = err.Error()
+			}
 			continue
 		}
 		review := result.StructuralReview

@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -373,6 +374,67 @@ func TestBindGraphRequirementsUsesStageSemanticsAndRejectsUnverifiedNodes(t *tes
 		if len(requirement.NodeRefs) != 1 || requirement.NodeRefs[0] != want[requirement.ID] || len(requirement.EvidenceRefs) == 0 {
 			t.Fatalf("requirement %q mapped incorrectly: %+v", requirement.ID, requirement)
 		}
+	}
+}
+
+func TestBindGraphRequirementsRequiresAllCompositeBusinessNodes(t *testing.T) {
+	evidence := []model.EvidenceRef{{ID: "ev_source_followup", Kind: model.EvidenceKindSourceCode}}
+	validatedNode := func(id string, kind model.BusinessStageKind) *model.GraphNode {
+		return &model.GraphNode{
+			ID:           id,
+			Metadata:     map[string]any{"business_stage_kind": string(kind)},
+			EvidenceRefs: evidence,
+			Validations:  []model.ValidationSpec{{ID: "validate_" + id, Kind: "page_changed", Required: true, EvidenceRefs: evidence}},
+		}
+	}
+	graph := &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{
+		validatedNode("business_stage_start_agent_build", model.BusinessStageKindBusinessSubmit),
+		validatedNode("business_stage_followup_requirement_input", model.BusinessStageKindBusinessInput),
+		validatedNode("business_stage_followup_requirement_submit", model.BusinessStageKindBusinessSubmit),
+	}}
+	project := &model.ProjectContext{Inputs: &model.ProjectInputBundle{Requirements: []model.DemoRequirement{
+		{ID: "build", Kind: "must_show", Description: "点击“构建”并验证后续用户输入框已经弹出", Required: true},
+		{ID: "followup", Kind: "must_show", Description: "输入并提交完整构建需求", Required: true},
+	}}}
+
+	bindGraphRequirements(project, graph)
+
+	if got := graph.Requirements[0].NodeRefs; !reflect.DeepEqual(got, []string{"business_stage_start_agent_build"}) {
+		t.Fatalf("build action/outcome requirement must bind to the build node: %+v", graph.Requirements[0])
+	}
+	wantFollowUp := []string{"business_stage_followup_requirement_input", "business_stage_followup_requirement_submit"}
+	if got := graph.Requirements[1].NodeRefs; !reflect.DeepEqual(got, wantFollowUp) {
+		t.Fatalf("composite input-and-submit requirement must bind both nodes: %+v", graph.Requirements[1])
+	}
+
+	graph.Nodes = graph.Nodes[:2]
+	bindGraphRequirements(project, graph)
+	if len(graph.Requirements[1].NodeRefs) != 0 {
+		t.Fatalf("a missing submit node must leave the composite requirement blocked: %+v", graph.Requirements[1])
+	}
+}
+
+func TestLinkBusinessStageCausalValidationsUsesFollowUpInputAsBuildOutcome(t *testing.T) {
+	evidence := []model.EvidenceRef{{ID: "ev_input_chat", Kind: model.EvidenceKindSourceCode}}
+	start := &model.GraphNode{
+		ID:          "business_stage_start_agent_build",
+		Validations: []model.ValidationSpec{{ID: "old_route_only", Kind: "url_matches", Required: true}},
+	}
+	input := &model.GraphNode{
+		ID: "business_stage_followup_requirement_input",
+		ActionSpec: &model.GraphAction{Type: model.GraphActionFill, Target: model.ActionTarget{
+			Selector: "[data-testid='input-chat']", TestID: "input-chat", EvidenceRefs: evidence,
+		}},
+		EvidenceRefs: evidence,
+	}
+
+	linkBusinessStageCausalValidations([]*model.GraphNode{start, input})
+
+	if len(start.Validations) != 1 || start.Validations[0].Kind != "element_visible" || start.Validations[0].Target.TestID != "input-chat" || !start.Validations[0].Required {
+		t.Fatalf("build click must be validated by the observable follow-up input: %+v", start.Validations)
+	}
+	if len(start.Validations[0].EvidenceRefs) == 0 {
+		t.Fatalf("causal build validation must retain source evidence: %+v", start.Validations[0])
 	}
 }
 

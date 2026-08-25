@@ -71,6 +71,10 @@ type FinalFilmRenderOutput struct {
 
 type FinalFilmOutputValidation struct {
 	Status                  string    `json:"status"`
+	DeliveryStatus          string    `json:"delivery_status,omitempty"`
+	QualityTier             string    `json:"quality_tier,omitempty"`
+	Degradations            []string  `json:"degradations,omitempty"`
+	BlockingFailures        []string  `json:"blocking_failures,omitempty"`
 	VideoSHA256             string    `json:"video_sha256,omitempty"`
 	VideoSizeBytes          int64     `json:"video_size_bytes,omitempty"`
 	Width                   int       `json:"width,omitempty"`

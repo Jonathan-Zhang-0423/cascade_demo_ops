@@ -1261,11 +1261,19 @@ func (s *DevHTTPServer) readLocalDemoCredential(name string) (credentialstore.De
 		}
 		return ephemeral, nil
 	}
+	credential, err := s.readDemoCredential(name)
+	if err == nil {
+		if strings.TrimSpace(credential.Username) == "" || credential.Password == "" {
+			return credentialstore.DemoCredential{}, errors.New("demo credential_ref is empty")
+		}
+		return credential, nil
+	}
 	// A non-interactive dev bridge may not have access to the interactive
 	// Windows Credential Manager session. DEMO_USER/DEMO_PASS are explicit
-	// local-test inputs loaded from the ignored .env, so use them only in the
-	// dev profile and only in memory. They are never added to an App package,
-	// persisted by this server, or enabled for desktop/production runtimes.
+	// local-test inputs loaded from the ignored .env, so use them only as a
+	// last-resort dev fallback after the requested opaque ref cannot be read.
+	// They are never added to an App package, persisted by this server, or
+	// enabled for desktop/production runtimes.
 	if s.service != nil && s.service.runtime.Profile == config.ProfileDev {
 		username := strings.TrimSpace(os.Getenv("DEMO_USER"))
 		password := os.Getenv("DEMO_PASS")
@@ -1273,14 +1281,7 @@ func (s *DevHTTPServer) readLocalDemoCredential(name string) (credentialstore.De
 			return credentialstore.DemoCredential{Username: username, Password: password}, nil
 		}
 	}
-	credential, err := s.readDemoCredential(name)
-	if err != nil {
-		return credentialstore.DemoCredential{}, errors.New("demo credential_ref is unavailable")
-	}
-	if strings.TrimSpace(credential.Username) == "" || credential.Password == "" {
-		return credentialstore.DemoCredential{}, errors.New("demo credential_ref is empty")
-	}
-	return credential, nil
+	return credentialstore.DemoCredential{}, errors.New("demo credential_ref is unavailable")
 }
 
 func devDemoCredentialName(ref string) (string, error) {

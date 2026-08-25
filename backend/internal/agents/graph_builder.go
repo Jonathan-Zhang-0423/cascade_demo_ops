@@ -461,6 +461,7 @@ func (a *GraphBuilderAgent) generateGraphFromBusinessStagePlan(ctx context.Conte
 	if len(graph.Nodes) == 0 {
 		return nil, errors.New("business stage plan produced no graph nodes")
 	}
+	linkBusinessStageCausalValidations(graph.Nodes)
 	graph.Edges = sequentialGraphEdges(graph.Nodes)
 	graph.States = businessStageGraphStates(entryPoint, stagePlan, featureID)
 	graph.Validations = verifiedGraphValidations(entryPoint)
@@ -657,6 +658,46 @@ func graphNodeFromBusinessStage(project *model.ProjectContext, stage model.Busin
 		Tags:           uniqueStrings([]string{"business_stage_plan", string(stage.Kind), string(stage.RouteState)}),
 		Metadata:       metadata,
 	}
+}
+
+// linkBusinessStageCausalValidations keeps action and outcome evidence on the
+// correct nodes. The build button starts the project-detail flow; the later
+// follow-up input is the observable result of that click, not the action that
+// satisfies the build requirement itself.
+func linkBusinessStageCausalValidations(nodes []*model.GraphNode) {
+	var startBuild *model.GraphNode
+	var followUpInput *model.GraphNode
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		switch node.ID {
+		case "business_stage_start_agent_build":
+			startBuild = node
+		case "business_stage_followup_requirement_input":
+			followUpInput = node
+		}
+	}
+	if startBuild == nil || followUpInput == nil || followUpInput.ActionSpec == nil {
+		return
+	}
+	resultTarget := followUpInput.ActionSpec.Target
+	if resultTarget.Selector == "" && resultTarget.TestID == "" && resultTarget.Role == "" && resultTarget.Label == "" && resultTarget.Text == "" {
+		return
+	}
+	evidence := uniqueEvidenceRefs(append(append([]model.EvidenceRef{}, startBuild.EvidenceRefs...), graphNodeEvidenceRefs(followUpInput)...))
+	startBuild.Validations = []model.ValidationSpec{{
+		ID:           "validate_business_stage_start_agent_build_followup_input",
+		Kind:         "element_visible",
+		Target:       resultTarget,
+		Assertion:    "提交项目构建后，后续用户输入框必须真实出现。",
+		Expected:     true,
+		Severity:     "blocking",
+		Required:     true,
+		EvidenceRefs: evidence,
+		RepairPolicy: &model.RepairPolicy{AllowSelectorRepair: true, AllowDataRepair: false, AllowStepSkip: false, MaxAttempts: 2},
+	}}
+	startBuild.EvidenceRefs = evidence
 }
 
 func businessStageGraphActionType(stage model.BusinessStage) model.GraphActionType {
@@ -909,6 +950,13 @@ func businessStageValidation(stage model.BusinessStage, action model.GraphAction
 		// the planner's prose as DOM text. Prove the user-visible state transition
 		// with the same bounded visual-diff assertion used for keyboard controls;
 		// graph compilation adds an independent approved-route readiness anchor.
+		kind = "page_changed"
+		target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
+		expected = true
+	} else if stage.Kind == model.BusinessStageKindBusinessSubmit && strings.TrimPrefix(stage.ID, "business_stage_") == "followup_requirement_submit" {
+		// Sending a chat requirement commonly stays on the same project route.
+		// A same-route url_matches assertion cannot prove submission, so require
+		// an observable page change (message, progress, log, or status update).
 		kind = "page_changed"
 		target = model.ActionTarget{URL: firstNonEmpty(stage.ExpectedRouteAfterAction, stage.EntryRoute, target.URL)}
 		expected = true
@@ -2595,19 +2643,35 @@ func bindGraphRequirements(project *model.ProjectContext, graph *model.DemoWorkf
 		keywords := intentKeywordsForText(requirement.Description)
 		preferredKinds := requirementStageKinds(requirement.Description)
 		preferredNodeIDs := requirementPreferredNodeIDs(requirement.Description)
+		if requiredNodeIDs := requirementCompositeNodeIDs(requirement.Description); len(requiredNodeIDs) > 0 {
+			bound := make([]string, 0, len(requiredNodeIDs))
+			evidence := append([]model.EvidenceRef{}, requirement.EvidenceRefs...)
+			for _, requiredNodeID := range requiredNodeIDs {
+				node := findGraphNodeByID(graph, requiredNodeID)
+				if !graphNodeEligibleForRequirementBinding(node) {
+					bound = nil
+					break
+				}
+				bound = append(bound, node.ID)
+				evidence = append(evidence, graphNodeEvidenceRefs(node)...)
+			}
+			if len(bound) == len(requiredNodeIDs) {
+				requirement.NodeRefs = bound
+				requirement.EvidenceRefs = uniqueEvidenceRefs(evidence)
+			} else {
+				requirement.NodeRefs = nil
+			}
+			continue
+		}
 		bestScore := 0
 		var best *model.GraphNode
 		for _, node := range graph.Nodes {
-			if node == nil || !graphNodeHasRequiredValidation(node) {
+			if !graphNodeEligibleForRequirementBinding(node) {
 				continue
 			}
 			stageKind, hasStageKind := graphNodeBusinessStageKind(node)
 			stageKindScore := preferredKinds[stageKind]
 			if len(preferredKinds) > 0 && (!hasStageKind || stageKindScore == 0) {
-				continue
-			}
-			refs := graphNodeEvidenceRefs(node)
-			if len(refs) == 0 && !graphNodeHasPlanBackedRuntimeContract(node) {
 				continue
 			}
 			text := strings.Join([]string{node.ID, node.Title, node.Goal, node.Description, node.Action, node.InputData, node.ExpectedOutcome, narrativeCaption(node), narrativeCallout(node)}, " ")
@@ -2625,9 +2689,53 @@ func bindGraphRequirements(project *model.ProjectContext, graph *model.DemoWorkf
 	}
 }
 
+func findGraphNodeByID(graph *model.DemoWorkflowGraph, nodeID string) *model.GraphNode {
+	if graph == nil {
+		return nil
+	}
+	for _, node := range graph.Nodes {
+		if node != nil && node.ID == nodeID {
+			return node
+		}
+	}
+	return nil
+}
+
+func graphNodeEligibleForRequirementBinding(node *model.GraphNode) bool {
+	if node == nil || !graphNodeHasRequiredValidation(node) {
+		return false
+	}
+	return len(graphNodeEvidenceRefs(node)) > 0 || graphNodeHasPlanBackedRuntimeContract(node)
+}
+
+func requirementCompositeNodeIDs(description string) []string {
+	text := normalizeIntentText(description)
+	containsInput := containsAnyNormalized(text, "输入", "填写", "填入", "fill", "enter", "type")
+	containsSubmit := containsAnyNormalized(text, "提交", "发送", "send", "submit")
+	containsFollowUpRequirement := containsAnyNormalized(text, "完整需求", "补充需求", "后续需求", "构建需求", "follow-up requirement", "full requirement")
+	if containsInput && containsSubmit && containsFollowUpRequirement {
+		return []string{"business_stage_followup_requirement_input", "business_stage_followup_requirement_submit"}
+	}
+	if requirementDescribesBuildWithFollowUpInput(text) {
+		return []string{"business_stage_start_agent_build"}
+	}
+	return nil
+}
+
+func requirementDescribesBuildWithFollowUpInput(description string) bool {
+	text := normalizeIntentText(description)
+	containsBuildAction := containsAnyNormalized(text, "构建", "build") && containsAnyNormalized(text, "点击", "提交", "启动", "click", "start")
+	containsFollowUpInput := containsAnyNormalized(text, "后续用户输入框", "后续输入框", "用户输入框弹出", "follow-up input", "chat input")
+	return containsBuildAction && containsFollowUpInput
+}
+
 func requirementPreferredNodeIDs(description string) map[string]int {
 	match := func(values ...string) bool { return containsAnyNormalized(description, values...) }
 	preferred := map[string]int{}
+	if requirementDescribesBuildWithFollowUpInput(description) {
+		preferred["business_stage_start_agent_build"] = 1000
+		return preferred
+	}
 	switch {
 	case match("按左", "按右", "按下", "旋转", "方向键", "键盘", "方块位置", "方块形状", "keyboard", "arrowleft", "arrowright", "arrowdown", "arrowup"):
 		preferred["business_stage_verify_playable_controls"] = 1000
@@ -2688,6 +2796,10 @@ func graphNodeBusinessStageKind(node *model.GraphNode) (model.BusinessStageKind,
 func requirementStageKinds(description string) map[model.BusinessStageKind]int {
 	match := func(values ...string) bool { return containsAnyNormalized(description, values...) }
 	kinds := map[model.BusinessStageKind]int{}
+	if requirementDescribesBuildWithFollowUpInput(description) {
+		kinds[model.BusinessStageKindBusinessSubmit] = 160
+		return kinds
+	}
 	switch {
 	case match("登录", "登入", "sign in", "signin", "login", "authenticated", "authentication"):
 		kinds[model.BusinessStageKindSessionSetup] = 120

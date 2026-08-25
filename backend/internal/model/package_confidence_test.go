@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -173,6 +174,38 @@ func TestPackageConfidenceScopesPostProductionRequirementsOutsideBrowserPackage(
 	}
 	if summary.RequirementCoverage != 0 {
 		t.Fatalf("an unmapped browser/playability requirement must still block browser-package coverage: %+v", summary)
+	}
+}
+
+func TestPackageConfidenceScopesNarrationTOSAndFinalDeliveryOutsideBrowserPackage(t *testing.T) {
+	pkg := confidenceFixture(t)
+	pkg.WorkflowGraph.Requirements = []GraphRequirement{
+		{ID: "tts", Kind: "must_show", Description: "通过正式 TTS 链路生成与字幕语义一致的中文配音", Required: true},
+		{ID: "tos", Kind: "must_show", Description: "TTS 音频经已配置的火山 TOS 实例存储流转后由 Server 合成", Required: true},
+		{ID: "delivery", Kind: "must_show", Description: "验证最终视频含可播放且清晰的中文音轨，字幕、配音和画面基本同步", Required: true},
+	}
+	summary, err := AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.RequirementCoverage != 1 {
+		t.Fatalf("media delivery requirements must be assessed by final-film rather than requiring fake DOM stages: %+v", summary)
+	}
+	for _, reason := range summary.BlockingReasons {
+		if strings.Contains(reason, "关键需求未完整映射") {
+			t.Fatalf("media-only requirements incorrectly blocked browser package coverage: %+v", summary)
+		}
+	}
+
+	pkg.WorkflowGraph.Requirements = []GraphRequirement{
+		{ID: "browser", Kind: "must_show", Description: "点击新建项目并验证输入框出现", Required: true},
+	}
+	summary, err = AssessClientExecutionPackage(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.RequirementCoverage != 0 {
+		t.Fatalf("unmapped browser interaction must remain blocked: %+v", summary)
 	}
 }
 
