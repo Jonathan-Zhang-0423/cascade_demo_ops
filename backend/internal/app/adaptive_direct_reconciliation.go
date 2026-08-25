@@ -92,6 +92,23 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	if err != nil {
 		return adaptiveDirectReconciliationBuild{}, err
 	}
+	if !pendingContinuation && sourcePackage != nil && sourcePackage.ExecutableScriptBundle != nil && sourcePackage.ExecutableScriptBundle.RepairLineage != nil {
+		parentJobID := strings.TrimSpace(sourcePackage.ExecutableScriptBundle.RepairLineage.SourceCloudJobID)
+		if parentJobID != "" && parentJobID != strings.TrimSpace(sourceJobID) {
+			parentPackage, parentPackageErr := s.GetDirectSourcePackage(ctx, projectID, parentJobID)
+			parentResult, parentResultErr := s.getDirectHistoricalResult(ctx, projectID, parentJobID)
+			if parentPackageErr == nil && parentResultErr == nil {
+				parentGraph, parentGraphErr := hydrateAdaptiveSourceGraph(parentPackage)
+				if parentGraphErr == nil {
+					parentObserved := s.adaptiveObservedSuccessorEvidence(ctx, projectID, state, parentResult)
+					pendingContinuation, err = insertPendingAdaptiveContinuation(graph, parentGraph, parentObserved.Events, result.FailureDiagnostic.CurrentURL, result.FailureDiagnostic.FailedNodeID)
+					if err != nil {
+						return adaptiveDirectReconciliationBuild{}, err
+					}
+				}
+			}
+		}
+	}
 	if sourcePackage != nil {
 		if _, err := prependReusableSessionSetup(graph, *sourcePackage); err != nil {
 			return adaptiveDirectReconciliationBuild{}, err
