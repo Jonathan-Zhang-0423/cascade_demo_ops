@@ -724,9 +724,16 @@ func approvedKeyboardActionParameters(parameters map[string]any) bool {
 	if len(keys) == 0 || len(keys) > 8 {
 		return false
 	}
-	allowed := map[string]bool{"ArrowLeft": true, "ArrowRight": true, "ArrowDown": true, "ArrowUp": true}
+	allowed := map[string]bool{
+		"ArrowLeft": true, "ArrowRight": true, "ArrowDown": true, "ArrowUp": true,
+		"w": true, "a": true, "s": true, "d": true,
+	}
 	for _, key := range keys {
-		if !allowed[strings.TrimSpace(key)] {
+		normalized := strings.TrimSpace(key)
+		if len(normalized) == 1 {
+			normalized = strings.ToLower(normalized)
+		}
+		if !allowed[normalized] {
 			return false
 		}
 	}

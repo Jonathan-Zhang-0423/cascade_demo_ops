@@ -181,7 +181,18 @@ func TestSemanticValidationAcceptsBoundedKeyboardSurfaceChange(t *testing.T) {
 		t.Fatal("a bounded keyboard action with a frame before/after change must prove the business outcome")
 	}
 
+	step.Action.Parameters = map[string]any{"keys": []string{"W", "A", "S", "D"}}
+	if !stepHasSemanticallyValidBrowserAgentValidation(step) {
+		t.Fatal("a bounded WASD action with a frame before/after change must prove the business outcome")
+	}
+
+	step.Action.Parameters = map[string]any{"keys": []string{"Control", "L"}}
+	if stepHasSemanticallyValidBrowserAgentValidation(step) {
+		t.Fatal("arbitrary keyboard shortcuts must remain outside the approved interaction boundary")
+	}
+
 	step.Validations[0].Kind = "element_visible"
+	step.Action.Parameters = map[string]any{"keys": []string{"W", "A", "S", "D"}}
 	if stepHasSemanticallyValidBrowserAgentValidation(step) {
 		t.Fatal("a visible keyboard target must not substitute for observed surface change")
 	}
