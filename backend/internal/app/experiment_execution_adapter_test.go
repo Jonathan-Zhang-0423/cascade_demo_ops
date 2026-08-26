@@ -89,6 +89,35 @@ func TestAdaptiveExperimentPackageCompilesWithoutCascadeFlow(t *testing.T) {
 	}
 }
 
+func TestAdaptiveInitialGraphKeepsBuildAndProductProofInOneSession(t *testing.T) {
+	loaded, err := experiment.LoadDefinition("../../../experiments", "2048-v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph := &model.DemoWorkflowGraph{
+		ID: "graph_initial_session", SchemaVersion: model.DemoWorkflowGraphSchemaVersion,
+		Nodes: []*model.GraphNode{
+			{ID: "session_setup", Type: model.GraphNodeTypeStart},
+			{ID: "submit_and_continue", Type: model.GraphNodeTypeEnd, ActionSpec: &model.GraphAction{Type: model.GraphActionClick}},
+		},
+		Edges: []*model.GraphEdge{{ID: "edge_initial", FromNode: "session_setup", ToNode: "submit_and_continue", Condition: "validated", Priority: 1}},
+	}
+	if err := appendAdaptiveInteractionContractsToInitialGraph(graph, loaded.InteractionPlan, loaded.ObservationPlan); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(graph.Nodes), 2+len(loaded.InteractionPlan.Steps); got != want {
+		t.Fatalf("single-session graph nodes=%d want=%d", got, want)
+	}
+	if graph.Nodes[1].Type != model.GraphNodeTypeAction || graph.Nodes[len(graph.Nodes)-1].Type != model.GraphNodeTypeEnd {
+		t.Fatalf("build terminal was not extended into product proof: %+v", graph.Nodes)
+	}
+	for _, node := range graph.Nodes[2:] {
+		if node.InteractionContract == nil || node.PageRef != "" || node.ActionSpec == nil || node.ActionSpec.Target.URL != "" {
+			t.Fatalf("initial product proof must stay on the runtime-created entity: %+v", node)
+		}
+	}
+}
+
 func TestExperimentDirectBindingRoundTripAndRuntimeMetadataStayInProcessOnly(t *testing.T) {
 	projectID, jobID, ok := parseDirectResultEntry("direct:project-one:job-one")
 	if !ok || projectID != "project-one" || jobID != "job-one" {

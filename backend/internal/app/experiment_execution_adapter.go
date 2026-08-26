@@ -159,6 +159,10 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		if !hasEvidence || intelligence.Confidence <= 0 {
 			return &experiment.AdapterError{Code: "project_intelligence_unsubstantiated", Phase: "understanding", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: errors.New("project intelligence must contain observed code/page evidence or an explicit missing-evidence report")}
 		}
+		prepared, err = a.service.extendPreparedRunWithAdaptiveInteractionContracts(ctx, prepared, request)
+		if err != nil {
+			return &experiment.AdapterError{Code: "closed_loop_package_extension_failed", Phase: "plan_review", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
+		}
 	}
 	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "plan_review", Summary: "执行包与 Interaction Contract 已完成本地门禁"}); err != nil {
 		return err

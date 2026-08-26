@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
@@ -14,6 +15,94 @@ import (
 	"cascade-demoops/backend/internal/model"
 	"cascade-demoops/backend/internal/orchestrator"
 )
+
+// appendAdaptiveInteractionContractsToInitialGraph keeps asynchronous build
+// observation and product proof in the same browser session that performed the
+// once-effect submission. A number of builders execute only while their live
+// page remains open; deferring these contracts to a second Direct job can stop
+// a valid build when the first browser context closes.
+func appendAdaptiveInteractionContractsToInitialGraph(graph *model.DemoWorkflowGraph, plan experiment.InteractionPlan, observationPlan experiment.ObservationPlan) error {
+	if graph == nil || len(graph.Nodes) == 0 {
+		return errors.New("adaptive initial graph is missing")
+	}
+	contracts, err := compileExperimentInteractionContracts(plan, observationPlan)
+	if err != nil {
+		return err
+	}
+	existing := map[string]bool{}
+	for _, node := range graph.Nodes {
+		if node != nil && node.InteractionContract != nil {
+			existing[node.InteractionContract.ContractID] = true
+		}
+	}
+	last := graph.Nodes[len(graph.Nodes)-1]
+	if last == nil {
+		return errors.New("adaptive initial graph has no terminal node")
+	}
+	last.Type = model.GraphNodeTypeAction
+	for index := range contracts {
+		contract := contracts[index]
+		if existing[contract.ContractID] {
+			continue
+		}
+		node := &model.GraphNode{
+			ID: "business_stage_contract_" + contract.ContractID, Type: model.GraphNodeTypeAction,
+			Title: "验证交互证据：" + contract.SemanticGoal, Goal: contract.SemanticGoal,
+			Action: string(contract.ActionKind), ExpectedOutcome: "结构化交互契约的必需结果变化已通过独立证据验证。",
+			RetryPolicy: 1, IsScreenshot: true, DurationHintMS: 6_000,
+			EvidenceRefs: append([]model.EvidenceRef(nil), contract.EvidenceRefs...),
+			Metadata: map[string]any{
+				"adaptive_initial_verification": true, "runtime_adaptive": true, "non_destructive": true,
+				"verification_status": "runtime_adaptive", "business_stage_kind": string(model.BusinessStageKindFinalObserve),
+				"business_route_state": string(model.BusinessRouteStateBuildRunning), "replay_policy": string(contract.ReplayPolicy),
+			},
+		}
+		node.ActionSpec = &model.GraphAction{Type: contract.ActionKind, Target: contract.ActionTarget, Parameters: contract.Parameters, TimeoutMS: 12_000, WaitUntil: "domcontentloaded"}
+		for _, predicate := range contract.ExpectedTransitions {
+			node.Validations = append(node.Validations, model.ValidationSpec{
+				ID: predicate.ID, Kind: predicate.Kind, Target: predicate.Target, Expected: predicate.Expected,
+				Required: predicate.Required, TimeoutMS: predicate.TimeoutMS, Severity: "blocking", EvidenceRefs: append([]model.EvidenceRef(nil), predicate.EvidenceRefs...),
+			})
+		}
+		contractCopy := contract
+		node.InteractionContract = &contractCopy
+		graph.Nodes = append(graph.Nodes, node)
+		graph.Edges = append(graph.Edges, &model.GraphEdge{ID: fmt.Sprintf("edge_adaptive_initial_%02d", len(graph.Edges)+1), FromNode: last.ID, ToNode: node.ID, Condition: "validated", Priority: len(graph.Edges) + 1})
+		last = node
+	}
+	last.Type = model.GraphNodeTypeEnd
+	return nil
+}
+
+func (s *Service) extendPreparedRunWithAdaptiveInteractionContracts(ctx context.Context, prepared ProductRunPrepareResult, request experiment.LegExecutionRequest) (ProductRunPrepareResult, error) {
+	if prepared.State == nil || strings.TrimSpace(prepared.State.ProjectID) == "" {
+		return ProductRunPrepareResult{}, errors.New("adaptive prepared run is missing its project state")
+	}
+	state, err := s.states.Load(ctx, prepared.State.ProjectID)
+	if err != nil {
+		return ProductRunPrepareResult{}, err
+	}
+	next, err := cloneCascadeStateForRevision(state)
+	if err != nil {
+		return ProductRunPrepareResult{}, err
+	}
+	if err := appendAdaptiveInteractionContractsToInitialGraph(next.WorkflowGraph, request.InteractionPlan, request.ObservationPlan); err != nil {
+		return ProductRunPrepareResult{}, err
+	}
+	next, err = s.flow.RepackageReviewedGraph(ctx, next, next.WorkflowGraph)
+	if err != nil {
+		return ProductRunPrepareResult{}, err
+	}
+	if err := s.states.Save(ctx, next); err != nil {
+		return ProductRunPrepareResult{}, err
+	}
+	s.invalidateApprovedBuildsForProject(next.ProjectID)
+	build, err := s.BuildClientExecutionPackage(ctx, next.ProjectID, defaultDesktopOrgID)
+	if err != nil {
+		return ProductRunPrepareResult{}, err
+	}
+	return ProductRunPrepareResult{State: compactStateForPrepareResponse(next, &build), Build: &build}, nil
+}
 
 // prepareAdaptiveExperimentRun compiles the frozen experiment artifacts
 // directly into the existing ClientExecutionPackage boundary. It deliberately
