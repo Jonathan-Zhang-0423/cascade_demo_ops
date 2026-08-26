@@ -88,6 +88,11 @@ func (s *DirectHTTPServer) RunDirectJob(ctx context.Context, jobID string) error
 		},
 	})
 	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			if current, statusErr := s.gateway.WorkerJob(jobID); statusErr == nil && current.Status.Status == "canceled" {
+				return nil
+			}
+		}
 		if runtimeExecutionErrorCode(err) == runtimeErrorWorkerRestartInjected {
 			if _, releaseErr := s.gateway.ReleaseWorkerClaim(jobID); releaseErr != nil {
 				return fmt.Errorf("release injected recovery worker claim: %w", releaseErr)
@@ -124,6 +129,36 @@ func (s *DirectHTTPServer) RunDirectJob(ctx context.Context, jobID string) error
 	return s.gateway.CommitJobResult(jobID, result.ResultID, resultJSON, directResultTerminalStatus(result))
 }
 
+func (s *DirectHTTPServer) registerDirectWorkerRun(jobID string, cancel context.CancelFunc) {
+	if s == nil || s.workerRuns == nil || cancel == nil {
+		return
+	}
+	s.workerRuns.mu.Lock()
+	s.workerRuns.cancels[jobID] = cancel
+	s.workerRuns.mu.Unlock()
+}
+
+func (s *DirectHTTPServer) unregisterDirectWorkerRun(jobID string) {
+	if s == nil || s.workerRuns == nil {
+		return
+	}
+	s.workerRuns.mu.Lock()
+	delete(s.workerRuns.cancels, jobID)
+	s.workerRuns.mu.Unlock()
+}
+
+func (s *DirectHTTPServer) cancelDirectWorkerRun(jobID string) {
+	if s == nil || s.workerRuns == nil {
+		return
+	}
+	s.workerRuns.mu.Lock()
+	cancel := s.workerRuns.cancels[jobID]
+	s.workerRuns.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // RunDirectWorkerScheduler runs the same Server-owned execution bridge behind
 // a bounded loopback scheduler. ClaimWorker remains the atomic duplicate-run
 // guard. The scheduler does not expose credentials or package bodies.
@@ -158,13 +193,17 @@ func (s *DirectHTTPServer) RunDirectWorkerScheduler(ctx context.Context, pollInt
 				runningMu.Unlock()
 				return
 			}
+			jobCtx, jobCancel := context.WithCancel(ctx)
+			s.registerDirectWorkerRun(jobID, jobCancel)
 			defer func() {
+				jobCancel()
+				s.unregisterDirectWorkerRun(jobID)
 				<-sem
 				runningMu.Lock()
 				delete(running, jobID)
 				runningMu.Unlock()
 			}()
-			_ = s.RunDirectJob(ctx, jobID)
+			_ = s.RunDirectJob(jobCtx, jobID)
 		}()
 	}
 	ticker := time.NewTicker(pollInterval)

@@ -498,6 +498,34 @@ func (g *Gateway) UpdateJob(jobID string, progress int, stage string) error {
 	return nil
 }
 
+// CancelJob moves a queued or running job to a durable terminal state before
+// the execution context is interrupted. Repeating the same cancellation is
+// idempotent; completed and failed results remain immutable.
+func (g *Gateway) CancelJob(jobID, leaseID string) (DirectJobStatus, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	job := g.jobs[jobID]
+	if job == nil || job.LeaseID != leaseID {
+		return DirectJobStatus{}, ErrJobNotFound
+	}
+	if job.Status.Status == "canceled" {
+		return job.Status, nil
+	}
+	if terminalStatus(job.Status.Status) {
+		return DirectJobStatus{}, errors.New("terminal direct job cannot be canceled")
+	}
+	before := cloneJob(job)
+	job.Status.Status = "canceled"
+	job.Status.Stage = "canceled"
+	job.Status.UpdatedAtUnixMS = g.now().UnixMilli()
+	job.Credential = nil
+	if err := g.persistLocked(); err != nil {
+		g.jobs[jobID] = before
+		return DirectJobStatus{}, err
+	}
+	return job.Status, nil
+}
+
 func (g *Gateway) AddArtifact(jobID, artifactID, kind, mime string, data []byte) (DirectArtifactDescriptor, error) {
 	if artifactID == "" || len(data) == 0 || len(data) > MaxArtifactSize {
 		return DirectArtifactDescriptor{}, errors.New("artifact id and bytes are required")
@@ -641,6 +669,9 @@ func (g *Gateway) FailJob(jobID, stage string) error {
 	job := g.jobs[jobID]
 	if job == nil {
 		return ErrJobNotFound
+	}
+	if terminalStatus(job.Status.Status) {
+		return errors.New("terminal direct job cannot be failed")
 	}
 	before := cloneJob(job)
 	job.Status.Status = "failed"

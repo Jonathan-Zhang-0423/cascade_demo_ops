@@ -172,6 +172,24 @@ type DirectJobStatus struct {
 	UpdatedAt             time.Time                    `json:"updated_at"`
 }
 
+// DirectJobCancelRequest binds an operator cancellation to the active Direct
+// lease and job. The reason is diagnostic metadata only; it must not contain
+// credentials or browser evidence payloads.
+type DirectJobCancelRequest struct {
+	ProtocolVersion string `json:"protocol_version"`
+	InstallationID  string `json:"installation_id"`
+	JobID           string `json:"job_id"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+type DirectJobCancelReceipt struct {
+	ProtocolVersion string    `json:"protocol_version"`
+	JobID           string    `json:"job_id"`
+	Status          string    `json:"status"`
+	Stage           string    `json:"stage"`
+	CanceledAt      time.Time `json:"canceled_at"`
+}
+
 // DirectReunderstandingIssue is the stable Direct API representation of one
 // validation problem that the App must use when re-understanding a failed run.
 // EvidenceIDs are opaque references only; the Gateway never returns evidence

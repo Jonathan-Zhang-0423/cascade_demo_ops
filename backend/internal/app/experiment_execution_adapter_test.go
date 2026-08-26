@@ -27,6 +27,24 @@ func TestExperimentExecutionAdapterDeclaresAllReplayAndCaptureCapabilities(t *te
 	}
 }
 
+func TestExperimentDirectBindingsIncludeCheckpointAndExternalTaskOnce(t *testing.T) {
+	run := experiment.Run{
+		Legs: []experiment.RunLeg{
+			{Checkpoint: &experiment.Checkpoint{
+				ResultEntryRef: "direct:project-one:job-one",
+				OnceEffects: []experiment.OnceEffectRecord{
+					{EffectID: "submit", ExternalTaskRef: "direct:project-one:job-one"},
+					{EffectID: "repair", ExternalTaskRef: "direct:project-one:job-two"},
+				},
+			}},
+		},
+	}
+	bindings := experimentDirectBindings(run)
+	if len(bindings) != 2 || bindings[0].projectID != "project-one" || bindings[0].jobID != "job-one" || bindings[1].jobID != "job-two" {
+		t.Fatalf("unexpected Direct bindings: %+v", bindings)
+	}
+}
+
 func TestAdaptiveExperimentPackageCompilesWithoutCascadeFlow(t *testing.T) {
 	loaded, err := experiment.LoadDefinition("../../../experiments", "2048-v2")
 	if err != nil {

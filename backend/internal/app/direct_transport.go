@@ -821,6 +821,39 @@ func (s *Service) GetDirectExecutionStatus(ctx context.Context, projectID, jobID
 	return status, nil
 }
 
+// CancelDirectExecution durably cancels the bound Gateway job and interrupts
+// its active Worker context. Terminal jobs are returned unchanged so callers
+// may safely repeat lifecycle reconciliation after an App restart.
+func (s *Service) CancelDirectExecution(ctx context.Context, projectID, jobID, reason string) (model.DirectJobStatus, error) {
+	status, err := s.GetDirectExecutionStatus(ctx, projectID, jobID)
+	if err != nil {
+		return status, err
+	}
+	switch status.Status {
+	case "completed", "failed", "canceled", "expired":
+		return status, nil
+	}
+	lease, err := s.loadDirectLease(projectID)
+	if err != nil {
+		return status, err
+	}
+	request := model.DirectJobCancelRequest{
+		ProtocolVersion: model.DirectTransportProtocolVersion,
+		InstallationID:  lease.InstallationID,
+		JobID:           jobID,
+		Reason:          strings.TrimSpace(reason),
+	}
+	var receipt model.DirectJobCancelReceipt
+	path := "/v1/direct/jobs/" + url.PathEscape(jobID) + "/cancel"
+	if err := s.directDataRequest(ctx, lease, http.MethodPost, path, request, "job_cancel_receipt", &receipt); err != nil {
+		return status, err
+	}
+	if receipt.ProtocolVersion != model.DirectTransportProtocolVersion || receipt.JobID != jobID || receipt.Status != "canceled" {
+		return status, errors.New("direct Browser Agent cancel receipt binding mismatch")
+	}
+	return s.GetDirectExecutionStatus(ctx, projectID, jobID)
+}
+
 // ReuploadDirectCredential restores the one-time in-memory credential grant
 // after a Worker release or Gateway restart. It reuses only the approved grant
 // identity/scope and reads the secret value afresh from the local vault; it

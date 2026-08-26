@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -104,6 +105,53 @@ func TestDirectSourcePackageReadIsBoundToInstallation(t *testing.T) {
 	denied := signedDirectTestRead(t, server, foreign, "/v1/direct/jobs/"+receipt.JobID+"/package", "foreign-source-read")
 	if denied.Code != http.StatusNotFound {
 		t.Fatalf("foreign installation source read status=%d body=%s", denied.Code, denied.Body.String())
+	}
+}
+
+func TestDirectJobCancelInterruptsRegisteredWorkerAndIsIdempotent(t *testing.T) {
+	server := NewDirectHTTPServer(nil, "gateway.example", "bootstrap", "worker")
+	lease := allocateDirectHTTPTestLease(t, server)
+	pkg := completeDirectHTTPPackageFixture(t, lease.InstallationID)
+	upload := uploadDirectHTTPPackageFixture(t, server, lease, pkg, "cancel-package-upload")
+	if upload.Code != http.StatusOK {
+		t.Fatalf("package upload status=%d body=%s", upload.Code, upload.Body.String())
+	}
+	var encryptedReceipt direct.DirectEncryptedMessage
+	if err := json.Unmarshal(upload.Body.Bytes(), &encryptedReceipt); err != nil {
+		t.Fatal(err)
+	}
+	receiptBytes, err := encryptedReceipt.Decrypt(lease.LeaseToken, lease.InstallationID, lease.DataPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt model.DirectPackageReceipt
+	if err := json.Unmarshal(receiptBytes, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.gateway.ClaimWorker(receipt.JobID); err != nil {
+		t.Fatal(err)
+	}
+	workerContext, workerCancel := context.WithCancel(context.Background())
+	server.registerDirectWorkerRun(receipt.JobID, workerCancel)
+	defer server.unregisterDirectWorkerRun(receipt.JobID)
+
+	request := model.DirectJobCancelRequest{ProtocolVersion: model.DirectTransportProtocolVersion, InstallationID: lease.InstallationID, JobID: receipt.JobID, Reason: "experiment canceled"}
+	response := encryptedDirectTestPost(t, server, lease, "/v1/direct/jobs/"+receipt.JobID+"/cancel", "job_cancel", request, "cancel-running-job")
+	if response.Code != http.StatusOK {
+		t.Fatalf("cancel status=%d body=%s", response.Code, response.Body.String())
+	}
+	select {
+	case <-workerContext.Done():
+	default:
+		t.Fatal("cancel did not interrupt the registered worker context")
+	}
+	job, err := server.gateway.WorkerJob(receipt.JobID)
+	if err != nil || job.Status.Status != "canceled" {
+		t.Fatalf("gateway job=%+v err=%v", job, err)
+	}
+	response = encryptedDirectTestPost(t, server, lease, "/v1/direct/jobs/"+receipt.JobID+"/cancel", "job_cancel", request, "cancel-running-job-again")
+	if response.Code != http.StatusOK {
+		t.Fatalf("idempotent cancel status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -1183,6 +1231,35 @@ func signedDirectTestRead(t *testing.T, server *DirectHTTPServer, lease direct.D
 	request.Header.Set("X-Cascade-Nonce", nonce)
 	request.Header.Set("X-Cascade-Body-SHA256", digest)
 	request.Header.Set("X-Cascade-Signature", direct.SignDataRequest(http.MethodGet, (&url.URL{Path: path}).EscapedPath(), stamp, nonce, digest, lease.LeaseToken, lease.InstallationID, lease.LeaseID, lease.DataPort))
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	return response
+}
+
+func encryptedDirectTestPost(t *testing.T, server *DirectHTTPServer, lease direct.DirectPortLease, path, messageType string, value any, messageID string) *httptest.ResponseRecorder {
+	t.Helper()
+	plain, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := direct.EncryptMessage(lease.LeaseToken, lease.InstallationID, lease.LeaseID, lease.DataPort, messageID, messageType, model.DirectTransportDirectionUpload, plain, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://gateway.example"+path, bytes.NewReader(payload))
+	request.Host = "gateway.example:" + fmt.Sprint(lease.DataPort)
+	request.RemoteAddr = "127.0.0.1:54321"
+	stamp := time.Now().UnixMilli()
+	nonce := messageID + "-request"
+	digest := direct.HashSHA256(payload)
+	request.Header.Set("X-Cascade-Timestamp", fmt.Sprint(stamp))
+	request.Header.Set("X-Cascade-Nonce", nonce)
+	request.Header.Set("X-Cascade-Body-SHA256", digest)
+	request.Header.Set("X-Cascade-Signature", direct.SignDataRequest(http.MethodPost, (&url.URL{Path: path}).EscapedPath(), stamp, nonce, digest, lease.LeaseToken, lease.InstallationID, lease.LeaseID, lease.DataPort))
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
 	return response

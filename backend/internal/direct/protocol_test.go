@@ -377,6 +377,36 @@ func TestGatewayStoresAuthoritativeFailedResult(t *testing.T) {
 	}
 }
 
+func TestGatewayCancellationIsDurableIdempotentAndTerminal(t *testing.T) {
+	now := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	gateway := NewGateway("gateway.example", time.Hour)
+	gateway.now = func() time.Time { return now }
+	lease, err := gateway.Allocate(signedLeaseRequest(t, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := gateway.CreateJob(lease.LeaseID, lease.InstallationID, "pkg-cancel", "transport-digest", []byte(`{"package_id":"pkg-cancel"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.ClaimWorker(receipt.JobID); err != nil {
+		t.Fatal(err)
+	}
+	status, err := gateway.CancelJob(receipt.JobID, lease.LeaseID)
+	if err != nil || status.Status != "canceled" || status.Stage != "canceled" {
+		t.Fatalf("cancel status=%+v err=%v", status, err)
+	}
+	if repeated, err := gateway.CancelJob(receipt.JobID, lease.LeaseID); err != nil || repeated.Status != "canceled" {
+		t.Fatalf("repeated cancel status=%+v err=%v", repeated, err)
+	}
+	if err := gateway.FailJob(receipt.JobID, "late_failure"); err == nil {
+		t.Fatal("terminal canceled job must not be overwritten by a late worker failure")
+	}
+	if err := gateway.CommitJobResult(receipt.JobID, "late-result", []byte(`{"status":"failed"}`), "failed"); err == nil {
+		t.Fatal("terminal canceled job must reject a late worker result")
+	}
+}
+
 func TestCredentialEnvelopeRequiresApprovedScopeFields(t *testing.T) {
 	now := time.Date(2026, 8, 10, 1, 2, 3, 0, time.UTC)
 	gateway := NewGateway("gateway.example", time.Hour)

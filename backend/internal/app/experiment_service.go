@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"cascade-demoops/backend/internal/experiment"
 )
@@ -70,13 +72,61 @@ func (s *Service) CancelExperimentRun(ctx context.Context, runID string, request
 	if s == nil || s.experiments == nil {
 		return experiment.Run{}, errors.New("experiment coordinator is unavailable")
 	}
+	run, err := s.experiments.GetRun(ctx, runID)
+	if err != nil {
+		return experiment.Run{}, err
+	}
+	if request.ExpectedRevision != run.Revision {
+		return experiment.Run{}, experiment.ErrRevisionConflict
+	}
 	s.experimentRunMu.Lock()
 	cancel := s.experimentRunCancels[runID]
 	s.experimentRunMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	var cancelErrors []string
+	for _, binding := range experimentDirectBindings(run) {
+		if _, directErr := s.CancelDirectExecution(ctx, binding.projectID, binding.jobID, request.Reason); directErr != nil {
+			cancelErrors = append(cancelErrors, binding.jobID+": "+directErr.Error())
+		}
+	}
+	if len(cancelErrors) > 0 {
+		return experiment.Run{}, fmt.Errorf("cancel active Direct execution: %s", strings.Join(cancelErrors, "; "))
+	}
+	if run.State == experiment.RunStateCanceled {
+		return run, nil
+	}
 	return s.experiments.Cancel(ctx, runID, request.ExpectedRevision, request.Reason)
+}
+
+type experimentDirectBinding struct {
+	projectID string
+	jobID     string
+}
+
+func experimentDirectBindings(run experiment.Run) []experimentDirectBinding {
+	seen := map[string]bool{}
+	bindings := []experimentDirectBinding{}
+	appendBinding := func(value string) {
+		projectID, jobID, ok := parseDirectResultEntry(value)
+		key := projectID + "\x00" + jobID
+		if !ok || seen[key] {
+			return
+		}
+		seen[key] = true
+		bindings = append(bindings, experimentDirectBinding{projectID: projectID, jobID: jobID})
+	}
+	for _, leg := range run.Legs {
+		if leg.Checkpoint == nil {
+			continue
+		}
+		appendBinding(leg.Checkpoint.ResultEntryRef)
+		for _, effect := range leg.Checkpoint.OnceEffects {
+			appendBinding(effect.ExternalTaskRef)
+		}
+	}
+	return bindings
 }
 
 func (s *Service) enqueueExperimentRun(runID string) {

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,12 @@ type DirectHTTPServer struct {
 	workerMu       sync.RWMutex
 	workerMode     string
 	workerLastSeen time.Time
+	workerRuns     *directWorkerRunRegistry
+}
+
+type directWorkerRunRegistry struct {
+	mu      sync.Mutex
+	cancels map[string]context.CancelFunc
 }
 
 const directWorkerHeartbeatStaleAfter = 5 * time.Second
@@ -44,7 +51,8 @@ func NewDirectHTTPServerWithGateway(service *Service, gateway *direct.Gateway, b
 	if gateway == nil {
 		gateway = direct.NewGateway("", 30*time.Minute)
 	}
-	s := &DirectHTTPServer{service: service, gateway: gateway, bootstrapToken: bootstrapToken, workerToken: workerToken}
+	s := &DirectHTTPServer{service: service, gateway: gateway, bootstrapToken: bootstrapToken, workerToken: workerToken,
+		workerRuns: &directWorkerRunRegistry{cancels: map[string]context.CancelFunc{}}}
 	s.workerHandler = s.workerAPI()
 	return s
 }
@@ -57,6 +65,7 @@ func (s *DirectHTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/direct/packages", s.handleDirectPackage)
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/credentials", s.handleDirectCredentials)
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}", s.handleDirectJob)
+	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/cancel", s.handleDirectJobCancel)
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/package", s.handleDirectSourcePackage)
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/result", s.handleDirectResult)
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/ack", s.handleDirectAck)
@@ -92,6 +101,7 @@ func (s *DirectHTTPServer) dataHandler(port int) http.Handler {
 	mux.HandleFunc("POST /v1/direct/packages", bound.handleDirectPackage)
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/credentials", bound.handleDirectCredentials)
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}", bound.handleDirectJob)
+	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/cancel", bound.handleDirectJobCancel)
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/package", bound.handleDirectSourcePackage)
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/result", bound.handleDirectResult)
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/ack", bound.handleDirectAck)
@@ -393,6 +403,42 @@ func directStringScopeAllowed(values, allowed []string) bool {
 
 func (s *DirectHTTPServer) handleDirectJob(w http.ResponseWriter, r *http.Request) {
 	s.handleDirectJobMessage(w, r, false)
+}
+
+func (s *DirectHTTPServer) handleDirectJobCancel(w http.ResponseWriter, r *http.Request) {
+	message, plain, lease, err := s.directMessage(r)
+	if err != nil {
+		s.directError(w, directStatus(err), directCode(err), err.Error())
+		return
+	}
+	if message.Direction != model.DirectTransportDirectionUpload || message.MessageType != "job_cancel" {
+		s.directError(w, http.StatusBadRequest, "invalid_message_type", "job cancel message metadata is invalid")
+		return
+	}
+	var request model.DirectJobCancelRequest
+	if err := json.Unmarshal(plain, &request); err != nil {
+		s.directError(w, http.StatusBadRequest, "invalid_cancel", "invalid job cancel request")
+		return
+	}
+	jobID := r.PathValue("job_id")
+	if request.ProtocolVersion != model.DirectTransportProtocolVersion || request.InstallationID != lease.InstallationID || request.JobID != jobID {
+		s.directError(w, http.StatusConflict, "cancel_binding_invalid", "job cancel does not match the active lease")
+		return
+	}
+	status, err := s.gateway.CancelJob(jobID, lease.LeaseID)
+	if err != nil {
+		s.directError(w, directStatus(err), directCode(err), err.Error())
+		return
+	}
+	s.cancelDirectWorkerRun(jobID)
+	canceledAt := time.UnixMilli(status.UpdatedAtUnixMS).UTC()
+	s.encryptedResponse(w, lease, "job_cancel_receipt", message.MessageID, model.DirectJobCancelReceipt{
+		ProtocolVersion: model.DirectTransportProtocolVersion,
+		JobID:           jobID,
+		Status:          status.Status,
+		Stage:           status.Stage,
+		CanceledAt:      canceledAt,
+	})
 }
 func (s *DirectHTTPServer) handleDirectResult(w http.ResponseWriter, r *http.Request) {
 	s.handleDirectJobMessage(w, r, true)
