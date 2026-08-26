@@ -98,6 +98,17 @@ func TestBrowserVisualObservationDoesNotFailOnIncompletePage(t *testing.T) {
 	}
 }
 
+func TestBrowserVisualGateDefersInteractionAndPolishToLayeredProof(t *testing.T) {
+	for _, prompt := range []string{browserVisualGateSystemPrompt, browserVisualLineGateSystemPrompt} {
+		if !strings.Contains(prompt, "screenshot cannot prove or disprove interactivity") || !strings.Contains(prompt, "Do not score visual polish") {
+			t.Fatalf("visual Gate prompt collapsed later proof layers into preview admission: %q", prompt)
+		}
+		if !strings.Contains(prompt, "at least two concrete matching identity, status, data, or control elements") {
+			t.Fatalf("visual Gate prompt lost its site-neutral core surface threshold: %q", prompt)
+		}
+	}
+}
+
 func TestBrowserVisualObserverFailureCodeOnlyExposesSafeClass(t *testing.T) {
 	if got := browserVisualObserverFailureCode(&llm.CallTrace{ErrorClass: "http_503"}); got != "observer_model_unavailable_http_503" {
 		t.Fatalf("safe provider class was not retained: %q", got)
