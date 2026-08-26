@@ -259,6 +259,25 @@ func TestAdaptiveTransportWaitDoesNotPreemptWorkerProgressWindow(t *testing.T) {
 	}
 }
 
+func TestAdaptiveV2ObservationDeadlineWaitsForBoundExternalTask(t *testing.T) {
+	v2 := directObservationDeadlineError(experiment.LegExecutionRequest{
+		HarnessProfile: experiment.HarnessProfileAdaptiveBusinessV2,
+	}, "job-bound")
+	if v2.State != experiment.RunStateWaitingExternal || v2.Phase != "waiting_external" || !v2.Retryable {
+		t.Fatalf("v2 deadline = state %q phase %q retryable %v", v2.State, v2.Phase, v2.Retryable)
+	}
+	if len(v2.EvidenceRefs) != 1 || v2.EvidenceRefs[0] != "job-bound" {
+		t.Fatalf("v2 deadline lost bound task evidence: %#v", v2.EvidenceRefs)
+	}
+
+	v1 := directObservationDeadlineError(experiment.LegExecutionRequest{
+		HarnessProfile: experiment.HarnessProfileAdaptiveBusinessV1,
+	}, "job-legacy")
+	if v1.State != experiment.RunStateWaitingInput || v1.Phase != "observation_deferred" {
+		t.Fatalf("v1 compatibility changed: state %q phase %q", v1.State, v1.Phase)
+	}
+}
+
 func TestAdaptiveResumePrefersLatestReconciliationJobWithoutReplayingEffect(t *testing.T) {
 	states := store.NewMemoryStateStore()
 	state := &orchestrator.CascadeState{

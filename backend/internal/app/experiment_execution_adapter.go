@@ -763,13 +763,32 @@ func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context,
 		// DOM/ARIA and business-surface changes. The transport poller uses a wider
 		// absolute bound so it cannot cancel a page that is still making progress.
 		if elapsed >= directObservationTransportTimeout(request) {
-			return status, &experiment.AdapterError{Code: "observation_deadline_reached", Phase: "observation_deferred", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: []string{jobID}}
+			return status, directObservationDeadlineError(request, jobID)
 		}
 		select {
 		case <-ctx.Done():
 			return status, ctx.Err()
 		case <-time.After(a.pollInterval):
 		}
+	}
+}
+
+func directObservationDeadlineError(request experiment.LegExecutionRequest, jobID string) *experiment.AdapterError {
+	state := experiment.RunStateWaitingInput
+	phase := "observation_deferred"
+	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
+		// A v2 deadline means the bound external build is still inconclusive. It is
+		// not a request for a person to operate the browser, and resuming must poll
+		// the same external task rather than replay its once-effect submission.
+		state = experiment.RunStateWaitingExternal
+		phase = "waiting_external"
+	}
+	return &experiment.AdapterError{
+		Code:         "observation_deadline_reached",
+		Phase:        phase,
+		State:        state,
+		Retryable:    true,
+		EvidenceRefs: []string{jobID},
 	}
 }
 
