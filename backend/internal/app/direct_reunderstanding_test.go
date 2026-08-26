@@ -235,6 +235,16 @@ func TestObservedContinuationStopsAncestorFallback(t *testing.T) {
 	}
 }
 
+func TestPostContinuationObservationBecomesReplayDenialResumePoint(t *testing.T) {
+	continuation := &model.GraphNode{ID: "confirmed", ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "continue_execution"}}}
+	observation := &model.GraphNode{ID: "surface_ready", ActionSpec: &model.GraphAction{Type: model.GraphActionInspect}, InteractionContract: &model.InteractionContract{ReplayPolicy: model.InteractionReplayObserveOnly}}
+	source := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/entity")
+	source.Nodes = []*model.GraphNode{{ID: "resume", ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate}}, continuation, observation}
+	if got := adaptivePostContinuationObservationNode(source); got == nil || got.ID != observation.ID {
+		t.Fatalf("post-continuation observation was not selected: %+v", got)
+	}
+}
+
 func TestInsertPendingAdaptiveContinuationRetriesConfirmedRollbackOnce(t *testing.T) {
 	continuation := &model.GraphNode{
 		ID: "continue_execution", Type: model.GraphNodeTypeAction,

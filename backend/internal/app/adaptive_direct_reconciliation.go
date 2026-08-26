@@ -81,6 +81,19 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	if observed.URL != "" {
 		result.FailureDiagnostic.CurrentURL = observed.URL
 	}
+	if result.FailureDiagnostic.Error.Code == "browser_agent_once_effect_replay_denied" && adaptiveContinuationEffectObserved(repairState.WorkflowGraph, observed.Events) {
+		if node := adaptivePostContinuationObservationNode(repairState.WorkflowGraph); node != nil {
+			result.FailureDiagnostic.FailedNodeID = node.ID
+			if sourcePackage != nil && sourcePackage.ExecutableScriptBundle != nil && sourcePackage.ExecutableScriptBundle.PlanJSON != nil {
+				for _, step := range sourcePackage.ExecutableScriptBundle.PlanJSON.Steps {
+					if step.NodeID == node.ID {
+						result.FailureDiagnostic.FailedStepOrder = step.Order
+						break
+					}
+				}
+			}
+		}
+	}
 	graph, eligible, err := terminalInteractionVerificationRepairGraph(repairState, result, time.Now().UTC())
 	if err != nil || !eligible || !adaptiveReconciliationGraphSupported(graph) {
 		if err == nil {
@@ -202,6 +215,29 @@ func adaptiveContinuationEffectObserved(source *model.DemoWorkflowGraph, events 
 		}
 	}
 	return false
+}
+
+func adaptivePostContinuationObservationNode(source *model.DemoWorkflowGraph) *model.GraphNode {
+	seenContinuation := false
+	if source == nil {
+		return nil
+	}
+	for _, node := range source.Nodes {
+		if node == nil || node.ActionSpec == nil {
+			continue
+		}
+		if recipe, _ := node.ActionSpec.Parameters["action_recipe"].(string); recipe == "continue_execution" {
+			seenContinuation = true
+			continue
+		}
+		if !seenContinuation {
+			continue
+		}
+		if node.InteractionContract != nil && node.InteractionContract.ReplayPolicy == model.InteractionReplayObserveOnly && (node.ActionSpec.Type == model.GraphActionInspect || node.ActionSpec.Type == model.GraphActionWait) {
+			return node
+		}
+	}
+	return nil
 }
 
 // adaptiveInterruptedResultFromStageLog promotes the bounded Worker recovery
