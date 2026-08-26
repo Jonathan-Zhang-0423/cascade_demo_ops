@@ -370,6 +370,16 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			if err := appendEventDetails(stage, model.StageExecutionEventBusinessStateObserved, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil); err != nil {
 				return result, err
 			}
+			if observed.TargetResolved && stage.StageKind == model.BusinessStageKindModeSelection && runtimeAssertionPassed(observed.Observation, "configuration_satisfied") {
+				decision.Kind, decision.Confidence, decision.Reason = model.HarnessDecisionSkip, 0.95, "the observed configuration already matches the requested business mode"
+				if err := appendEventDetails(stage, model.StageExecutionEventStepSatisfied, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil); err != nil {
+					return result, err
+				}
+				if err := appendEvent(stage, model.StageExecutionEventStageCompleted, &observed.Observation, observed.EvidenceRefs); err != nil {
+					return result, err
+				}
+				continue
+			}
 			if !observed.TargetResolved && stage.StageKind == model.BusinessStageKindModeSelection {
 				decision.Kind, decision.Confidence, decision.Reason = model.HarnessDecisionSkip, 0.9, "optional configuration control is absent; no primary action is guessed"
 				if err := appendEventDetails(stage, model.StageExecutionEventStepSatisfied, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil); err != nil {
@@ -1347,6 +1357,15 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func runtimeAssertionPassed(observation model.RuntimeObservation, kind string) bool {
+	for _, assertion := range observation.Assertions {
+		if assertion.Kind == kind && assertion.Passed {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeBrowserAgentDomain(value string) string {

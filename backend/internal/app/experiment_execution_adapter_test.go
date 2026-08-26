@@ -64,7 +64,12 @@ func TestAdaptiveExperimentPackageCompilesWithoutCascadeFlow(t *testing.T) {
 		t.Fatalf("compiled steps=%d interaction contracts=%d", got, len(loaded.InteractionPlan.Steps))
 	}
 	foundContinuations := map[string]bool{}
+	modeConfigured := false
 	for _, stage := range prepared.Build.Package.ExecutableScriptBundle.StageApprovalPlan.Stages {
+		if stage.NodeID == "business_stage_select_build_mode" {
+			modeConfigured = stage.Interaction.Parameters["action_recipe"] == "configure_boolean" && stage.Interaction.Parameters["desired_checked"] == "false" && stage.TargetContract != nil && containsExactString(stage.TargetContract.AllowedNames, "计划") && containsExactString(stage.TargetContract.AllowedNames, "Plan")
+			continue
+		}
 		if stage.NodeID != "business_stage_continue_prepared_execution" && stage.NodeID != "business_stage_continue_prepared_execution_followup" {
 			continue
 		}
@@ -72,7 +77,11 @@ func TestAdaptiveExperimentPackageCompilesWithoutCascadeFlow(t *testing.T) {
 		if stage.NodeID == "business_stage_continue_prepared_execution" {
 			expectedWait = "1800000"
 		}
-		foundContinuations[stage.NodeID] = stage.Interaction.Parameters["action_recipe"] == "continue_execution" && stage.Interaction.Parameters["optional_when_target_absent"] == "true" && stage.Interaction.Parameters["capture_result_surface_baseline"] == "true" && stage.Interaction.Parameters["target_wait_timeout_ms"] == expectedWait
+		confirmationBound := stage.NodeID != "business_stage_continue_prepared_execution" || stage.Interaction.Parameters["continuation_confirmation_value"] == "确认，继续执行。"
+		foundContinuations[stage.NodeID] = stage.Interaction.Parameters["action_recipe"] == "continue_execution" && stage.Interaction.Parameters["optional_when_target_absent"] == "true" && stage.Interaction.Parameters["capture_result_surface_baseline"] == "true" && stage.Interaction.Parameters["target_wait_timeout_ms"] == expectedWait && confirmationBound
+	}
+	if !modeConfigured {
+		t.Fatal("adaptive async package did not compile direct execution as an idempotent boolean configuration")
 	}
 	if !foundContinuations["business_stage_continue_prepared_execution"] || !foundContinuations["business_stage_continue_prepared_execution_followup"] {
 		t.Fatalf("adaptive async package did not include the bounded runtime execution continuation chain: %+v", foundContinuations)

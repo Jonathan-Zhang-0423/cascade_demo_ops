@@ -106,6 +106,51 @@ func TestAdaptiveHarnessPersistsOptionalModeSkipWhenControlIsAbsent(t *testing.T
 	}
 }
 
+func TestAdaptiveHarnessSkipsModeActionWhenDesiredStateIsAlreadyObserved(t *testing.T) {
+	stage := BrowserAgentRuntimeStage{
+		ID: "stage_configured_mode", Order: 1, NodeID: "node_configured_mode",
+		StageKind: model.BusinessStageKindModeSelection, EntryRoute: "https://product.example/app",
+		TargetContract: model.BrowserAgentTargetContract{SemanticID: "configured_mode", Destructive: false, Confidence: .9},
+		Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionClick, NonDestructive: true, Parameters: map[string]any{
+			"action_recipe": "configure_boolean", "desired_checked": "false",
+		}}},
+	}
+	plan := BrowserAgentRuntimePlan{
+		RunID: "run_configured_mode", SourcePackageID: "pkg_configured_mode",
+		SourceBundleHashSHA256: "bundle_configured_mode", PolicyHashSHA256: "policy_configured_mode",
+		HarnessProfile: model.AdaptiveBusinessHarnessProfileV1, Stages: []BrowserAgentRuntimeStage{stage},
+	}
+	executor := &countingStageExecutor{}
+	sink, err := newStageEventAuditLog(t.TempDir(), "job_configured_mode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{}).Run(context.Background(), plan, configuredModeObserver{}, executor, sink)
+	if err != nil || result.AuditError != nil || executor.calls != 0 {
+		t.Fatalf("an already satisfied mode must perform zero clicks: err=%v calls=%d audit=%v", err, executor.calls, result.AuditError)
+	}
+	foundSkip := false
+	for _, event := range result.Events {
+		foundSkip = foundSkip || event.EventType == model.StageExecutionEventStepSatisfied
+	}
+	if !foundSkip {
+		t.Fatalf("the observed desired state was not recorded as satisfying the step: %+v", result.Events)
+	}
+}
+
+type configuredModeObserver struct{}
+
+func (configuredModeObserver) ObserveStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageObservation, error) {
+	return BrowserAgentStageObservation{
+		Observation: model.RuntimeObservation{
+			Source: model.RuntimeObservationActualBrowser, URL: "https://product.example/app",
+			Assertions: []model.RuntimeAssertion{{Kind: "target_resolved", Passed: true}, {Kind: "configuration_satisfied", Passed: true, Actual: "desired_state_observed"}},
+		},
+		EvidenceRefs:   []model.EvidenceRef{{ID: "configured_mode_page", Kind: model.EvidenceKindWebScreenshot, Confidence: 1}},
+		TargetResolved: true,
+	}, nil
+}
+
 func TestAdaptiveHarnessSkipsAbsentOptionalExecutionContinuation(t *testing.T) {
 	stage := BrowserAgentRuntimeStage{
 		ID: "stage_optional_continue", Order: 1, NodeID: "node_optional_continue",

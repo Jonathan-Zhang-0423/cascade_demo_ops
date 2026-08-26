@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"cascade-demoops/backend/internal/agents"
 	"cascade-demoops/backend/internal/experiment"
@@ -73,7 +74,7 @@ func (s *Service) prepareAdaptiveExperimentRun(ctx context.Context, request expe
 	if err != nil {
 		return ProductRunPrepareResult{}, err
 	}
-	applyAdaptiveContinuationObservationBudget(stagePlan, request.ObservationPlan)
+	applyAdaptiveBusinessRuntimePolicy(stagePlan, request.ObservationPlan, request.BuildPrompt)
 	intelligence := &model.ProjectIntelligencePack{
 		ID: "intel_" + shortID(projectID), ProjectID: projectID,
 		SchemaVersion:     model.ProjectIntelligencePackSchemaVersion,
@@ -115,33 +116,65 @@ func (s *Service) prepareAdaptiveExperimentRun(ctx context.Context, request expe
 	return ProductRunPrepareResult{State: compactStateForPrepareResponse(state, &build), Build: &build}, nil
 }
 
-// applyAdaptiveContinuationObservationBudget lets the first runtime-discovered
+// applyAdaptiveBusinessRuntimePolicy lets the first runtime-discovered
 // execution confirmation live for the same idle window as the asynchronous
 // business observation. A generated plan may take substantially longer than
 // the generic planner's compatibility timeout to expose its confirmation
 // control. Only the first continuation receives the long wait: a follow-up is
 // conditional on a committed first effect and remains deliberately bounded.
-func applyAdaptiveContinuationObservationBudget(stagePlan *model.BusinessStagePlan, observationPlan experiment.ObservationPlan) {
-	if stagePlan == nil || observationPlan.DeferAfterMS <= 0 {
+// Direct-execution mode is represented as an idempotent boolean configuration,
+// never as a guessed primary-button click.
+func applyAdaptiveBusinessRuntimePolicy(stagePlan *model.BusinessStagePlan, observationPlan experiment.ObservationPlan, buildPrompt string) {
+	if stagePlan == nil {
 		return
 	}
+	confirmationValue := adaptiveContinuationConfirmationValue(buildPrompt)
 	for index := range stagePlan.Stages {
 		stage := &stagePlan.Stages[index]
-		if stage.ID != "business_stage_continue_prepared_execution" {
-			continue
-		}
-		if stage.Action.Parameters == nil {
-			stage.Action.Parameters = map[string]string{}
-		}
-		stage.Action.Parameters["target_wait_timeout_ms"] = strconv.Itoa(observationPlan.DeferAfterMS)
-		if stage.InteractionContract != nil {
-			if stage.InteractionContract.Parameters == nil {
-				stage.InteractionContract.Parameters = map[string]any{}
+		switch stage.ID {
+		case "business_stage_select_build_mode":
+			if stage.Action.Parameters == nil {
+				stage.Action.Parameters = map[string]string{}
 			}
-			stage.InteractionContract.Parameters["target_wait_timeout_ms"] = strconv.Itoa(observationPlan.DeferAfterMS)
+			stage.Action.Parameters["action_recipe"] = "configure_boolean"
+			stage.Action.Parameters["desired_checked"] = "false"
+			stage.Action.Parameters["allowed_names"] = "计划,规划,Plan,Planning"
+			if stage.InteractionContract != nil {
+				if stage.InteractionContract.Parameters == nil {
+					stage.InteractionContract.Parameters = map[string]any{}
+				}
+				stage.InteractionContract.Parameters["action_recipe"] = "configure_boolean"
+				stage.InteractionContract.Parameters["desired_checked"] = "false"
+				stage.InteractionContract.Parameters["allowed_names"] = "计划,规划,Plan,Planning"
+			}
+		case "business_stage_continue_prepared_execution":
+			if stage.Action.Parameters == nil {
+				stage.Action.Parameters = map[string]string{}
+			}
+			if observationPlan.DeferAfterMS > 0 {
+				stage.Action.Parameters["target_wait_timeout_ms"] = strconv.Itoa(observationPlan.DeferAfterMS)
+			}
+			stage.Action.Parameters["continuation_confirmation_value"] = confirmationValue
+			if stage.InteractionContract != nil {
+				if stage.InteractionContract.Parameters == nil {
+					stage.InteractionContract.Parameters = map[string]any{}
+				}
+				if observationPlan.DeferAfterMS > 0 {
+					stage.InteractionContract.Parameters["target_wait_timeout_ms"] = strconv.Itoa(observationPlan.DeferAfterMS)
+				}
+				stage.InteractionContract.Parameters["continuation_confirmation_value"] = confirmationValue
+			}
 		}
-		return
 	}
+}
+
+func adaptiveContinuationConfirmationValue(buildPrompt string) string {
+	for _, value := range buildPrompt {
+		if unicode.Is(unicode.Han, value) {
+			return "确认，继续执行。"
+		}
+	}
+	return "Confirm and continue."
 }
 
 func adaptiveExperimentRequirements(spec experiment.ProductSpec) []model.DemoRequirement {

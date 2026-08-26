@@ -2797,6 +2797,7 @@ func targetContractForNode(node *model.GraphNode, action model.ScriptActionInstr
 		firstNonEmpty(target.TestID, target.Role, target.Label, target.Text, target.Selector, node.Title),
 	}, "|")
 	allowedNames := accessibleNamesForActionTarget(target)
+	allowedNames = append(allowedNames, interactionParameterStrings(action.Parameters["allowed_names"])...)
 	if len(allowedNames) == 0 && (action.Type == model.GraphActionNavigate || action.Type == model.GraphActionWait || action.Type == model.GraphActionInspect) {
 		allowedNames = uniqueStrings(nonEmptyStrings(target.Label, target.Text, node.Title))
 	}

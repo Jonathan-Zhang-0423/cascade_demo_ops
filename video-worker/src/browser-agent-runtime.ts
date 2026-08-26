@@ -747,6 +747,15 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
   }
   const evidence = screenshotEvidence(artifact, request.stage, "执行前页面观察");
   const assertions = resolutionAssertions(resolved?.strategy, resolutionFailure, safeURL(session.page.url()));
+  if (resolved && action && String(action.parameters?.action_recipe || "") === "configure_boolean") {
+    const actual = await booleanControlState(resolved.locator);
+    const desired = booleanParameter(action.parameters, "desired_checked", false);
+    assertions.push({
+      kind: "configuration_satisfied",
+      passed: actual !== undefined && actual === desired,
+      actual: actual === undefined ? "boolean_state_unavailable" : (actual === desired ? "desired_state_observed" : "configuration_action_required"),
+    });
+  }
   return {
     observation: await observation(session.page, "actual_browser_observation", assertions, targetGeometry, resolutionAttempts),
     evidence_refs: [evidence],
@@ -1253,7 +1262,20 @@ async function executeInteraction(
 	const trackVisualChange = interactionRequiresVisualChangeEvidence(stage, interaction.kind);
 	const visualDigestBefore = trackVisualChange ? await pageVisualDigest(session.page) : "";
   if (interaction.kind === "click") {
-    await resolved.locator.click({ timeout });
+	const recipe = String(interaction.parameters?.action_recipe || "");
+	if (recipe === "configure_boolean") {
+		const actual = await booleanControlState(resolved.locator);
+		if (actual === undefined) throw new Error(`browser_agent_boolean_configuration_state_unavailable: ${stage.node_id}`);
+		const desired = booleanParameter(interaction.parameters, "desired_checked", false);
+		if (actual !== desired) await resolved.locator.click({ timeout });
+	} else if (recipe === "continue_execution" && resolved.strategy === "runtime_execution_confirmation_input") {
+		const value = stringParameter(interaction.parameters, "continuation_confirmation_value");
+		if (!value) throw new Error(`browser_agent_continuation_confirmation_value_missing: ${stage.node_id}`);
+		await resolved.locator.fill(value, { timeout });
+		await resolved.locator.press("Enter", { timeout });
+	} else {
+		await resolved.locator.click({ timeout });
+	}
 	if (String(interaction.parameters?.action_recipe || "") === "continue_execution") {
 		session.runtimeContinuationEffectsCommitted += 1;
 	}
@@ -1448,10 +1470,53 @@ async function firstRuntimeExecutionContinuationLocator(page: any, stage: Browse
 	const second = values[1];
 	if (!best || !adaptiveTargetCandidateExecutable(best.score, second?.score)) {
 		attempts.push(targetResolutionAttempt("runtime_execution_continuation", values.length, values.length === 1, Boolean(best), false, values.length === 0 ? "no_candidates" : "ambiguous"));
+		const confirmationInput = await runtimeExecutionConfirmationInputLocator(page, stage);
+		if (confirmationInput) {
+			attempts.push(targetResolutionAttempt("runtime_execution_confirmation_input", 1, true, true, false, "resolved", true, true));
+			return { locator: confirmationInput, strategy: "runtime_execution_confirmation_input" };
+		}
 		return undefined;
 	}
 	attempts.push(targetResolutionAttempt("runtime_execution_continuation", values.length, true, true, false, "resolved", true, true));
 	return { locator: best.locator, strategy: "runtime_execution_continuation" };
+}
+
+export function runtimeContinuationConfirmationPrompt(value: string): boolean {
+	const normalized = String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+	return /确认后.{0,24}(?:开始|继续|执行|构建|生成)|(?:是否|这).{0,18}(?:正确|可以|符合).{0,18}(?:确认|继续)|confirm.{0,40}(?:continue|proceed|start|build|generate)|(?:does this|is this).{0,40}(?:right|correct|okay|ok)/.test(normalized);
+}
+
+async function runtimeExecutionConfirmationInputLocator(page: any, stage: BrowserAgentWorkerStage): Promise<any | undefined> {
+	const interaction = stage.interactions[0];
+	if (!interaction || !stringParameter(interaction.parameters, "continuation_confirmation_value") || booleanParameter(interaction.parameters, "requires_prior_continuation_effect", false)) return undefined;
+	const explicitPrompt = await page.evaluate(() => {
+		const body = String((globalThis as any).document?.body?.innerText || "").replace(/\s+/g, " ").trim().slice(-24_000);
+		return body;
+	}).then((text: string) => runtimeContinuationConfirmationPrompt(text)).catch(() => false);
+	if (!explicitPrompt) return undefined;
+	const locator = page.locator('textarea, [contenteditable="true"], input:not([type]), input[type="text"]');
+	const count = Math.min(await locator.count().catch(() => 0), 24);
+	const visible: any[] = [];
+	for (let index = 0; index < count; index += 1) {
+		const item = locator.nth(index);
+		if (!await item.isVisible().catch(() => false) || !await item.isEnabled().catch(() => false)) continue;
+		const excluded = await item.evaluate((element: any) => {
+			const type = String(element.getAttribute?.("type") || "").toLowerCase();
+			const name = String(element.getAttribute?.("aria-label") || element.getAttribute?.("placeholder") || "").toLowerCase();
+			return ["email", "password", "search", "number", "tel", "url"].includes(type) || /search|搜索|邮箱|邮件|密码|phone|电话/.test(name);
+		}).catch(() => true);
+		if (!excluded) visible.push(item);
+	}
+	return visible.length === 1 ? visible[0] : undefined;
+}
+
+async function booleanControlState(locator: any): Promise<boolean | undefined> {
+	const checked = await locator.isChecked?.().catch(() => undefined);
+	if (typeof checked === "boolean") return checked;
+	const value = await locator.getAttribute?.("aria-checked").catch(() => null);
+	if (value === "true") return true;
+	if (value === "false") return false;
+	return undefined;
 }
 
 // A newly opened modal often contains an input that could not have appeared in
