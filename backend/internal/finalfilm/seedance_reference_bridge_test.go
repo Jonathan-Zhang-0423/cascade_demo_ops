@@ -121,6 +121,36 @@ func TestPrepareSeedance25ReferencePublishesOnlyPassedStageAndDoesNotPersistURL(
 	}
 }
 
+func TestPrepareAutomatedPresentationReferencePublishesOnlyTextFreePalette(t *testing.T) {
+	root := t.TempDir()
+	palettePath := filepath.Join(root, "palette.png")
+	if err := os.WriteFile(palettePath, []byte("palette"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	publicURL := "https://assets.example.test/generated/palette.png?temporary=1"
+	publisher := bridgePublisher{result: model.ArkAssetPublicationResult{
+		Publisher: "test-publisher", Status: "ready", CanUseForRealCall: true,
+		Items: []model.ArkAssetPublicationResultItem{{ProposedPublicRef: &model.DirectorMaterialRef{ID: "published_palette", URI: publicURL, MimeType: "image/png"}}},
+	}}
+	service := &Service{outputRoot: root, now: time.Now, assetPublisher: publisher, referenceRetention: model.DefaultMediaDeliveryPreferences().TOSRetention}
+	job := model.FinalFilmJob{
+		JobID: "job_palette", SourcePackageID: "package_palette",
+		RunAuthorization: &model.FinalFilmRunAuthorization{AuthorizationRef: "auth_palette"},
+		Catalog: model.AssetTimelineCatalog{Artifacts: []model.TimelineArtifact{{
+			ID: "palette_1", Kind: "generated_palette_reference", URI: "asset://palette_1", LocalPath: palettePath,
+			MimeType: "image/png", SizeBytes: 7, AssetRole: "presentation_reference", Metadata: map[string]any{"text_free": true, "ui_free": true},
+		}}},
+	}
+	intent := media.GeneratedShotIntent{IntentID: "intro_1", References: []media.GeneratedShotReference{{ArtifactID: "palette_1", URI: "asset://palette_1", MimeType: "image/png"}}}
+	prepared, err := service.prepareAutomatedPresentationReferences(context.Background(), job, intent, "operation_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.References[0].URI != publicURL || job.Catalog.Artifacts[0].URI != "asset://palette_1" || intent.References[0].URI != "asset://palette_1" {
+		t.Fatalf("publication must be ephemeral and must not mutate persisted references: prepared=%+v job=%+v", prepared.References, job.Catalog.Artifacts)
+	}
+}
+
 type bridgeNormalizerRunner struct{}
 
 func (bridgeNormalizerRunner) Run(_ context.Context, command string, args ...string) (media.MiniMaxH3CommandResult, error) {

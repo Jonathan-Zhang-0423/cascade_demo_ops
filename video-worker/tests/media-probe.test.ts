@@ -3,9 +3,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { applyFFmpegProbeFallback, applyFFmpegQualityAnalysis, probeMediaFile, type MediaProbeResult } from "../src/media-probe.js";
+import { applyFFmpegProbeFallback, applyFFmpegQualityAnalysis, countFullScreenFlashes, probeMediaFile, type MediaProbeResult } from "../src/media-probe.js";
 
 describe("FFmpeg media probe fallback", () => {
+  it("counts only material consecutive full-screen luminance jumps", () => {
+    expect(countFullScreenFlashes([40, 44, 46, 110, 108, 20])).toBe(2);
+    expect(countFullScreenFlashes([40, 44, 46, 48])).toBe(0);
+  });
+
   it("summarizes black, freeze, loudness, and true peak evidence", () => {
     const result = { path: "x.mp4", file_name: "x.mp4", size_bytes: 1, sha256: "x", mime_type: "video/mp4", ffprobe_available: true, duration_ms: 5000 } as MediaProbeResult;
     applyFFmpegQualityAnalysis(result, [

@@ -495,7 +495,11 @@ func (p *recordingDirectorPlanner) PlanGeneratedShots(_ context.Context, request
 	p.calls++
 	p.request = request
 	job := model.FinalFilmJob{JobID: request.JobID, Constraints: request.Constraints}
-	return finalFilmDirectorPlanForIntents(job, request.Intents), nil
+	plan := finalFilmDirectorPlanForIntents(job, request.Intents)
+	if request.AutomationProfile != "" {
+		plan.AutomationProfile, plan.EvidenceDigestID, plan.StoryPlan = request.AutomationProfile, request.EvidenceDigest.DigestID, request.StoryPlan
+	}
+	return plan, nil
 }
 
 func (f *fakeFinalFilmRenderer) ValidateEditPlan(_ context.Context, _ executor.EditPlanValidationRequest) (model.DemoEditPlanValidationReport, error) {
@@ -504,12 +508,42 @@ func (f *fakeFinalFilmRenderer) ValidateEditPlan(_ context.Context, _ executor.E
 }
 
 func (f *fakeFinalFilmRenderer) ProbeMedia(_ context.Context, request executor.MediaProbeRequest) (executor.MediaProbeResult, error) {
+	if request.ContactSheetPath != "" {
+		_ = os.MkdirAll(filepath.Dir(request.ContactSheetPath), 0o755)
+		_ = os.WriteFile(request.ContactSheetPath, []byte("contact sheet"), 0o600)
+	}
 	return executor.MediaProbeResult{
 		Path: request.Path, SizeBytes: 1000, SHA256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		MimeType: "video/mp4", Format: "mp4", DurationMS: 9000, VideoCodec: "h264", Width: 1920, Height: 1080,
 		FPS: 29.79, PixelFormat: "yuv420p", FFProbeAvailable: true, QualityAnalysisAvailable: true,
-		IntegratedLUFS: -16, TruePeakDB: -1.2,
+		IntegratedLUFS: -16, TruePeakDB: -1.2, TemporalAnalysisAvailable: true, JitterMeasurementAvailable: true, ContactSheetPath: request.ContactSheetPath,
 	}, nil
+}
+
+type allowingVisualQualityReviewer struct{}
+
+type fakePaletteBoardBuilder struct{}
+
+func (fakePaletteBoardBuilder) BuildPaletteBoard(_ context.Context, request PaletteBoardRequest) (model.TimelineArtifact, error) {
+	if err := os.MkdirAll(filepath.Dir(request.OutputPath), 0o755); err != nil {
+		return model.TimelineArtifact{}, err
+	}
+	if err := os.WriteFile(request.OutputPath, []byte("text-free palette"), 0o600); err != nil {
+		return model.TimelineArtifact{}, err
+	}
+	return model.TimelineArtifact{ID: request.ArtifactID, Kind: "generated_palette_reference", URI: "https://assets.example.test/palette.png", LocalPath: request.OutputPath, MimeType: "image/png", SizeBytes: 17, AssetRole: "presentation_reference", IncludeInDemo: true, Metadata: map[string]any{"text_free": true, "ui_free": true, "timeline_insertable": false}}, nil
+}
+
+func (allowingVisualQualityReviewer) ReviewCandidates(_ context.Context, inputs []VisualQualityReviewInput) ([]VisualQualityReviewResult, error) {
+	result := make([]VisualQualityReviewResult, 0, len(inputs))
+	for _, input := range inputs {
+		result = append(result, VisualQualityReviewResult{IntentID: input.IntentID, Attempt: input.Attempt, TextPass: true, ContentPass: true, Score: 1})
+	}
+	return result, nil
+}
+
+func (allowingVisualQualityReviewer) ReviewFinal(_ context.Context, input FinalVisualReviewInput) (model.FinalVisualQualityReport, error) {
+	return model.FinalVisualQualityReport{SchemaVersion: "demoops.final_visual_quality_report.v1", TemporalPass: true, TextPass: true, ContentPass: true, ContactSheetPath: input.ContactSheetPath}, nil
 }
 
 func TestNormalizedFinalFilmSHA256AcceptsWorkerPrefixAndRejectsMalformedDigest(t *testing.T) {
@@ -559,7 +593,7 @@ func newFinalFilmTestService(t *testing.T) (*Service, *fakeFinalFilmRenderer) {
 	}
 	service, err := NewService(ServiceOptions{
 		Store: NewFileStore(filepath.Join(root, "jobs")), Renderer: renderer, OutputRoot: filepath.Join(root, "outputs"),
-		Providers: registry, SkillRoot: filepath.Join("..", "..", "..", "skills", "final-film"),
+		Providers: registry, SkillRoot: filepath.Join("..", "..", "..", "skills", "final-film"), VisualReviewer: allowingVisualQualityReviewer{}, PaletteBuilder: fakePaletteBoardBuilder{},
 		Now: func() time.Time { sequence++; return time.Unix(int64(100+sequence), 0) },
 		NewID: func(prefix string) (string, error) {
 			sequence++

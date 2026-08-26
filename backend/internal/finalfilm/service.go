@@ -25,6 +25,34 @@ type Renderer interface {
 	ProbeMedia(context.Context, executor.MediaProbeRequest) (executor.MediaProbeResult, error)
 }
 
+type VisualQualityReviewInput struct {
+	IntentID         string
+	Purpose          string
+	Attempt          int
+	CandidateID      string
+	ContactSheetPath string
+}
+
+type VisualQualityReviewResult struct {
+	IntentID    string
+	Attempt     int
+	TextPass    bool
+	ContentPass bool
+	Score       float64
+	Findings    []string
+}
+
+type FinalVisualReviewInput struct {
+	ContactSheetPath string
+	RequiredChapters []string
+	ApprovedCaptions []string
+}
+
+type VisualQualityReviewer interface {
+	ReviewCandidates(context.Context, []VisualQualityReviewInput) ([]VisualQualityReviewResult, error)
+	ReviewFinal(context.Context, FinalVisualReviewInput) (model.FinalVisualQualityReport, error)
+}
+
 type ServiceOptions struct {
 	Store           Store
 	Renderer        Renderer
@@ -34,6 +62,8 @@ type ServiceOptions struct {
 	Providers       *media.GeneratedShotProviderRegistry
 	ProviderTimeout time.Duration
 	Planner         DirectorPlanner
+	VisualReviewer  VisualQualityReviewer
+	PaletteBuilder  PaletteBoardBuilder
 	SkillRoot       string
 	// AssetPublisher is used only by the Seedance 2.5 reference bridge. It
 	// publishes a short, normalized derivative of already-passed recording
@@ -55,6 +85,8 @@ type Service struct {
 	providers            *media.GeneratedShotProviderRegistry
 	providerTimeout      time.Duration
 	planner              DirectorPlanner
+	visualReviewer       VisualQualityReviewer
+	paletteBuilder       PaletteBoardBuilder
 	assetPublisher       media.AssetPublisher
 	referenceNormalizer  media.FFmpegMiniMaxH3MediaNormalizer
 	referenceRetention   model.MediaTOSRetentionPreference
@@ -105,7 +137,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 	}
 	return &Service{
 		store: options.Store, renderer: options.Renderer, outputRoot: filepath.Clean(options.OutputRoot), now: now, newID: newID,
-		providers: options.Providers, providerTimeout: providerTimeout, planner: options.Planner, directorSkills: skills,
+		providers: options.Providers, providerTimeout: providerTimeout, planner: options.Planner, visualReviewer: options.VisualReviewer, paletteBuilder: options.PaletteBuilder, directorSkills: skills,
 		assetPublisher: options.AssetPublisher, referenceNormalizer: options.ReferenceNormalizer,
 		referenceRetention: options.ReferenceRetention, requireTestNarration: options.RequireTestNarration,
 	}, nil
@@ -122,6 +154,10 @@ func (s *Service) CreateJob(ctx context.Context, request CreateJobRequest) (mode
 		return model.FinalFilmJob{}, errors.New("a complete render_profile is required")
 	}
 	now := s.now().UTC()
+	jobID, err := s.newID("finalfilm")
+	if err != nil {
+		return model.FinalFilmJob{}, err
+	}
 	automationProfile := strings.TrimSpace(request.AutomationProfile)
 	var automationPolicy *model.FinalFilmAutomationPolicy
 	if automationProfile != "" {
@@ -142,6 +178,23 @@ func (s *Service) CreateJob(ctx context.Context, request CreateJobRequest) (mode
 		}
 		request.RenderProfile = automatedFinalDeliveryProfile(request.RenderProfile)
 		request.Intents = guidedDemoPresentationIntents(request.Catalog)
+		if s.paletteBuilder == nil {
+			return model.FinalFilmJob{}, errors.New("guided-demo-v1 requires the FFmpeg text-free palette reference builder")
+		}
+		colors := dominantColorsFromCatalog(request.Catalog)
+		color := "#151b2e"
+		if len(colors) > 0 {
+			color = colors[0]
+		}
+		paletteID := "palette_reference_" + safeReviewName(jobID)
+		palette, paletteErr := s.paletteBuilder.BuildPaletteBoard(ctx, PaletteBoardRequest{ArtifactID: paletteID, Color: color, OutputPath: filepath.Join(s.outputRoot, jobID, "references", "palette-board.png")})
+		if paletteErr != nil {
+			return model.FinalFilmJob{}, paletteErr
+		}
+		request.Catalog.Artifacts = append(request.Catalog.Artifacts, palette)
+		for index := range request.Intents {
+			request.Intents[index].ReferenceAssetRefs = []string{paletteID}
+		}
 		if len(request.PublicNarrativeFacts) == 0 {
 			request.PublicNarrativeFacts = defaultPublicNarrativeFacts(request.Catalog)
 		}
@@ -170,10 +223,6 @@ func (s *Service) CreateJob(ctx context.Context, request CreateJobRequest) (mode
 	}
 	if !validation.Valid {
 		return model.FinalFilmJob{}, fmt.Errorf("baseline edit plan is invalid: %+v", validation.Errors)
-	}
-	jobID, err := s.newID("finalfilm")
-	if err != nil {
-		return model.FinalFilmJob{}, err
 	}
 	job := model.FinalFilmJob{
 		SchemaVersion: model.FinalFilmJobSchemaVersion, JobID: jobID, EditorSessionID: request.EditorSessionID,
@@ -389,6 +438,27 @@ func ValidateJob(job model.FinalFilmJob) error {
 		}
 		if err := model.ValidateFinalFilmAutomationPolicy(*job.AutomationPolicy); err != nil {
 			return err
+		}
+		if job.DirectorVisualCallsUsed < 0 || job.DirectorVisualCallsUsed > 3 || job.CompositionAttempts < 0 || job.CompositionAttempts > 3 {
+			return errors.New("automated Director visual or composition budget is invalid")
+		}
+		for _, report := range job.QualityReports {
+			if report.SchemaVersion != model.CandidateQualityReportSchemaVersion || report.Attempt < 1 || report.Attempt > 2 || report.Decision == "fallback_fact_track" {
+				return errors.New("candidate quality report schema, attempt, or decision is invalid")
+			}
+			if report.Decision == "accept" && (!report.TechnicalPass || !report.TemporalPass || !report.TextPass || !report.ContentPass) {
+				return errors.New("accepted generated candidate must pass technical, temporal, text, and content gates")
+			}
+		}
+		for _, directive := range job.RepairDirectives {
+			if err := model.ValidateRepairDirective(directive); err != nil {
+				return err
+			}
+		}
+		if job.State == model.FinalFilmJobAwaitingFinalReview {
+			if job.MediaCoverage == nil || model.ValidateMediaCoverageReport(*job.MediaCoverage) != nil || job.FinalVisualQuality == nil || !job.FinalVisualQuality.TemporalPass || !job.FinalVisualQuality.TextPass || !job.FinalVisualQuality.ContentPass {
+				return errors.New("final review requires complete chapter coverage and a passing final visual report")
+			}
 		}
 	}
 	if job.GenerationAuthorized && job.GenerationAuthorizedAt.IsZero() {

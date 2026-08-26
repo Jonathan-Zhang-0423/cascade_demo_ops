@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -145,35 +146,6 @@ func (s *Service) recoverFailedAutomation(ctx context.Context, job model.FinalFi
 	next.ProviderAttempts = append([]model.FinalFilmProviderAttempt{}, job.ProviderAttempts...)
 	recovered := false
 
-	// Reassess already downloaded candidates when the quality policy was made
-	// purpose-aware. This spends no provider budget and preserves the exact
-	// immutable provider output.
-	for _, intent := range record.Intents {
-		if automatedIntentAccepted(next.QualityReports, intent.IntentID) {
-			continue
-		}
-		for reportIndex := len(next.QualityReports) - 1; reportIndex >= 0; reportIndex-- {
-			report := &next.QualityReports[reportIndex]
-			if report.IntentID != intent.IntentID || report.CandidateID != "" {
-				continue
-			}
-			attempt := findAutomatedProviderAttempt(next.ProviderAttempts, intent.IntentID, report.Provider, report.Attempt)
-			if attempt == nil || attempt.ProviderTaskID == "" {
-				continue
-			}
-			candidate := findGeneratedCandidateByTask(record, intent.IntentID, attempt.ProviderTaskID)
-			if candidate == nil || !s.persistedCandidatePassesCurrentGate(ctx, intent, *candidate) {
-				continue
-			}
-			report.TechnicalPass, report.ContentPass, report.Score = true, true, 1
-			report.CandidateID, report.Findings, report.Decision = candidate.CandidateID, nil, "accept"
-			report.CheckedAt = s.now().UTC()
-			attempt.Status, attempt.CompletedAt = "accept", report.CheckedAt
-			recovered = true
-			break
-		}
-	}
-
 	removeReports := map[string]bool{}
 	for index := range next.ProviderAttempts {
 		attempt := &next.ProviderAttempts[index]
@@ -189,7 +161,7 @@ func (s *Service) recoverFailedAutomation(ctx context.Context, job model.FinalFi
 			recovered = true
 			continue
 		}
-		if attempt.ProviderTaskID != "" && report.Decision == "fallback_fact_track" && retryableProviderPollingFailure(report.Findings) {
+		if attempt.ProviderTaskID != "" && report.Decision == "provider_revision_required" && retryableProviderPollingFailure(report.Findings) {
 			attempt.Status = "submitted"
 			attempt.CompletedAt = time.Time{}
 			attempt.RecoveryCount++
@@ -363,8 +335,23 @@ func (s *Service) runAutomatedCandidates(ctx context.Context, jobID string) (mod
 		if err != nil {
 			return model.FinalFilmJob{}, err
 		}
+		if pending := pendingAutomatedQualityBatch(record.Intents, job.QualityReports); len(pending) > 0 {
+			updated, reviewErr := s.reviewAutomatedCandidateBatch(ctx, job, record, pending)
+			if reviewErr != nil {
+				return model.FinalFilmJob{}, reviewErr
+			}
+			if updated.State == model.FinalFilmJobRevisionRequested {
+				return updated, nil
+			}
+			continue
+		}
 		intent, attempt, done := nextAutomatedIntent(record.Intents, job.QualityReports, job.AutomationPolicy.ProviderPolicy.MaxAttemptsPerSlot)
 		if done {
+			for _, requiredIntent := range record.Intents {
+				if !automatedIntentAccepted(job.QualityReports, requiredIntent.IntentID) {
+					return s.blockAutomatedProviderRevision(ctx, job, requiredIntent.IntentID, "required generated slot did not pass all quality gates")
+				}
+			}
 			next := job
 			next.Revision++
 			next.UpdatedAt = s.now().UTC()
@@ -379,15 +366,30 @@ func (s *Service) runAutomatedCandidates(ctx context.Context, jobID string) (mod
 			return model.FinalFilmJob{}, errors.New("generated shot provider registry is unavailable")
 		}
 		provider := providerForAutomatedPurpose(intent.Purpose, job.AutomationPolicy.ProviderPolicy)
-		adapter, _, selectErr := s.providers.Select(ctx, intent, provider)
-		if selectErr != nil {
-			result := media.GeneratedShotProviderExecutionResult{SchemaVersion: media.GeneratedShotProviderExecutionSchemaVersion, Provider: provider, IntentID: intent.IntentID, Status: media.GeneratedShotFailureContinue, FailurePolicy: media.GeneratedShotFailureContinue, ErrorClass: "provider_selection_failed", ErrorMessage: selectErr.Error()}
-			if _, err = s.persistAutomatedProviderResult(ctx, job, record, intent, attempt, result); err != nil {
-				return model.FinalFilmJob{}, err
+		callIntent, publicationErr := s.prepareAutomatedPresentationReferences(ctx, job, intent, automatedIdempotencyKey(job, intent, attempt))
+		if publicationErr != nil {
+			result := media.GeneratedShotProviderExecutionResult{SchemaVersion: media.GeneratedShotProviderExecutionSchemaVersion, Provider: provider, IntentID: intent.IntentID, Status: media.GeneratedShotFailureContinue, FailurePolicy: media.GeneratedShotFailureContinue, ErrorClass: "reference_publication_failed", ErrorMessage: publicationErr.Error()}
+			updated, persistErr := s.persistAutomatedProviderResult(ctx, job, record, intent, attempt, result)
+			if persistErr != nil {
+				return model.FinalFilmJob{}, persistErr
+			}
+			if updated.State == model.FinalFilmJobRevisionRequested {
+				return updated, nil
 			}
 			continue
 		}
-		callIntent := intent
+		adapter, _, selectErr := s.providers.Select(ctx, callIntent, provider)
+		if selectErr != nil {
+			result := media.GeneratedShotProviderExecutionResult{SchemaVersion: media.GeneratedShotProviderExecutionSchemaVersion, Provider: provider, IntentID: intent.IntentID, Status: media.GeneratedShotFailureContinue, FailurePolicy: media.GeneratedShotFailureContinue, ErrorClass: "provider_selection_failed", ErrorMessage: selectErr.Error()}
+			updated, persistErr := s.persistAutomatedProviderResult(ctx, job, record, intent, attempt, result)
+			if persistErr != nil {
+				return model.FinalFilmJob{}, persistErr
+			}
+			if updated.State == model.FinalFilmJobRevisionRequested {
+				return updated, nil
+			}
+			continue
+		}
 		if attempt > 1 {
 			callIntent.Prompt += regenerationFeedback(job.QualityReports, intent.IntentID)
 		}
@@ -433,26 +435,35 @@ func (s *Service) runAutomatedCandidates(ctx context.Context, jobID string) (mod
 		if executeErr != nil && result.ErrorMessage == "" {
 			result.ErrorMessage = executeErr.Error()
 		}
-		if _, err = s.persistAutomatedProviderResult(ctx, admitted, record, intent, attempt, result); err != nil {
-			return model.FinalFilmJob{}, err
+		updated, persistErr := s.persistAutomatedProviderResult(ctx, admitted, record, intent, attempt, result)
+		if persistErr != nil {
+			return model.FinalFilmJob{}, persistErr
+		}
+		if updated.State == model.FinalFilmJobRevisionRequested {
+			return updated, nil
 		}
 	}
 }
 
 func nextAutomatedIntent(intents []media.GeneratedShotIntent, reports []model.CandidateQualityReport, maxAttempts int) (media.GeneratedShotIntent, int, bool) {
-	for _, intent := range intents {
-		attempts, accepted := 0, false
-		for _, report := range reports {
-			if report.IntentID != intent.IntentID {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		for _, intent := range intents {
+			if automatedIntentAccepted(reports, intent.IntentID) {
 				continue
 			}
-			if report.Attempt > attempts {
-				attempts = report.Attempt
+			hasAttempt, awaiting := false, false
+			for _, report := range reports {
+				if report.IntentID == intent.IntentID && report.Attempt == attempt {
+					hasAttempt = true
+					awaiting = report.Decision == "awaiting_content_review"
+				}
 			}
-			accepted = accepted || report.Decision == "accept"
-		}
-		if !accepted && attempts < maxAttempts {
-			return intent, attempts + 1, false
+			if awaiting {
+				continue
+			}
+			if !hasAttempt {
+				return intent, attempt, false
+			}
 		}
 	}
 	return media.GeneratedShotIntent{}, 0, true
@@ -492,10 +503,132 @@ func findAutomatedProviderAttempt(attempts []model.FinalFilmProviderAttempt, int
 	return nil
 }
 
+func pendingAutomatedQualityBatch(intents []media.GeneratedShotIntent, reports []model.CandidateQualityReport) []model.CandidateQualityReport {
+	for attempt := 1; attempt <= 2; attempt++ {
+		pending := []model.CandidateQualityReport{}
+		ready := true
+		for _, intent := range intents {
+			if automatedIntentAccepted(reports, intent.IntentID) {
+				continue
+			}
+			var current *model.CandidateQualityReport
+			for index := len(reports) - 1; index >= 0; index-- {
+				if reports[index].IntentID == intent.IntentID && reports[index].Attempt == attempt {
+					copyReport := reports[index]
+					current = &copyReport
+					break
+				}
+			}
+			if current == nil {
+				ready = false
+				continue
+			}
+			if current.Decision == "awaiting_content_review" {
+				pending = append(pending, *current)
+			}
+		}
+		if ready && len(pending) > 0 {
+			return pending
+		}
+	}
+	return nil
+}
+
+func (s *Service) reviewAutomatedCandidateBatch(ctx context.Context, job model.FinalFilmJob, record GeneratedTrackRecord, pending []model.CandidateQualityReport) (model.FinalFilmJob, error) {
+	if job.DirectorVisualCallsUsed >= 2 {
+		return s.blockAutomatedProviderRevision(ctx, job, pending[0].IntentID, "candidate visual review budget exhausted")
+	}
+	inputs := make([]VisualQualityReviewInput, 0, len(pending))
+	for _, report := range pending {
+		intent := generatedIntentByID(record.Intents, report.IntentID)
+		if intent == nil || strings.TrimSpace(report.ContactSheetPath) == "" {
+			return s.blockAutomatedProviderRevision(ctx, job, report.IntentID, "candidate contact sheet is unavailable")
+		}
+		inputs = append(inputs, VisualQualityReviewInput{IntentID: report.IntentID, Purpose: intent.Purpose, Attempt: report.Attempt, CandidateID: report.CandidateID, ContactSheetPath: report.ContactSheetPath})
+	}
+	if s.visualReviewer == nil {
+		return s.blockAutomatedProviderRevision(ctx, job, pending[0].IntentID, "visual content reviewer is unavailable")
+	}
+	reviews, err := s.visualReviewer.ReviewCandidates(ctx, inputs)
+	if err != nil {
+		return model.FinalFilmJob{}, fmt.Errorf("review candidate contact sheets: %w", err)
+	}
+	byKey := map[string]VisualQualityReviewResult{}
+	for _, review := range reviews {
+		byKey[fmt.Sprintf("%s\x00%d", review.IntentID, review.Attempt)] = review
+	}
+	next := job
+	next.Revision++
+	next.UpdatedAt = s.now().UTC()
+	next.DirectorVisualCallsUsed++
+	blockedIntent := ""
+	for index := range next.QualityReports {
+		report := &next.QualityReports[index]
+		if report.Decision != "awaiting_content_review" {
+			continue
+		}
+		review, ok := byKey[fmt.Sprintf("%s\x00%d", report.IntentID, report.Attempt)]
+		if !ok {
+			report.Findings = append(report.Findings, "visual reviewer omitted the required candidate")
+		} else {
+			report.TextPass, report.ContentPass = review.TextPass, review.ContentPass
+			report.Score = review.Score
+			report.Findings = append(report.Findings, review.Findings...)
+		}
+		if report.TechnicalPass && report.TemporalPass && report.TextPass && report.ContentPass {
+			report.Decision = "accept"
+		} else if report.Attempt < next.AutomationPolicy.ProviderPolicy.MaxAttemptsPerSlot {
+			report.Decision = "retry"
+		} else {
+			report.Decision = "provider_revision_required"
+			blockedIntent = report.IntentID
+		}
+		report.CheckedAt = next.UpdatedAt
+		if attempt := findAutomatedProviderAttempt(next.ProviderAttempts, report.IntentID, report.Provider, report.Attempt); attempt != nil {
+			attempt.Status, attempt.CompletedAt = report.Decision, report.CheckedAt
+		}
+	}
+	eventType, message := "candidate_content_batch_reviewed", "候选多帧联系表已完成批量文字与内容质检"
+	if blockedIntent != "" {
+		next.State, next.Phase = model.FinalFilmJobRevisionRequested, "provider_revision_required"
+		next.RepairDirectives = append(next.RepairDirectives, providerRepairDirective(blockedIntent, "generated_media_quality_failed"))
+		eventType, message = next.Phase, "必需生成槽位两次仍不合格，已阻断而非降级交付"
+	}
+	if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, next, s.event(next, eventType, message, map[string]any{"candidate_count": len(pending), "visual_calls_used": next.DirectorVisualCallsUsed})); err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	return next, nil
+}
+
+func generatedIntentByID(intents []media.GeneratedShotIntent, intentID string) *media.GeneratedShotIntent {
+	for index := range intents {
+		if intents[index].IntentID == intentID {
+			return &intents[index]
+		}
+	}
+	return nil
+}
+
+func providerRepairDirective(intentID, failureClass string) model.RepairDirective {
+	return model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "director-media", FailureClass: failureClass, TargetModule: "director-media", Action: "revise_provider_slot_" + intentID, Attempt: 2, MaxAttempts: 2, ResumePhase: "generated_media_qc"}
+}
+
+func (s *Service) blockAutomatedProviderRevision(ctx context.Context, job model.FinalFilmJob, intentID, reason string) (model.FinalFilmJob, error) {
+	next := job
+	next.Revision++
+	next.UpdatedAt = s.now().UTC()
+	next.State, next.Phase = model.FinalFilmJobRevisionRequested, "provider_revision_required"
+	next.RepairDirectives = append(next.RepairDirectives, providerRepairDirective(intentID, reason))
+	if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, next, s.event(next, next.Phase, "必需生成镜头未通过内容门禁，等待修订", map[string]any{"intent_id": intentID, "reason": reason})); err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	return next, nil
+}
+
 func (s *Service) persistAutomatedProviderResult(ctx context.Context, job model.FinalFilmJob, record GeneratedTrackRecord, intent media.GeneratedShotIntent, attempt int, result media.GeneratedShotProviderExecutionResult) (model.FinalFilmJob, error) {
 	record.Executions = append(record.Executions, result)
 	findings := []string{}
-	technicalPass := false
+	technicalPass, temporalPass, contactSheetPath := false, false, ""
 	if result.Candidate != nil {
 		if err := media.ValidateGeneratedShotCandidate(*result.Candidate); err != nil {
 			findings = append(findings, err.Error())
@@ -512,7 +645,8 @@ func (s *Service) persistAutomatedProviderResult(ctx context.Context, job model.
 			for _, finding := range review.Findings {
 				findings = append(findings, finding.Code+": "+finding.Message)
 			}
-			probe, probeErr := s.renderer.ProbeMedia(ctx, executor.MediaProbeRequest{Path: result.Candidate.NormalizedArtifact.Path})
+			sheetPath := strings.TrimSuffix(result.Candidate.NormalizedArtifact.Path, filepath.Ext(result.Candidate.NormalizedArtifact.Path)) + "-contact-sheet.jpg"
+			probe, probeErr := s.renderer.ProbeMedia(ctx, executor.MediaProbeRequest{Path: result.Candidate.NormalizedArtifact.Path, ContactSheetPath: sheetPath, ContactSheetFrames: 8, AnalyzeTemporalQuality: true})
 			if probeErr != nil {
 				technicalPass = false
 				findings = append(findings, "quality_probe_failed: "+probeErr.Error())
@@ -520,6 +654,7 @@ func (s *Service) persistAutomatedProviderResult(ctx context.Context, job model.
 				technicalPass = false
 				findings = append(findings, "quality_analysis_unavailable: FFmpeg black/freeze analysis is required")
 			} else {
+				contactSheetPath = probe.ContactSheetPath
 				blackLimit := automatedBlackDurationLimitMS(intent)
 				if probe.BlackDurationMS > blackLimit {
 					technicalPass = false
@@ -529,21 +664,34 @@ func (s *Service) persistAutomatedProviderResult(ctx context.Context, job model.
 					technicalPass = false
 					findings = append(findings, fmt.Sprintf("freeze_duration_exceeded: %dms > 1000ms", probe.FreezeDurationMS))
 				}
+				temporalPass = probe.TemporalAnalysisAvailable && probe.JitterMeasurementAvailable && probe.FullScreenFlashCount <= 1
+				if !probe.TemporalAnalysisAvailable {
+					findings = append(findings, "temporal_analysis_unavailable")
+				}
+				if !probe.JitterMeasurementAvailable {
+					findings = append(findings, "jitter_measurement_unavailable")
+				}
+				if probe.FullScreenFlashCount > 1 {
+					findings = append(findings, fmt.Sprintf("full_screen_flash_count_exceeded: %d", probe.FullScreenFlashCount))
+				}
+				if strings.TrimSpace(contactSheetPath) == "" {
+					temporalPass = false
+					findings = append(findings, "contact_sheet_unavailable")
+				}
 			}
 		}
 	} else if result.ErrorMessage != "" {
 		findings = append(findings, result.ErrorMessage)
 	}
 	decision := "retry"
-	if technicalPass {
-		decision = "accept"
+	if technicalPass && temporalPass {
+		decision = "awaiting_content_review"
 	} else if attempt >= job.AutomationPolicy.ProviderPolicy.MaxAttemptsPerSlot {
-		decision = "fallback_fact_track"
+		decision = "provider_revision_required"
 	}
 	reportID, _ := s.newID("quality_report")
-	report := model.CandidateQualityReport{SchemaVersion: model.CandidateQualityReportSchemaVersion, ReportID: reportID, IntentID: intent.IntentID, Provider: result.Provider, Attempt: attempt, TechnicalPass: technicalPass, ContentPass: technicalPass, Findings: findings, Decision: decision, CheckedAt: s.now().UTC()}
-	if technicalPass {
-		report.Score = 1
+	report := model.CandidateQualityReport{SchemaVersion: model.CandidateQualityReportSchemaVersion, ReportID: reportID, IntentID: intent.IntentID, Provider: result.Provider, Attempt: attempt, TechnicalPass: technicalPass, TemporalPass: temporalPass, TextPass: false, ContentPass: false, Findings: findings, Decision: decision, CheckedAt: s.now().UTC(), ContactSheetPath: contactSheetPath}
+	if technicalPass && result.Candidate != nil {
 		report.CandidateID = result.Candidate.CandidateID
 	}
 	record.UpdatedAt = report.CheckedAt
@@ -556,6 +704,10 @@ func (s *Service) persistAutomatedProviderResult(ctx context.Context, job model.
 	next.UpdatedAt = report.CheckedAt
 	next.GeneratedTrack = raw
 	next.QualityReports = append(next.QualityReports, report)
+	if decision == "provider_revision_required" {
+		next.State, next.Phase = model.FinalFilmJobRevisionRequested, "provider_revision_required"
+		next.RepairDirectives = append(next.RepairDirectives, providerRepairDirective(intent.IntentID, "generated_media_technical_or_temporal_failure"))
+	}
 	if stored := findAutomatedProviderAttempt(next.ProviderAttempts, intent.IntentID, result.Provider, attempt); stored != nil {
 		stored.Status, stored.ProviderTaskID, stored.CompletedAt = decision, result.ProviderTaskID, report.CheckedAt
 	}
@@ -612,6 +764,12 @@ func (s *Service) reconcileAutomatedDeliveryProfile(ctx context.Context, job mod
 }
 
 func (s *Service) finishAutomatedComposition(ctx context.Context, job model.FinalFilmJob) (model.FinalFilmJob, error) {
+	if job.MediaCoverage == nil || model.ValidateMediaCoverageReport(*job.MediaCoverage) != nil || !job.MediaCoverage.Complete {
+		return s.routeAutomatedCompositionRepair(ctx, job, "media_coverage_incomplete", "execution-capture", "rerecord_missing_chapters")
+	}
+	if !allRequiredGeneratedSlotsAccepted(job) {
+		return s.blockAutomatedProviderRevision(ctx, job, "required_slot", "generated slot acceptance is incomplete")
+	}
 	record, err := decodeGeneratedTrack(job.GeneratedTrack)
 	if err != nil {
 		return model.FinalFilmJob{}, err
@@ -659,11 +817,43 @@ func (s *Service) finishAutomatedComposition(ctx context.Context, job model.Fina
 		err = fmt.Errorf("automated final true peak %.2f dB exceeds -1 dB", outputValidation.TruePeakDB)
 	}
 	if err != nil {
-		return model.FinalFilmJob{}, err
+		return s.routeAutomatedCompositionRepair(ctx, job, "final_technical_quality_failed", "director-media", "recompose_final")
+	}
+	if automatedPlanContainsInternalCaption(&plan) || automatedPlanContainsDynamicFactMotion(&plan) || !allAutomatedCaptionsApproved(plan, job.PublicNarrativeFacts) {
+		return s.routeAutomatedCompositionRepair(ctx, job, "director_plan_content_boundary_failed", "director-media", "replan_and_recompose")
+	}
+	if job.DirectorVisualCallsUsed >= 3 || s.visualReviewer == nil {
+		return s.routeAutomatedCompositionRepair(ctx, job, "final_visual_review_unavailable", "director-media", "review_final_sequence")
+	}
+	contactSheetPath := strings.TrimSuffix(result.VideoPath, filepath.Ext(result.VideoPath)) + "-contact-sheet.jpg"
+	temporalProbe, probeErr := s.renderer.ProbeMedia(ctx, executor.MediaProbeRequest{Path: result.VideoPath, ContactSheetPath: contactSheetPath, ContactSheetFrames: 12, AnalyzeTemporalQuality: true})
+	if probeErr != nil || !temporalProbe.TemporalAnalysisAvailable || !temporalProbe.JitterMeasurementAvailable || strings.TrimSpace(temporalProbe.ContactSheetPath) == "" {
+		return s.routeAutomatedCompositionRepair(ctx, job, "final_temporal_evidence_unavailable", "director-media", "recompose_final")
+	}
+	approved := []string{}
+	for _, fact := range job.PublicNarrativeFacts {
+		approved = append(approved, fact.ApprovedCaptionVariants...)
+	}
+	visualReport, reviewErr := s.visualReviewer.ReviewFinal(ctx, FinalVisualReviewInput{ContactSheetPath: temporalProbe.ContactSheetPath, RequiredChapters: model.RequiredDemoChapters(), ApprovedCaptions: approved})
+	if reviewErr != nil {
+		return model.FinalFilmJob{}, fmt.Errorf("review final contact sheet: %w", reviewErr)
+	}
+	visualReport.SchemaVersion = "demoops.final_visual_quality_report.v1"
+	visualReport.ContactSheetPath = temporalProbe.ContactSheetPath
+	visualReport.TemporalPass = visualReport.TemporalPass && temporalProbe.FullScreenFlashCount <= 6
+	visualReport.CheckedAt = s.now().UTC()
+	if !visualReport.TemporalPass || !visualReport.TextPass || !visualReport.ContentPass {
+		next := job
+		next.DirectorVisualCallsUsed++
+		next.FinalVisualQuality = &visualReport
+		return s.routeAutomatedCompositionRepair(ctx, next, "final_visual_quality_failed", "director-media", "replan_and_recompose")
 	}
 	next := job
 	next.Revision++
 	next.UpdatedAt = s.now().UTC()
+	next.CompositionAttempts++
+	next.DirectorVisualCallsUsed++
+	next.FinalVisualQuality = &visualReport
 	next.State = model.FinalFilmJobAwaitingFinalReview
 	next.Phase = "awaiting_final_review"
 	next.FinalCatalog, next.FinalPlan = &catalog, &plan
@@ -677,6 +867,71 @@ func (s *Service) finishAutomatedComposition(ctx context.Context, job model.Fina
 	}
 	next.ReviewPackage = &reviewPackage
 	if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, next, s.event(next, next.Phase, "自动成片与本地审核包已完成，等待唯一一次人工终审", map[string]any{"video_path": result.VideoPath, "review_package": reviewPackage.ZIPPath})); err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	return next, nil
+}
+
+func allRequiredGeneratedSlotsAccepted(job model.FinalFilmJob) bool {
+	for _, intent := range job.PresentationIntents {
+		accepted := false
+		for _, report := range job.QualityReports {
+			if report.IntentID == intent.IntentID && report.Decision == "accept" && report.TechnicalPass && report.TemporalPass && report.TextPass && report.ContentPass {
+				accepted = true
+			}
+		}
+		if !accepted {
+			return false
+		}
+	}
+	return len(job.PresentationIntents) == 3
+}
+
+func allAutomatedCaptionsApproved(plan model.DemoEditPlan, facts []model.PublicNarrativeFact) bool {
+	approved := map[string]bool{}
+	for _, fact := range facts {
+		for _, caption := range fact.ApprovedCaptionVariants {
+			approved[caption] = true
+		}
+	}
+	for _, shot := range plan.Shots {
+		for _, overlay := range shot.Overlays {
+			if overlay.Type == model.EditOverlayCaption && !approved[overlay.Text] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (s *Service) routeAutomatedCompositionRepair(ctx context.Context, job model.FinalFilmJob, failureClass, targetModule, action string) (model.FinalFilmJob, error) {
+	next := job
+	next.Revision++
+	next.UpdatedAt = s.now().UTC()
+	next.CompositionAttempts++
+	attempt := next.CompositionAttempts
+	if attempt > 3 {
+		attempt = 3
+	}
+	directive := model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "director-media", FailureClass: failureClass, TargetModule: targetModule, Action: action, Attempt: attempt, MaxAttempts: 3, ResumePhase: "director_planning"}
+	next.RepairDirectives = append(next.RepairDirectives, directive)
+	next.FinalCatalog, next.FinalPlan, next.FinalOutputValidation, next.ReviewPackage = nil, nil, nil, nil
+	next.FinalRender = model.FinalFilmRenderOutput{}
+	if next.CompositionAttempts < 3 && targetModule == "director-media" && next.DirectorVisualCallsUsed < 3 {
+		next.State, next.Phase = model.FinalFilmJobPlanning, "director_replanning"
+		next.DirectorPlan = nil
+		// A composition repair re-enters the planning admission point. Keep the
+		// run authorization and its original provider budget, but clear the
+		// per-plan generation grant so the replacement plan can be validated and
+		// admitted normally. Accepted candidates remain durable and are reused;
+		// this path must not silently create another provider attempt.
+		next.GenerationAuthorized = false
+		next.GenerationAuthorizationRef = ""
+		next.GenerationAuthorizedAt = time.Time{}
+	} else {
+		next.State, next.Phase = model.FinalFilmJobRevisionRequested, "final_qc_revision_required"
+	}
+	if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, next, s.event(next, next.Phase, "最终成片门禁生成了定向返工指令", map[string]any{"failure_class": failureClass, "action": action, "attempt": attempt})); err != nil {
 		return model.FinalFilmJob{}, err
 	}
 	return next, nil
@@ -774,7 +1029,7 @@ func compileAutomatedGeneratedPlan(job model.FinalFilmJob, record GeneratedTrack
 		}
 	}
 	plan.Shots = append(assembled, suffix...)
-	replaceAutomatedFactCaptions(&plan, job.PublicNarrativeFacts)
+	replaceAutomatedFactCaptions(&plan, job.PublicNarrativeFacts, job.Catalog)
 	plan.PlanID = job.BaselinePlan.PlanID + "+automated"
 	if job.DirectorPlan != nil && job.DirectorPlan.StoryPlan != nil {
 		target := job.DirectorPlan.StoryPlan.TargetDurationMS
@@ -787,11 +1042,12 @@ func compileAutomatedGeneratedPlan(job model.FinalFilmJob, record GeneratedTrack
 	return catalog, plan, shotIDs
 }
 
-func replaceAutomatedFactCaptions(plan *model.DemoEditPlan, facts []model.PublicNarrativeFact) {
+func replaceAutomatedFactCaptions(plan *model.DemoEditPlan, facts []model.PublicNarrativeFact, catalog model.AssetTimelineCatalog) {
 	if plan == nil {
 		return
 	}
 	factByEvidence := map[string]model.PublicNarrativeFact{}
+	factByStep := map[string]model.PublicNarrativeFact{}
 	for _, fact := range facts {
 		if model.ValidatePublicNarrativeFact(fact) != nil {
 			continue
@@ -800,9 +1056,24 @@ func replaceAutomatedFactCaptions(plan *model.DemoEditPlan, facts []model.Public
 			factByEvidence[evidenceRef] = fact
 		}
 	}
+	required := make([]model.TimelineStep, 0, len(catalog.Steps))
+	for _, step := range catalog.Steps {
+		if step.Required {
+			required = append(required, step)
+		}
+	}
+	sort.SliceStable(required, func(i, j int) bool { return required[i].Order < required[j].Order })
+	for index, step := range required {
+		if index < len(facts) {
+			factByStep[step.StepID] = facts[index]
+		}
+	}
 	for shotIndex := range plan.Shots {
 		shot := &plan.Shots[shotIndex]
-		fact, ok := factByEvidence[shot.SourceArtifactID]
+		fact, ok := factByStep[shot.SourceStepID]
+		if !ok {
+			fact, ok = factByEvidence[shot.SourceArtifactID]
+		}
 		if !ok {
 			// Removing an untrusted caption is preferable to inventing a public
 			// statement from action, expected_outcome, or observed_state.

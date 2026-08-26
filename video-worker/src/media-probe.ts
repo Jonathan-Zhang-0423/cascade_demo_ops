@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 export interface MediaProbeRequest {
   path: string;
+  contact_sheet_path?: string;
+  contact_sheet_frames?: number;
+  analyze_temporal_quality?: boolean;
 }
 
 export interface MediaProbeResult {
@@ -30,6 +33,11 @@ export interface MediaProbeResult {
   verified_silence?: boolean;
   integrated_lufs?: number;
   true_peak_db?: number;
+  temporal_analysis_available?: boolean;
+  full_screen_flash_count?: number;
+  jitter_measurement_available?: boolean;
+  jitter_score?: number;
+  contact_sheet_path?: string;
 }
 
 const SUPPORTED_EXTENSIONS = new Map([
@@ -122,7 +130,66 @@ export async function probeMediaFile(request: MediaProbeRequest): Promise<MediaP
     "-f", "null", "-",
   ]);
   if (quality.code === 0) applyFFmpegQualityAnalysis(result, quality.stderr || quality.stdout);
+  if (request.analyze_temporal_quality) {
+    await applyTemporalQualityAnalysis(result, ffmpegPath, inputPath);
+  }
+  if (request.contact_sheet_path && video) {
+    const frames = Math.max(4, Math.min(24, Math.trunc(request.contact_sheet_frames || 8)));
+    const sheetPath = path.resolve(request.contact_sheet_path);
+    await mkdir(path.dirname(sheetPath), { recursive: true });
+    const duration = Math.max(0.1, (result.duration_ms || 1000) / 1000);
+    const columns = Math.min(4, frames);
+    const rows = Math.ceil(frames / columns);
+    const sheet = await runCommand(ffmpegPath, [
+      "-hide_banner", "-loglevel", "error", "-y", "-i", inputPath,
+      "-vf", `fps=${frames}/${duration},scale=480:-2:flags=lanczos,tile=${columns}x${rows}:padding=4:margin=4`,
+      "-frames:v", "1", sheetPath,
+    ]);
+    if (sheet.code === 0) result.contact_sheet_path = sheetPath;
+  }
   return result;
+}
+
+async function applyTemporalQualityAnalysis(result: MediaProbeResult, ffmpegPath: string, inputPath: string): Promise<void> {
+  const signal = await runCommand(ffmpegPath, [
+    "-hide_banner", "-nostats", "-i", inputPath,
+    "-vf", "signalstats,metadata=print:key=lavfi.signalstats.YAVG",
+    "-an", "-f", "null", "-",
+  ]);
+  if (signal.code === 0) {
+    const values = [...(signal.stderr || signal.stdout).matchAll(/lavfi\.signalstats\.YAVG=([0-9]+(?:\.[0-9]+)?)/g)]
+      .map((match) => Number(match[1])).filter(Number.isFinite);
+    result.temporal_analysis_available = values.length >= 2;
+    result.full_screen_flash_count = countFullScreenFlashes(values);
+  }
+  // vidstabdetect is measurement-only here. We never feed its transform file
+  // into vidstabtransform, because quality gates must not hide a bad source.
+  const transformsPath = `${inputPath}.quality.trf`;
+  const jitter = await runCommand(ffmpegPath, [
+    "-hide_banner", "-nostats", "-i", inputPath,
+    "-vf", `vidstabdetect=shakiness=5:accuracy=9:result=${escapeFFmpegFilterPath(transformsPath)}`,
+    "-an", "-f", "null", "-",
+  ]);
+  if (jitter.code === 0) {
+    result.jitter_measurement_available = true;
+    const output = jitter.stderr || jitter.stdout;
+    const score = [...output.matchAll(/(?:average|avg)[^0-9-]*(-?[0-9]+(?:\.[0-9]+)?)/gi)].at(-1)?.[1];
+    if (score !== undefined && Number.isFinite(Number(score))) result.jitter_score = Math.max(0, Number(score));
+  }
+}
+
+export function countFullScreenFlashes(values: number[], threshold = 48): number {
+  let flashes = 0;
+  for (let index = 1; index < values.length; index++) {
+    const current = values[index];
+    const previous = values[index - 1];
+    if (current !== undefined && previous !== undefined && Math.abs(current - previous) >= threshold) flashes++;
+  }
+  return flashes;
+}
+
+function escapeFFmpegFilterPath(value: string): string {
+  return value.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
 }
 
 export function applyFFmpegQualityAnalysis(result: MediaProbeResult, output: string): void {

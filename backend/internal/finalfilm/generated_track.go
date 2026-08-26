@@ -298,7 +298,7 @@ func compileGeneratedShotIntents(job model.FinalFilmJob, plan model.FinalFilmDir
 				// Seedance 2.5 bridge resolves it to a short-lived private-TOS URL
 				// immediately before the provider call. No other local artifact may
 				// use this escape hatch.
-				if strings.EqualFold(strings.TrimSpace(artifact.Kind), "raw_recording") {
+				if strings.EqualFold(strings.TrimSpace(artifact.Kind), "raw_recording") || strings.EqualFold(strings.TrimSpace(artifact.Kind), "generated_palette_reference") {
 					uri = "asset://" + artifact.ID
 				} else {
 					return nil, fmt.Errorf("reference artifact %s must be published as an HTTPS provider-readable asset before generation", artifactID)

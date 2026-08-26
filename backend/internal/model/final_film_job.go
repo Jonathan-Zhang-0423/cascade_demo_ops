@@ -77,6 +77,19 @@ type FinalFilmJob struct {
 	FinalReview                *FinalFilmFinalReview          `json:"final_review,omitempty"`
 	ProviderAttempts           []FinalFilmProviderAttempt     `json:"provider_attempts,omitempty"`
 	ReviewSupplements          []FinalFilmReviewSupplement    `json:"review_supplements,omitempty"`
+	DirectorVisualCallsUsed    int                            `json:"director_visual_calls_used,omitempty"`
+	FinalVisualQuality         *FinalVisualQualityReport      `json:"final_visual_quality,omitempty"`
+	CompositionAttempts        int                            `json:"composition_attempts,omitempty"`
+}
+
+type FinalVisualQualityReport struct {
+	SchemaVersion    string    `json:"schema_version"`
+	TemporalPass     bool      `json:"temporal_pass"`
+	TextPass         bool      `json:"text_pass"`
+	ContentPass      bool      `json:"content_pass"`
+	Findings         []string  `json:"findings,omitempty"`
+	ContactSheetPath string    `json:"contact_sheet_path,omitempty"`
+	CheckedAt        time.Time `json:"checked_at"`
 }
 
 // FinalFilmReviewSupplement binds an experiment-owned, already materialized

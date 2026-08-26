@@ -74,6 +74,18 @@ func (s *Service) buildReviewPackage(ctx context.Context, job model.FinalFilmJob
 	if err := add("raw_recording", rawPath, "source/raw-recording"+filepath.Ext(rawPath), raw.SHA256, true); err != nil {
 		return model.FinalFilmReviewPackage{}, err
 	}
+	for _, artifact := range job.Catalog.Artifacts {
+		if !strings.EqualFold(strings.TrimSpace(artifact.Kind), "generated_palette_reference") {
+			continue
+		}
+		palettePath := strings.TrimSpace(artifact.LocalPath)
+		if palettePath == "" {
+			palettePath = filePathFromLocalURI(artifact.URI)
+		}
+		if err := add("provider_palette_reference", palettePath, filepath.Join("providers", "references", safeReviewName(artifact.ID)+filepath.Ext(palettePath)), artifact.SHA256, true); err != nil {
+			return model.FinalFilmReviewPackage{}, err
+		}
+	}
 	for _, candidate := range record.Candidates {
 		base := filepath.Join("providers", safeReviewName(candidate.IntentID), safeReviewName(candidate.Provider), safeReviewName(candidate.CandidateID))
 		if err := add("provider_original", candidate.OriginalArtifact.Path, filepath.Join(base, "original"+filepath.Ext(candidate.OriginalArtifact.Path)), candidate.OriginalArtifact.SHA256, false); err != nil {
@@ -82,6 +94,21 @@ func (s *Service) buildReviewPackage(ctx context.Context, job model.FinalFilmJob
 		if err := add("provider_normalized", candidate.NormalizedArtifact.Path, filepath.Join(base, "normalized.mp4"), candidate.NormalizedArtifact.SHA256, false); err != nil {
 			return model.FinalFilmReviewPackage{}, err
 		}
+	}
+	for _, report := range job.QualityReports {
+		if strings.TrimSpace(report.ContactSheetPath) == "" {
+			continue
+		}
+		relative := filepath.Join("providers", safeReviewName(report.IntentID), safeReviewName(report.Provider), fmt.Sprintf("attempt-%d-contact-sheet%s", report.Attempt, filepath.Ext(report.ContactSheetPath)))
+		if err := add("provider_contact_sheet", report.ContactSheetPath, relative, "", false); err != nil {
+			return model.FinalFilmReviewPackage{}, err
+		}
+	}
+	if job.FinalVisualQuality == nil || strings.TrimSpace(job.FinalVisualQuality.ContactSheetPath) == "" {
+		return model.FinalFilmReviewPackage{}, errors.New("review package requires the passed final sequence contact sheet")
+	}
+	if err := add("final_contact_sheet", job.FinalVisualQuality.ContactSheetPath, "reports/final-sequence-contact-sheet"+filepath.Ext(job.FinalVisualQuality.ContactSheetPath), "", true); err != nil {
+		return model.FinalFilmReviewPackage{}, err
 	}
 	if err := add("render_manifest", job.FinalRender.RenderManifestPath, "reports/render-manifest.json", "", true); err != nil {
 		return model.FinalFilmReviewPackage{}, err
@@ -103,7 +130,7 @@ func (s *Service) buildReviewPackage(ctx context.Context, job model.FinalFilmJob
 	metadata := []struct {
 		role, path string
 		value      any
-	}{{"director_plan", "plans/director-plan.json", job.DirectorPlan}, {"evidence_digest", "plans/evidence-digest.json", job.EvidenceDigest}, {"edl", "plans/final-edl.json", job.FinalPlan}, {"quality_reports", "reports/candidate-quality.json", job.QualityReports}, {"provider_attempts", "reports/provider-attempts.json", job.ProviderAttempts}, {"event_log", "reports/final-film-events.json", events}}
+	}{{"director_plan", "plans/director-plan.json", job.DirectorPlan}, {"evidence_digest", "plans/evidence-digest.json", job.EvidenceDigest}, {"public_narrative_facts", "plans/public-narrative-facts.json", job.PublicNarrativeFacts}, {"media_coverage", "reports/media-coverage.json", job.MediaCoverage}, {"edl", "plans/final-edl.json", job.FinalPlan}, {"quality_reports", "reports/candidate-quality.json", job.QualityReports}, {"final_visual_quality", "reports/final-visual-quality.json", job.FinalVisualQuality}, {"repair_directives", "reports/repair-directives.json", job.RepairDirectives}, {"provider_attempts", "reports/provider-attempts.json", job.ProviderAttempts}, {"event_log", "reports/final-film-events.json", events}}
 	for _, item := range metadata {
 		payload, marshalErr := json.MarshalIndent(item.value, "", "  ")
 		if marshalErr != nil {

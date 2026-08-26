@@ -198,6 +198,8 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	finalFilmService, err := finalfilm.NewService(finalfilm.ServiceOptions{
 		Store: finalfilm.NewFileStore(filepath.Join(runtime.DataRoot, "final_film_jobs")), Renderer: service.editorWorker,
 		OutputRoot: filepath.Join(runtime.ArtifactRoot, "final-film"), Providers: providerRegistry, Planner: newFinalFilmDirectorPlanner(llmRouter), SkillRoot: directorSkillRoot,
+		VisualReviewer: newFinalFilmVisualQualityReviewer(llmRouter),
+		PaletteBuilder: finalfilm.FFmpegPaletteBoardBuilder{FFmpegPath: runtime.FFmpegPath},
 		AssetPublisher: finalFilmPublisher, ReferenceNormalizer: media.FFmpegMiniMaxH3MediaNormalizer{FFmpegPath: runtime.FFmpegPath, FFprobePath: runtime.FFprobePath},
 		ReferenceRetention:   model.DefaultMediaDeliveryPreferences().TOSRetention,
 		RequireTestNarration: strings.TrimSpace(os.Getenv("CASCADE_ACCEPTANCE_REQUIRE_NARRATION")) == "1",

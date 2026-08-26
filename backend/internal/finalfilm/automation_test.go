@@ -98,11 +98,11 @@ func TestRecoverFailedAutomationRetriesOnlyProviderRejectedBeforeTaskCreation(t 
 		AutomationPolicy: &policy, RunAuthorization: &model.FinalFilmRunAuthorization{AuthorizationRef: "approved", MaxProviderCalls: 6, ProviderCallsUsed: 2}, GeneratedTrack: raw,
 		ProviderAttempts: []model.FinalFilmProviderAttempt{
 			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderSeedance25, Attempt: 1, Status: "retry"},
-			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderSeedance25, Attempt: 2, Status: "fallback_fact_track"},
+			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderSeedance25, Attempt: 2, Status: "provider_revision_required"},
 		},
 		QualityReports: []model.CandidateQualityReport{
 			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderSeedance25, Attempt: 1, Decision: "retry", Findings: []string{"InvalidParameter.TaskTypeConstraint: omni_reference_task_type"}},
-			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderSeedance25, Attempt: 2, Decision: "fallback_fact_track", Findings: []string{"InvalidParameter.TaskTypeConstraint: omni_reference_task_type"}},
+			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderSeedance25, Attempt: 2, Decision: "provider_revision_required", Findings: []string{"InvalidParameter.TaskTypeConstraint: omni_reference_task_type"}},
 		},
 		LastError: &model.FinalFilmJobError{Retryable: true, Message: "request compiler mismatch"},
 	}
@@ -166,6 +166,39 @@ func TestAutomatedProviderDefaultWaitsForSlowSuccessfulGeneration(t *testing.T) 
 	}
 }
 
+func TestCandidateVisualQualityGateReviewsOneAttemptAsOneBatch(t *testing.T) {
+	service, _ := newFinalFilmTestService(t)
+	policy := model.DefaultFinalFilmAutomationPolicy()
+	intents := []media.GeneratedShotIntent{{IntentID: "intro", Purpose: media.GeneratedShotPurposeIntro}, {IntentID: "divider", Purpose: media.GeneratedShotPurposeSectionDivider}, {IntentID: "outro", Purpose: media.GeneratedShotPurposeOutro}}
+	reports := []model.CandidateQualityReport{}
+	attempts := []model.FinalFilmProviderAttempt{}
+	for _, intent := range intents {
+		provider := providerForAutomatedPurpose(intent.Purpose, policy.ProviderPolicy)
+		reports = append(reports, model.CandidateQualityReport{SchemaVersion: model.CandidateQualityReportSchemaVersion, IntentID: intent.IntentID, CandidateID: "candidate_" + intent.IntentID, Provider: provider, Attempt: 1, TechnicalPass: true, TemporalPass: true, Decision: "awaiting_content_review", ContactSheetPath: "sheet_" + intent.IntentID + ".jpg"})
+		attempts = append(attempts, model.FinalFilmProviderAttempt{IntentID: intent.IntentID, Provider: provider, Attempt: 1, Status: "awaiting_content_review"})
+	}
+	job := model.FinalFilmJob{SchemaVersion: model.FinalFilmJobSchemaVersion, JobID: "batch_review", Revision: 1, State: model.FinalFilmJobGeneratingPresentation, AutomationProfile: model.FinalFilmAutomationProfileGuidedDemoV1, AutomationPolicy: &policy, QualityReports: reports, ProviderAttempts: attempts}
+	if err := service.store.CreateJob(t.Context(), job); err != nil {
+		t.Fatal(err)
+	}
+	pending := pendingAutomatedQualityBatch(intents, reports)
+	if len(pending) != 3 {
+		t.Fatalf("candidate batch was fragmented: %+v", pending)
+	}
+	updated, err := service.reviewAutomatedCandidateBatch(t.Context(), job, GeneratedTrackRecord{SchemaVersion: generatedTrackRecordSchemaVersion, Intents: intents}, pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.DirectorVisualCallsUsed != 1 {
+		t.Fatalf("batch consumed %d visual calls", updated.DirectorVisualCallsUsed)
+	}
+	for _, report := range updated.QualityReports {
+		if report.Decision != "accept" || !report.TextPass || !report.ContentPass {
+			t.Fatalf("candidate did not pass four-part gate: %+v", report)
+		}
+	}
+}
+
 func TestGuidedDemoLocksFinalDeliveryTo1080p30(t *testing.T) {
 	profile := automatedFinalDeliveryProfile(model.EditorRenderProfile{Mode: "final", Width: 2560, Height: 1440, FPS: 25, Format: "mov"})
 	if profile.Width != 1920 || profile.Height != 1080 || profile.FPS != 30 || profile.Format != "mp4" || profile.Preset != "medium" || profile.CRF != 18 {
@@ -188,7 +221,8 @@ func TestAutomatedFactCaptionsHideInternalEvidenceVocabulary(t *testing.T) {
 		Overlays: []model.EditOverlay{{Type: model.EditOverlayCaption, Text: "source=browser_assertion; assertion:required_numeric_increased=passed", StartMS: &start, EndMS: &end}},
 	}}}
 	facts := []model.PublicNarrativeFact{{SchemaVersion: model.PublicNarrativeFactSchemaVersion, FactID: "fact_1", Chapter: "interaction", ApprovedCaptionVariants: []string{"真实操作后分数增加"}, VisibleEvidenceRefs: []string{"visible_fact"}, SourceKind: "verified_product_fact"}}
-	replaceAutomatedFactCaptions(&plan, facts)
+	catalog := model.AssetTimelineCatalog{Steps: []model.TimelineStep{{StepID: "step", Order: 1, Required: true, Artifacts: []string{"visible_fact"}}}}
+	replaceAutomatedFactCaptions(&plan, facts, catalog)
 	if got := plan.Shots[0].Overlays[0].Text; got != "真实操作后分数增加" || automatedPlanContainsInternalCaption(&plan) {
 		t.Fatalf("internal evidence vocabulary leaked into the final caption: %q", got)
 	}
@@ -225,10 +259,10 @@ func TestReconcileAutomatedProviderAttemptAuditUsesMatchingQualityReport(t *test
 	}
 	reports := []model.CandidateQualityReport{
 		{IntentID: "outro", Provider: media.GeneratedShotProviderMiniMaxH3, Attempt: 2, Decision: "accept", CheckedAt: checkedAt},
-		{IntentID: "divider", Provider: media.GeneratedShotProviderSeedance25, Attempt: 2, Decision: "fallback_fact_track", CheckedAt: checkedAt},
+		{IntentID: "divider", Provider: media.GeneratedShotProviderSeedance25, Attempt: 2, Decision: "provider_revision_required", CheckedAt: checkedAt},
 	}
 	reconciled := reconcileAutomatedProviderAttemptAudit(attempts, reports)
-	if reconciled[0].Status != "accept" || reconciled[1].Status != "fallback_fact_track" || reconciled[0].CompletedAt != checkedAt {
+	if reconciled[0].Status != "accept" || reconciled[1].Status != "provider_revision_required" || reconciled[0].CompletedAt != checkedAt {
 		t.Fatalf("provider attempt audit was not reconciled: %+v", reconciled)
 	}
 }
@@ -258,7 +292,7 @@ func TestPersistAutomatedProviderResultUpdatesMatchingAttemptAfterInterleavedRes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.ProviderAttempts[0].Status != "fallback_fact_track" || updated.ProviderAttempts[1].Status != "submitted" {
+	if updated.ProviderAttempts[0].Status != "provider_revision_required" || updated.ProviderAttempts[1].Status != "submitted" {
 		t.Fatalf("matching interleaved attempt was not updated: %+v", updated.ProviderAttempts)
 	}
 }
@@ -279,8 +313,20 @@ func TestGuidedDemoCreatesServerOwnedSlotsAndFixedProviderWorkflow(t *testing.T)
 		t.Fatalf("guided demo did not create intro/divider/outro slots: %+v", job)
 	}
 	wantPurposes := []string{"intro", "section_divider", "outro"}
+	paletteID := ""
+	for _, artifact := range job.Catalog.Artifacts {
+		if artifact.Kind == "generated_palette_reference" {
+			paletteID = artifact.ID
+			if artifact.Metadata["text_free"] != true || artifact.Metadata["ui_free"] != true || artifact.Metadata["timeline_insertable"] != false {
+				t.Fatalf("palette reference is not explicitly text/UI free and non-timeline: %+v", artifact)
+			}
+		}
+	}
+	if paletteID == "" {
+		t.Fatal("guided demo did not create a Server-owned palette reference")
+	}
 	for index, intent := range job.PresentationIntents {
-		if intent.Purpose != wantPurposes[index] || intent.RequestedSlot.PreferredDurationSec != 4 {
+		if intent.Purpose != wantPurposes[index] || intent.RequestedSlot.PreferredDurationSec != 4 || len(intent.ReferenceAssetRefs) != 1 || intent.ReferenceAssetRefs[0] != paletteID {
 			t.Fatalf("unexpected server-owned intent %d: %+v", index, intent)
 		}
 	}
@@ -296,7 +342,7 @@ func TestRepositoryDirectorSkillRuntimesLoadWithoutSiteBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runtimes) != 5 || runtimes["final-film-director-harness"].Version != "1.1.0" {
+	if len(runtimes) != 5 || runtimes["final-film-director-harness"].Version != "2.0.0" {
 		t.Fatalf("unexpected Director skill registry: %+v", runtimes)
 	}
 }
@@ -318,7 +364,7 @@ func TestReviewSupplementsRejectTraversalDuplicateAndReservedManifest(t *testing
 	}
 }
 
-func TestAutomationPersistsEvidenceAttemptsQualityAndFactFallback(t *testing.T) {
+func TestAutomationPersistsEvidenceAttemptsQualityAndBlocksRequiredProviderSlot(t *testing.T) {
 	service, _ := newFinalFilmTestService(t)
 	registry := media.NewGeneratedShotProviderRegistry()
 	if err := registry.Register(&fakeGeneratedShotProvider{root: t.TempDir()}); err != nil {
@@ -336,8 +382,8 @@ func TestAutomationPersistsEvidenceAttemptsQualityAndFactFallback(t *testing.T) 
 		t.Fatal(err)
 	}
 	_, resumeErr := service.ResumeAutomation(context.Background(), job.JobID)
-	if resumeErr == nil {
-		t.Fatal("short fixture should fail the 90-120 second final duration gate")
+	if resumeErr != nil {
+		t.Fatal(resumeErr)
 	}
 	job, err = service.GetJob(context.Background(), job.JobID)
 	if err != nil {
@@ -354,17 +400,17 @@ func TestAutomationPersistsEvidenceAttemptsQualityAndFactFallback(t *testing.T) 
 			t.Fatalf("provider task submission checkpoint was not carried into the terminal attempt: %+v", attempt)
 		}
 	}
-	seedanceReports, fallbackReports := 0, 0
+	seedanceReports, blockedReports := 0, 0
 	for _, report := range job.QualityReports {
 		if report.Provider == media.GeneratedShotProviderSeedance25 {
 			seedanceReports++
 		}
-		if report.Decision == "fallback_fact_track" {
-			fallbackReports++
+		if report.Decision == "provider_revision_required" {
+			blockedReports++
 		}
 	}
-	if seedanceReports != 2 || fallbackReports != 1 {
-		t.Fatalf("Seedance failure did not use exactly one retry then fact fallback: %+v", job.QualityReports)
+	if seedanceReports != 2 || blockedReports != 1 || job.State != model.FinalFilmJobRevisionRequested || job.Phase != "provider_revision_required" {
+		t.Fatalf("Seedance failure did not use exactly one retry then block delivery: %+v", job.QualityReports)
 	}
 }
 
@@ -377,7 +423,8 @@ func TestReviewPackageAndFinalReviewAreRevisionBound(t *testing.T) {
 	finalPath := filepath.Join(root, "final.mp4")
 	manifestPath := filepath.Join(root, "render-manifest.json")
 	supplementPath := filepath.Join(root, "experiment-plan.json")
-	for path, data := range map[string]string{rawPath: "raw", baselinePath: "baseline", finalPath: "final", manifestPath: `{}`, supplementPath: `{"plan":"bounded"}`} {
+	contactSheetPath := filepath.Join(root, "final-contact-sheet.jpg")
+	for path, data := range map[string]string{rawPath: "raw", baselinePath: "baseline", finalPath: "final", manifestPath: `{}`, supplementPath: `{"plan":"bounded"}`, contactSheetPath: "contact sheet"} {
 		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -390,6 +437,7 @@ func TestReviewPackageAndFinalReviewAreRevisionBound(t *testing.T) {
 	job.BaselineRender.VideoPath = baselinePath
 	job.FinalRender.VideoPath, job.FinalRender.RenderManifestPath = finalPath, manifestPath
 	job.FinalOutputValidation = &model.FinalFilmOutputValidation{VideoSHA256: "stored-output-digest"}
+	job.FinalVisualQuality = &model.FinalVisualQualityReport{SchemaVersion: "demoops.final_visual_quality_report.v1", TemporalPass: true, TextPass: true, ContentPass: true, ContactSheetPath: contactSheetPath, CheckedAt: time.Now().UTC()}
 	job.FinalPlan = &baseline
 	job.ReviewSupplements = []model.FinalFilmReviewSupplement{{Role: "experiment_observation_plan", SourcePath: supplementPath, RelativePath: "experiment/build-observation-plan.json", Required: true}}
 	record := GeneratedTrackRecord{SchemaVersion: generatedTrackRecordSchemaVersion, DirectorPlanID: "director_package"}
@@ -401,11 +449,12 @@ func TestReviewPackageAndFinalReviewAreRevisionBound(t *testing.T) {
 	if _, err := os.Stat(pkg.ZIPPath); err != nil || len(pkg.Files) < 7 {
 		t.Fatalf("review package is incomplete: %+v err=%v", pkg, err)
 	}
-	foundSupplement := false
+	foundSupplement, foundPalette := false, false
 	for _, file := range pkg.Files {
 		foundSupplement = foundSupplement || file.Role == "experiment_observation_plan" && file.RelativePath == "experiment/build-observation-plan.json"
+		foundPalette = foundPalette || file.Role == "provider_palette_reference"
 	}
-	if !foundSupplement {
+	if !foundSupplement || !foundPalette {
 		t.Fatalf("experiment review supplement is missing: %+v", pkg.Files)
 	}
 	firstZIP, err := os.ReadFile(pkg.ZIPPath)

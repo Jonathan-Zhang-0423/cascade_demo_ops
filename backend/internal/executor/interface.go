@@ -22,31 +22,39 @@ type Service interface {
 }
 
 type MediaProbeRequest struct {
-	Path string `json:"path"`
+	Path                   string `json:"path"`
+	ContactSheetPath       string `json:"contact_sheet_path,omitempty"`
+	ContactSheetFrames     int    `json:"contact_sheet_frames,omitempty"`
+	AnalyzeTemporalQuality bool   `json:"analyze_temporal_quality,omitempty"`
 }
 
 type MediaProbeResult struct {
-	Path                     string  `json:"path"`
-	FileName                 string  `json:"file_name"`
-	SizeBytes                int64   `json:"size_bytes"`
-	SHA256                   string  `json:"sha256"`
-	MimeType                 string  `json:"mime_type"`
-	Format                   string  `json:"format,omitempty"`
-	DurationMS               int     `json:"duration_ms,omitempty"`
-	VideoCodec               string  `json:"video_codec,omitempty"`
-	AudioCodec               string  `json:"audio_codec,omitempty"`
-	Width                    int     `json:"width,omitempty"`
-	Height                   int     `json:"height,omitempty"`
-	FPS                      float64 `json:"fps,omitempty"`
-	PixelFormat              string  `json:"pixel_format,omitempty"`
-	FFProbeAvailable         bool    `json:"ffprobe_available"`
-	QualityAnalysisAvailable bool    `json:"quality_analysis_available,omitempty"`
-	BlackDurationMS          int     `json:"black_duration_ms,omitempty"`
-	FreezeDurationMS         int     `json:"freeze_duration_ms,omitempty"`
-	SilenceDurationMS        int     `json:"silence_duration_ms,omitempty"`
-	VerifiedSilence          bool    `json:"verified_silence,omitempty"`
-	IntegratedLUFS           float64 `json:"integrated_lufs,omitempty"`
-	TruePeakDB               float64 `json:"true_peak_db,omitempty"`
+	Path                       string  `json:"path"`
+	FileName                   string  `json:"file_name"`
+	SizeBytes                  int64   `json:"size_bytes"`
+	SHA256                     string  `json:"sha256"`
+	MimeType                   string  `json:"mime_type"`
+	Format                     string  `json:"format,omitempty"`
+	DurationMS                 int     `json:"duration_ms,omitempty"`
+	VideoCodec                 string  `json:"video_codec,omitempty"`
+	AudioCodec                 string  `json:"audio_codec,omitempty"`
+	Width                      int     `json:"width,omitempty"`
+	Height                     int     `json:"height,omitempty"`
+	FPS                        float64 `json:"fps,omitempty"`
+	PixelFormat                string  `json:"pixel_format,omitempty"`
+	FFProbeAvailable           bool    `json:"ffprobe_available"`
+	QualityAnalysisAvailable   bool    `json:"quality_analysis_available,omitempty"`
+	BlackDurationMS            int     `json:"black_duration_ms,omitempty"`
+	FreezeDurationMS           int     `json:"freeze_duration_ms,omitempty"`
+	SilenceDurationMS          int     `json:"silence_duration_ms,omitempty"`
+	VerifiedSilence            bool    `json:"verified_silence,omitempty"`
+	IntegratedLUFS             float64 `json:"integrated_lufs,omitempty"`
+	TruePeakDB                 float64 `json:"true_peak_db,omitempty"`
+	TemporalAnalysisAvailable  bool    `json:"temporal_analysis_available,omitempty"`
+	FullScreenFlashCount       int     `json:"full_screen_flash_count,omitempty"`
+	JitterMeasurementAvailable bool    `json:"jitter_measurement_available,omitempty"`
+	JitterScore                float64 `json:"jitter_score,omitempty"`
+	ContactSheetPath           string  `json:"contact_sheet_path,omitempty"`
 }
 
 type EditPlanValidationRequest struct {
