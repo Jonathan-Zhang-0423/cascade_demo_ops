@@ -1,0 +1,10 @@
+{
+  "sample_id": "r62",
+  "required_chapters": ["login", "creation", "prompt_input", "submission", "build_wait", "result_reveal", "interaction"],
+  "covered_chapters": ["login", "result_reveal", "interaction"],
+  "fresh_entity": false,
+  "fact_operation_styles": ["ambient_motion"],
+  "candidate_content_gate": "technical_only",
+  "director_input_fields": ["action", "expected_outcome", "observed_state"]
+}
+

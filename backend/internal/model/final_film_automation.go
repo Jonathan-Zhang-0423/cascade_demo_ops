@@ -11,9 +11,9 @@ const (
 	FinalFilmAutomationProfileGuidedDemoV1 = "guided-demo-v1"
 	FinalFilmReviewScopeFinalOutput        = "final_output"
 	FinalFilmAutomationPolicySchemaVersion = "demoops.final_film_automation_policy.v1"
-	DirectorEvidenceDigestSchemaVersion    = "demoops.director_evidence_digest.v1"
-	DirectorStoryPlanSchemaVersion         = "demoops.director_story_plan.v1"
-	CandidateQualityReportSchemaVersion    = "demoops.candidate_quality_report.v1"
+	DirectorEvidenceDigestSchemaVersion    = "demoops.director_evidence_digest.v2"
+	DirectorStoryPlanSchemaVersion         = "demoops.director_story_plan.v2"
+	CandidateQualityReportSchemaVersion    = "demoops.candidate_quality_report.v2"
 	FinalFilmReviewPackageSchemaVersion    = "demoops.final_film_review_package.v1"
 )
 
@@ -65,6 +65,7 @@ type DirectorEvidenceDigest struct {
 	Objective          string                      `json:"objective"`
 	SourceDurationMS   int                         `json:"source_duration_ms"`
 	RequiredSteps      []DirectorEvidenceStep      `json:"required_steps"`
+	PublicFacts        []PublicNarrativeFact       `json:"public_facts"`
 	WaitRanges         []MillisecondRange          `json:"wait_ranges,omitempty"`
 	InteractionDensity float64                     `json:"interaction_density"`
 	VisualStyle        DirectorVisualStyleEvidence `json:"visual_style"`
@@ -73,13 +74,12 @@ type DirectorEvidenceDigest struct {
 }
 
 type DirectorEvidenceStep struct {
-	StepID          string           `json:"step_id"`
-	Order           int              `json:"order"`
-	Action          string           `json:"action,omitempty"`
-	ExpectedOutcome string           `json:"expected_outcome,omitempty"`
-	ObservedState   string           `json:"observed_state,omitempty"`
-	SourceRangeMS   MillisecondRange `json:"source_range_ms"`
-	ArtifactIDs     []string         `json:"artifact_ids"`
+	StepID                string           `json:"step_id"`
+	Order                 int              `json:"order"`
+	Chapter               string           `json:"chapter"`
+	PublicNarrativeFactID string           `json:"public_narrative_fact_id"`
+	SourceRangeMS         MillisecondRange `json:"source_range_ms"`
+	ArtifactIDs           []string         `json:"artifact_ids"`
 }
 
 type DirectorVisualStyleEvidence struct {
@@ -94,13 +94,14 @@ type DirectorAudioEvidence struct {
 }
 
 type DirectorStoryPlan struct {
-	SchemaVersion    string                    `json:"schema_version"`
-	TargetDurationMS int                       `json:"target_duration_ms"`
-	Beats            []DirectorStoryBeat       `json:"beats"`
-	Timeline         []DirectorTimelineSegment `json:"timeline"`
-	AudioPlan        DirectorAudioPlan         `json:"audio_plan"`
-	SkillVersions    map[string]string         `json:"skill_versions"`
-	DecisionLog      []string                  `json:"decision_log"`
+	SchemaVersion          string                    `json:"schema_version"`
+	TargetDurationMS       int                       `json:"target_duration_ms"`
+	Beats                  []DirectorStoryBeat       `json:"beats"`
+	Timeline               []DirectorTimelineSegment `json:"timeline"`
+	AudioPlan              DirectorAudioPlan         `json:"audio_plan"`
+	SkillVersions          map[string]string         `json:"skill_versions"`
+	DecisionLog            []string                  `json:"decision_log"`
+	MaterialRepairRequests []RepairDirective         `json:"material_repair_requests,omitempty"`
 }
 
 type DirectorStoryBeat struct {
@@ -140,6 +141,8 @@ type CandidateQualityReport struct {
 	Provider      string    `json:"provider"`
 	Attempt       int       `json:"attempt"`
 	TechnicalPass bool      `json:"technical_pass"`
+	TemporalPass  bool      `json:"temporal_pass"`
+	TextPass      bool      `json:"text_pass"`
 	ContentPass   bool      `json:"content_pass"`
 	Score         float64   `json:"score"`
 	Findings      []string  `json:"findings,omitempty"`
@@ -184,14 +187,14 @@ func DefaultFinalFilmAutomationPolicy() FinalFilmAutomationPolicy {
 		TargetDuration: FinalFilmDurationRange{MinMS: 90_000, MaxMS: 120_000},
 		ProviderPolicy: FinalFilmProviderPolicy{
 			IntroProvider: "minimax-h3", OutroProvider: "minimax-h3", TransitionProvider: "seedance-2.5",
-			MaxAttemptsPerSlot: 2, FailurePolicy: PresentationGenerationFailureContinue,
+			MaxAttemptsPerSlot: 2, FailurePolicy: "block_provider_revision_required",
 		},
 		SkillVersions: map[string]string{
 			"director-evidence-story": "1.1.0", "director-generated-shots": "1.1.0",
 			"director-timeline-compose": "1.1.0", "director-quality-gate": "1.1.0",
 			"final-film-director-harness": "1.1.0",
 		},
-		MaxProviderCalls: 8,
+		MaxProviderCalls: 6,
 	}
 }
 
@@ -203,10 +206,10 @@ func ValidateFinalFilmAutomationPolicy(policy FinalFilmAutomationPolicy) error {
 		return errors.New("guided demo target duration must be 90-120 seconds")
 	}
 	providers := policy.ProviderPolicy
-	if providers.IntroProvider != "minimax-h3" || providers.OutroProvider != "minimax-h3" || providers.TransitionProvider != "seedance-2.5" || providers.MaxAttemptsPerSlot != 2 || providers.FailurePolicy != PresentationGenerationFailureContinue {
+	if providers.IntroProvider != "minimax-h3" || providers.OutroProvider != "minimax-h3" || providers.TransitionProvider != "seedance-2.5" || providers.MaxAttemptsPerSlot != 2 || providers.FailurePolicy != "block_provider_revision_required" {
 		return errors.New("guided demo provider roles or retry policy are invalid")
 	}
-	if policy.MaxProviderCalls < 1 || policy.MaxProviderCalls > 8 || len(policy.SkillVersions) < 5 {
+	if policy.MaxProviderCalls != 6 || len(policy.SkillVersions) < 5 {
 		return errors.New("guided demo provider budget or skill versions are incomplete")
 	}
 	return nil
@@ -220,8 +223,23 @@ func ValidateDirectorEvidenceDigest(digest DirectorEvidenceDigest) error {
 		return errors.New("director evidence digest requires factual steps")
 	}
 	for index, step := range digest.RequiredSteps {
-		if strings.TrimSpace(step.StepID) == "" || step.Order != index+1 || step.SourceRangeMS[0] < 0 || step.SourceRangeMS[1] <= step.SourceRangeMS[0] || len(step.ArtifactIDs) == 0 {
+		if strings.TrimSpace(step.StepID) == "" || step.Order != index+1 || strings.TrimSpace(step.Chapter) == "" || strings.TrimSpace(step.PublicNarrativeFactID) == "" || step.SourceRangeMS[0] < 0 || step.SourceRangeMS[1] <= step.SourceRangeMS[0] || len(step.ArtifactIDs) == 0 {
 			return fmt.Errorf("director evidence step %d is invalid", index)
+		}
+	}
+	if len(digest.PublicFacts) == 0 {
+		return errors.New("director evidence digest requires public narrative facts")
+	}
+	facts := make(map[string]bool, len(digest.PublicFacts))
+	for _, fact := range digest.PublicFacts {
+		if err := ValidatePublicNarrativeFact(fact); err != nil {
+			return err
+		}
+		facts[fact.FactID] = true
+	}
+	for _, step := range digest.RequiredSteps {
+		if !facts[step.PublicNarrativeFactID] {
+			return fmt.Errorf("director evidence step %s references an unknown public fact", step.StepID)
 		}
 	}
 	return nil

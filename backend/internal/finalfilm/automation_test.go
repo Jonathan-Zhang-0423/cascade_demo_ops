@@ -69,20 +69,19 @@ func TestDirectorStoryDoesNotTreatObservedProvenanceAsWaiting(t *testing.T) {
 	}
 }
 
-func TestFitAutomatedFactTrackReconcilesExactTargetWithoutInventedMedia(t *testing.T) {
+func TestAutomatedFactTrackDoesNotUseSlowMotionToFillTarget(t *testing.T) {
 	first, second, generated := model.MillisecondRange{0, 30_000}, model.MillisecondRange{30_000, 60_000}, model.MillisecondRange{0, 4_000}
 	plan := model.DemoEditPlan{Shots: []model.DemoEditShot{
 		{ID: "fact_1", SourceStepID: "step_1", SourceTimeRangeMS: &first},
 		{ID: "fact_2", SourceStepID: "step_2", SourceTimeRangeMS: &second},
 		{ID: "generated", SourceTimeRangeMS: &generated, OutputDurationMS: 4_000},
 	}}
-	fitAutomatedFactTrackToTarget(&plan, 90_000)
-	if got := timelineDuration(plan); got != 90_000 {
-		t.Fatalf("fitted timeline duration=%d want 90000", got)
+	if got := timelineDuration(plan); got != 64_000 {
+		t.Fatalf("source timeline duration=%d want 64000", got)
 	}
 	for _, shot := range plan.Shots[:2] {
-		if speed := existingShotSpeed(shot); speed < 0.5 || speed > 1 {
-			t.Fatalf("source-derived pacing left supported range: %f", speed)
+		if speed := existingShotSpeed(shot); speed != 1 {
+			t.Fatalf("factual footage was slowed to fill time: %f", speed)
 		}
 	}
 }
@@ -96,7 +95,7 @@ func TestRecoverFailedAutomationRetriesOnlyProviderRejectedBeforeTaskCreation(t 
 	job := model.FinalFilmJob{
 		SchemaVersion: model.FinalFilmJobSchemaVersion, JobID: "recover_provider_rejection", Revision: 1,
 		State: model.FinalFilmJobFailed, Phase: "automation_failed", AutomationProfile: model.FinalFilmAutomationProfileGuidedDemoV1,
-		AutomationPolicy: &policy, RunAuthorization: &model.FinalFilmRunAuthorization{AuthorizationRef: "approved", MaxProviderCalls: 8, ProviderCallsUsed: 2}, GeneratedTrack: raw,
+		AutomationPolicy: &policy, RunAuthorization: &model.FinalFilmRunAuthorization{AuthorizationRef: "approved", MaxProviderCalls: 6, ProviderCallsUsed: 2}, GeneratedTrack: raw,
 		ProviderAttempts: []model.FinalFilmProviderAttempt{
 			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderSeedance25, Attempt: 1, Status: "retry"},
 			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderSeedance25, Attempt: 2, Status: "fallback_fact_track"},
@@ -136,7 +135,7 @@ func TestRecoverFailedAutomationRetriesCompositionWithoutProviderConsumption(t *
 	job := model.FinalFilmJob{
 		SchemaVersion: model.FinalFilmJobSchemaVersion, JobID: "recover_composition", Revision: 1,
 		State: model.FinalFilmJobFailed, Phase: "automation_failed", AutomationProfile: model.FinalFilmAutomationProfileGuidedDemoV1,
-		AutomationPolicy: &policy, RunAuthorization: &model.FinalFilmRunAuthorization{AuthorizationRef: "approved", MaxProviderCalls: 8, ProviderCallsUsed: 3}, GeneratedTrack: raw,
+		AutomationPolicy: &policy, RunAuthorization: &model.FinalFilmRunAuthorization{AuthorizationRef: "approved", MaxProviderCalls: 6, ProviderCallsUsed: 3}, GeneratedTrack: raw,
 		QualityReports: []model.CandidateQualityReport{{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderMiniMaxH3, Attempt: 1, Decision: "accept"}},
 		LastError:      &model.FinalFilmJobError{Retryable: true, Message: "final requirement satisfaction report is not satisfied"},
 	}
@@ -185,29 +184,25 @@ func TestGuidedDemoLocksFinalDeliveryTo1080p30(t *testing.T) {
 func TestAutomatedFactCaptionsHideInternalEvidenceVocabulary(t *testing.T) {
 	start, end := 0, 2000
 	plan := model.DemoEditPlan{Shots: []model.DemoEditShot{{
-		ID: "fact", SourceStepID: "step", Purpose: "source=browser_assertion",
+		ID: "fact", SourceStepID: "step", SourceArtifactID: "visible_fact", Purpose: "source=browser_assertion",
 		Overlays: []model.EditOverlay{{Type: model.EditOverlayCaption, Text: "source=browser_assertion; assertion:required_numeric_increased=passed", StartMS: &start, EndMS: &end}},
 	}}}
-	catalog := model.AssetTimelineCatalog{Steps: []model.TimelineStep{{StepID: "step", Action: "inspect", ObservedState: "source=browser_assertion; assertion:required_numeric_increased=passed"}}}
-	replaceAutomatedFactCaptions(&plan, catalog)
-	if got := plan.Shots[0].Overlays[0].Text; got != "关键业务指标已确认增长" || automatedPlanContainsInternalCaption(&plan) {
+	facts := []model.PublicNarrativeFact{{SchemaVersion: model.PublicNarrativeFactSchemaVersion, FactID: "fact_1", Chapter: "interaction", ApprovedCaptionVariants: []string{"真实操作后分数增加"}, VisibleEvidenceRefs: []string{"visible_fact"}, SourceKind: "verified_product_fact"}}
+	replaceAutomatedFactCaptions(&plan, facts)
+	if got := plan.Shots[0].Overlays[0].Text; got != "真实操作后分数增加" || automatedPlanContainsInternalCaption(&plan) {
 		t.Fatalf("internal evidence vocabulary leaked into the final caption: %q", got)
 	}
 }
 
-func TestAutomatedFactTrackAddsSiteNeutralAmbientMotion(t *testing.T) {
+func TestAutomatedFactTrackRejectsDynamicMotion(t *testing.T) {
 	rangeMS := model.MillisecondRange{0, 4000}
-	plan := model.DemoEditPlan{Shots: []model.DemoEditShot{{ID: "fact", SourceStepID: "verified_step", SourceTimeRangeMS: &rangeMS}}}
-	if !automatedPlanMissingAmbientMotion(&plan) {
-		t.Fatal("long factual shot should request deterministic ambient motion")
+	plan := model.DemoEditPlan{Shots: []model.DemoEditShot{{ID: "fact", SourceStepID: "verified_step", SourceTimeRangeMS: &rangeMS, Operations: []model.EditOperation{{Type: model.EditOperationZoomPan, Style: "ambient_motion"}}}}}
+	if !automatedPlanContainsDynamicFactMotion(&plan) {
+		t.Fatal("time-varying motion on factual footage must be rejected")
 	}
-	addAutomatedAmbientMotion(&plan)
-	if automatedPlanMissingAmbientMotion(&plan) || len(plan.Shots[0].Operations) != 1 || plan.Shots[0].Operations[0].Style != "ambient_motion" {
-		t.Fatalf("ambient motion was not compiled: %+v", plan.Shots[0].Operations)
-	}
-	addAutomatedAmbientMotion(&plan)
-	if len(plan.Shots[0].Operations) != 1 {
-		t.Fatal("ambient motion compilation is not idempotent")
+	plan.Shots[0].Operations = nil
+	if automatedPlanContainsDynamicFactMotion(&plan) {
+		t.Fatal("unmodified factual footage must pass the motion boundary")
 	}
 }
 
@@ -336,7 +331,7 @@ func TestAutomationPersistsEvidenceAttemptsQualityAndFactFallback(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err = service.AuthorizeAutomation(context.Background(), job.JobID, job.Revision, "test-authorization", 8)
+	job, err = service.AuthorizeAutomation(context.Background(), job.JobID, job.Revision, "test-authorization", 6)
 	if err != nil {
 		t.Fatal(err)
 	}

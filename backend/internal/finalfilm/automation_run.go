@@ -594,7 +594,7 @@ func needsAutomatedDeliveryProfileReconcile(job model.FinalFilmJob) bool {
 		return false
 	}
 	validation := job.FinalOutputValidation
-	return validation.Width != 1920 || validation.Height != 1080 || math.Abs(validation.FPS-30) > 0.25 || automatedPlanContainsInternalCaption(job.FinalPlan) || automatedPlanMissingAmbientMotion(job.FinalPlan)
+	return validation.Width != 1920 || validation.Height != 1080 || math.Abs(validation.FPS-30) > 0.25 || automatedPlanContainsInternalCaption(job.FinalPlan) || automatedPlanContainsDynamicFactMotion(job.FinalPlan)
 }
 
 func (s *Service) reconcileAutomatedDeliveryProfile(ctx context.Context, job model.FinalFilmJob) (model.FinalFilmJob, error) {
@@ -749,7 +749,7 @@ func compileAutomatedGeneratedPlan(job model.FinalFilmJob, record GeneratedTrack
 		catalog.Artifacts = append(catalog.Artifacts, automatedGeneratedTimelineArtifact(artifactID, *candidate, duration))
 		rangeMS := model.MillisecondRange{0, duration}
 		start, end := 0, duration
-		shot := model.DemoEditShot{ID: "generated_shot_" + candidate.CandidateID, SourceArtifactID: artifactID, SourceTimeRangeMS: &rangeMS, Purpose: "Presentation-only generated chapter packaging pending final-output review.", Operations: []model.EditOperation{{Type: model.EditOperationTrim, StartMS: &start, EndMS: &end}, {Type: model.EditOperationTransition, Style: "fade"}}}
+		shot := model.DemoEditShot{ID: "generated_shot_" + candidate.CandidateID, SourceArtifactID: artifactID, SourceTimeRangeMS: &rangeMS, Purpose: "Presentation-only generated chapter packaging pending final-output review.", Operations: []model.EditOperation{{Type: model.EditOperationTrim, StartMS: &start, EndMS: &end}}}
 		shotIDs = append(shotIDs, shot.ID)
 		switch placement {
 		case "before_first_required_step":
@@ -774,66 +774,65 @@ func compileAutomatedGeneratedPlan(job model.FinalFilmJob, record GeneratedTrack
 		}
 	}
 	plan.Shots = append(assembled, suffix...)
-	replaceAutomatedFactCaptions(&plan, catalog)
+	replaceAutomatedFactCaptions(&plan, job.PublicNarrativeFacts)
 	plan.PlanID = job.BaselinePlan.PlanID + "+automated"
 	if job.DirectorPlan != nil && job.DirectorPlan.StoryPlan != nil {
 		target := job.DirectorPlan.StoryPlan.TargetDurationMS
 		if job.AutomationProfile == model.FinalFilmAutomationProfileGuidedDemoV1 && target < 105_000 {
 			target = 105_000
 		}
-		fitAutomatedFactTrackToTarget(&plan, target)
+		_ = target // the quality gate rejects short coverage instead of slowing UI footage to fill time
 	}
-	addAutomatedAmbientMotion(&plan)
 	plan.TargetDurationMS = timelineDuration(plan)
 	return catalog, plan, shotIDs
 }
 
-func replaceAutomatedFactCaptions(plan *model.DemoEditPlan, catalog model.AssetTimelineCatalog) {
+func replaceAutomatedFactCaptions(plan *model.DemoEditPlan, facts []model.PublicNarrativeFact) {
 	if plan == nil {
 		return
 	}
-	steps := make(map[string]model.TimelineStep, len(catalog.Steps))
-	for _, step := range catalog.Steps {
-		steps[step.StepID] = step
+	factByEvidence := map[string]model.PublicNarrativeFact{}
+	for _, fact := range facts {
+		if model.ValidatePublicNarrativeFact(fact) != nil {
+			continue
+		}
+		for _, evidenceRef := range fact.VisibleEvidenceRefs {
+			factByEvidence[evidenceRef] = fact
+		}
 	}
 	for shotIndex := range plan.Shots {
 		shot := &plan.Shots[shotIndex]
-		step, ok := steps[shot.SourceStepID]
+		fact, ok := factByEvidence[shot.SourceArtifactID]
 		if !ok {
+			// Removing an untrusted caption is preferable to inventing a public
+			// statement from action, expected_outcome, or observed_state.
+			shot.Overlays = removeCaptionOverlays(shot.Overlays)
 			continue
 		}
-		caption := automatedFactCaption(step)
+		caption := fact.ApprovedCaptionVariants[0]
 		shot.Purpose = caption
+		found := false
 		for overlayIndex := range shot.Overlays {
 			if shot.Overlays[overlayIndex].Type == model.EditOverlayCaption {
 				shot.Overlays[overlayIndex].Text = caption
+				found = true
 			}
+		}
+		if !found {
+			start, end := 0, 3000
+			shot.Overlays = append(shot.Overlays, model.EditOverlay{Type: model.EditOverlayCaption, Text: caption, StartMS: &start, EndMS: &end})
 		}
 	}
 }
 
-func automatedFactCaption(step model.TimelineStep) string {
-	signal := strings.ToLower(step.ObservedState + " " + step.Action)
-	switch {
-	case strings.Contains(signal, "required_numeric_increased"):
-		return "关键业务指标已确认增长"
-	case strings.Contains(signal, "required_distinct_actions_observed"):
-		return "多种交互均产生可见反馈"
-	case strings.Contains(signal, "required_state_changed") || strings.Contains(signal, "required_frame_surface_changed"):
-		return "操作后业务状态产生可见变化"
-	case strings.Contains(signal, "stability"):
-		return "连续交互后页面保持稳定"
-	case strings.Contains(signal, "required_interactive_surface_visible"):
-		return "真实可交互结果已就绪"
-	case strings.Contains(signal, "optional_capability_recorded"):
-		return "增强能力已记录为非阻断项"
-	case strings.Contains(signal, "action_navigate_completed"):
-		return "恢复已创建结果，继续事实验收"
-	case strings.Contains(signal, "url_matches"):
-		return "目标工作区与会话状态已确认"
-	default:
-		return "业务阶段已完成并留存证据"
+func removeCaptionOverlays(overlays []model.EditOverlay) []model.EditOverlay {
+	result := overlays[:0]
+	for _, overlay := range overlays {
+		if overlay.Type != model.EditOverlayCaption {
+			result = append(result, overlay)
+		}
 	}
+	return result
 }
 
 func automatedPlanContainsInternalCaption(plan *model.DemoEditPlan) bool {
@@ -843,7 +842,7 @@ func automatedPlanContainsInternalCaption(plan *model.DemoEditPlan) bool {
 	for _, shot := range plan.Shots {
 		for _, overlay := range shot.Overlays {
 			text := strings.ToLower(overlay.Text)
-			if overlay.Type == model.EditOverlayCaption && (strings.Contains(text, "source=") || strings.Contains(text, "assertion:") || strings.Contains(text, "url_observed")) {
+			if overlay.Type == model.EditOverlayCaption && model.ValidatePublicCaption(text) != nil {
 				return true
 			}
 		}
@@ -851,41 +850,18 @@ func automatedPlanContainsInternalCaption(plan *model.DemoEditPlan) bool {
 	return false
 }
 
-func addAutomatedAmbientMotion(plan *model.DemoEditPlan) {
-	if plan == nil {
-		return
-	}
-	for shotIndex := range plan.Shots {
-		shot := &plan.Shots[shotIndex]
-		if shot.SourceStepID == "" || shot.SourceTimeRangeMS == nil || shot.SourceTimeRangeMS[1]-shot.SourceTimeRangeMS[0] < 1000 {
-			continue
-		}
-		alreadyPresent := false
-		for _, operation := range shot.Operations {
-			alreadyPresent = alreadyPresent || operation.Type == model.EditOperationZoomPan
-		}
-		if alreadyPresent {
-			continue
-		}
-		zoom, center := 1.12, 0.5
-		shot.Operations = append(shot.Operations, model.EditOperation{Type: model.EditOperationZoomPan, Zoom: &zoom, X: &center, Y: &center, Style: "ambient_motion"})
-	}
-}
-
-func automatedPlanMissingAmbientMotion(plan *model.DemoEditPlan) bool {
+func automatedPlanContainsDynamicFactMotion(plan *model.DemoEditPlan) bool {
 	if plan == nil {
 		return false
 	}
 	for _, shot := range plan.Shots {
-		if shot.SourceStepID == "" || shot.SourceTimeRangeMS == nil || shot.SourceTimeRangeMS[1]-shot.SourceTimeRangeMS[0] < 1000 {
+		if shot.SourceStepID == "" {
 			continue
 		}
-		found := false
 		for _, operation := range shot.Operations {
-			found = found || operation.Type == model.EditOperationZoomPan && operation.Style == "ambient_motion"
-		}
-		if !found {
-			return true
+			if operation.Type == model.EditOperationPan || operation.Type == model.EditOperationZoomPan || operation.Style == "ambient_motion" {
+				return true
+			}
 		}
 	}
 	return false
@@ -913,51 +889,6 @@ func automatedBlackDurationLimitMS(intent media.GeneratedShotIntent) int {
 		return 750
 	}
 	return 500
-}
-
-func fitAutomatedFactTrackToTarget(plan *model.DemoEditPlan, targetMS int) {
-	if plan == nil || targetMS <= 0 {
-		return
-	}
-	remaining := targetMS - timelineDuration(*plan)
-	if remaining <= 0 {
-		return
-	}
-	// Prefer longer verified result/interaction shots from the end of the
-	// narrative. Source-derived 0.5-1x pacing is deterministic and avoids
-	// inventing footage when the accepted generated-track duration is short.
-	indices := make([]int, 0, len(plan.Shots))
-	for index, shot := range plan.Shots {
-		if shot.SourceStepID != "" && shot.SourceTimeRangeMS != nil && shot.SourceTimeRangeMS[1]-shot.SourceTimeRangeMS[0] >= 1000 {
-			indices = append(indices, index)
-		}
-	}
-	for cursor := len(indices) - 1; cursor >= 0 && remaining > 0; cursor-- {
-		shot := &plan.Shots[indices[cursor]]
-		sourceDuration := shot.SourceTimeRangeMS[1] - shot.SourceTimeRangeMS[0]
-		currentDuration := int(math.Round(float64(sourceDuration) / existingShotSpeed(*shot)))
-		capacity := sourceDuration*2 - currentDuration
-		if capacity <= 0 {
-			continue
-		}
-		addition := capacity
-		if remaining < addition {
-			addition = remaining
-		}
-		newDuration := currentDuration + addition
-		setAutomatedShotSpeed(shot, math.Max(0.5, float64(sourceDuration)/float64(newDuration)))
-		remaining -= addition
-	}
-}
-
-func setAutomatedShotSpeed(shot *model.DemoEditShot, speed float64) {
-	for index := len(shot.Operations) - 1; index >= 0; index-- {
-		if shot.Operations[index].Type == model.EditOperationSpeed {
-			shot.Operations[index].Speed = &speed
-			return
-		}
-	}
-	shot.Operations = append(shot.Operations, model.EditOperation{Type: model.EditOperationSpeed, Speed: &speed})
 }
 
 func (s *Service) MarkAutomationFailed(ctx context.Context, jobID string, cause error) (model.FinalFilmJob, error) {

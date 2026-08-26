@@ -17,20 +17,10 @@ import (
 )
 
 func guidedDemoPresentationIntents(catalog model.AssetTimelineCatalog) []model.PresentationGenerationIntent {
-	purposes := []string{"intro"}
-	required := 0
-	for _, step := range catalog.Steps {
-		if step.Required {
-			required++
-		}
-	}
-	if required >= 2 {
-		purposes = append(purposes, "section_divider")
-	}
-	if required >= 6 {
-		purposes = append(purposes, "section_divider")
-	}
-	purposes = append(purposes, "outro")
+	// Closed-loop v2 has exactly three presentation slots. Keeping this shape
+	// deterministic makes the six-call provider budget enforceable while the
+	// Director remains responsible for placement and factual pacing.
+	purposes := []string{"intro", "section_divider", "outro"}
 	result := make([]model.PresentationGenerationIntent, 0, len(purposes))
 	divider := 0
 	for _, purpose := range purposes {
@@ -46,7 +36,37 @@ func guidedDemoPresentationIntents(catalog model.AssetTimelineCatalog) []model.P
 	return result
 }
 
+func defaultPublicNarrativeFacts(catalog model.AssetTimelineCatalog) []model.PublicNarrativeFact {
+	chapters := model.RequiredDemoChapters()
+	visibleRefs := []string{}
+	for _, artifact := range catalog.Artifacts {
+		if artifact.ID != "" {
+			visibleRefs = append(visibleRefs, artifact.ID)
+		}
+	}
+	if len(visibleRefs) == 0 && catalog.Timeline.RecordingArtifactID != "" {
+		visibleRefs = append(visibleRefs, catalog.Timeline.RecordingArtifactID)
+	}
+	if len(visibleRefs) == 0 {
+		return nil
+	}
+	result := make([]model.PublicNarrativeFact, 0, len(chapters))
+	for index, chapter := range chapters {
+		caption := map[string]string{
+			"login": "打开平台并完成登录", "creation": "创建一个全新项目", "prompt_input": "输入用户的原始需求",
+			"submission": "提交需求并开始构建", "build_wait": "等待平台完成真实构建", "result_reveal": "查看构建完成的项目",
+			"interaction": "实际操作并验证产品能力",
+		}[chapter]
+		result = append(result, model.PublicNarrativeFact{SchemaVersion: model.PublicNarrativeFactSchemaVersion, FactID: fmt.Sprintf("public_fact_%02d_%s", index+1, chapter), Chapter: chapter, ApprovedCaptionVariants: []string{caption}, VisibleEvidenceRefs: append([]string{}, visibleRefs...), SourceKind: "visible_ui"})
+	}
+	return result
+}
+
 func buildDirectorEvidenceDigest(job model.FinalFilmJob, sourceAudioPresent bool, now time.Time) (model.DirectorEvidenceDigest, error) {
+	publicFacts := append([]model.PublicNarrativeFact{}, job.PublicNarrativeFacts...)
+	if len(publicFacts) == 0 {
+		publicFacts = defaultPublicNarrativeFacts(job.Catalog)
+	}
 	steps := make([]model.TimelineStep, 0, len(job.Catalog.Steps))
 	for _, step := range job.Catalog.Steps {
 		if step.Required {
@@ -59,6 +79,7 @@ func buildDirectorEvidenceDigest(job model.FinalFilmJob, sourceAudioPresent bool
 		Objective:     strings.TrimSpace(job.BaselinePlan.Objective), SourceDurationMS: job.Catalog.Timeline.DurationMS,
 		VisualStyle: model.DirectorVisualStyleEvidence{DominantColors: dominantColorsFromCatalog(job.Catalog), Tone: "observed_product", MotionLevel: "derived_from_fact_track"},
 		Audio:       model.DirectorAudioEvidence{SourceAudioPresent: sourceAudioPresent}, CreatedAt: now.UTC(),
+		PublicFacts: publicFacts,
 	}
 	if digest.Objective == "" {
 		digest.Objective = "Present the verified product workflow and its observed result."
@@ -80,10 +101,11 @@ func buildDirectorEvidenceDigest(job model.FinalFilmJob, sourceAudioPresent bool
 				}
 			}
 		}
-		digest.RequiredSteps = append(digest.RequiredSteps, model.DirectorEvidenceStep{
-			StepID: step.StepID, Order: index + 1, Action: step.Action, ExpectedOutcome: step.ExpectedOutcome,
-			ObservedState: step.ObservedState, SourceRangeMS: model.MillisecondRange{start, end}, ArtifactIDs: uniqueStrings(artifacts),
-		})
+		fact := publicFactForEvidence(publicFacts, artifacts, index)
+		if fact == nil {
+			return model.DirectorEvidenceDigest{}, fmt.Errorf("required step %s has no public narrative fact", step.StepID)
+		}
+		digest.RequiredSteps = append(digest.RequiredSteps, model.DirectorEvidenceStep{StepID: step.StepID, Order: index + 1, Chapter: fact.Chapter, PublicNarrativeFactID: fact.FactID, SourceRangeMS: model.MillisecondRange{start, end}, ArtifactIDs: uniqueStrings(artifacts)})
 	}
 	if previousEnd < digest.SourceDurationMS {
 		digest.WaitRanges = append(digest.WaitRanges, model.MillisecondRange{previousEnd, digest.SourceDurationMS})
@@ -98,6 +120,22 @@ func buildDirectorEvidenceDigest(job model.FinalFilmJob, sourceAudioPresent bool
 		return model.DirectorEvidenceDigest{}, err
 	}
 	return digest, nil
+}
+
+func publicFactForEvidence(facts []model.PublicNarrativeFact, artifactIDs []string, index int) *model.PublicNarrativeFact {
+	if index >= 0 && index < len(facts) {
+		return &facts[index]
+	}
+	for factIndex := range facts {
+		for _, evidenceRef := range facts[factIndex].VisibleEvidenceRefs {
+			for _, artifactID := range artifactIDs {
+				if evidenceRef == artifactID {
+					return &facts[factIndex]
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func buildDirectorStoryPlan(job model.FinalFilmJob, digest model.DirectorEvidenceDigest) (model.DirectorStoryPlan, error) {
@@ -121,11 +159,7 @@ func buildDirectorStoryPlan(job model.FinalFilmJob, digest model.DirectorEvidenc
 		}
 		speed := existingShotSpeed(shot)
 		step := stepByID[shot.SourceStepID]
-		// ObservedState contains generic provenance such as "url_observed" on
-		// every successful browser step. Classifying on that field compressed the
-		// entire factual interaction proof as if it were a wait. Only the action's
-		// business meaning may opt a segment into wait compression.
-		if waitLikeText(step.Action) && rangeMS[1]-rangeMS[0] >= 4000 {
+		if step.Chapter == "build_wait" && rangeMS[1]-rangeMS[0] >= 4000 {
 			speed = maxFloat(speed, 8)
 		}
 		output := maxInt(1, int(float64(rangeMS[1]-rangeMS[0])/speed))
@@ -133,7 +167,7 @@ func buildDirectorStoryPlan(job model.FinalFilmJob, digest model.DirectorEvidenc
 		plan.Timeline = append(plan.Timeline, model.DirectorTimelineSegment{
 			SegmentID: fmt.Sprintf("fact_%03d", index+1), Kind: "fact", SourceArtifactID: shot.SourceArtifactID,
 			SourceStepID: shot.SourceStepID, SourceRangeMS: rangeMS, Placement: "fact_order", Speed: speed,
-			OutputDurationMS: output, Caption: strings.TrimSpace(step.ExpectedOutcome),
+			OutputDurationMS: output, Caption: approvedCaption(digest.PublicFacts, step.PublicNarrativeFactID),
 		})
 	}
 	anchorIndex := 0
@@ -173,12 +207,21 @@ func buildDirectorStoryPlan(job model.FinalFilmJob, digest model.DirectorEvidenc
 	}
 	plan.TargetDurationMS = total
 	for _, step := range digest.RequiredSteps {
-		plan.Beats = append(plan.Beats, model.DirectorStoryBeat{BeatID: "beat_" + step.StepID, Purpose: "verified_step", StepIDs: []string{step.StepID}, Caption: step.ExpectedOutcome, DurationMS: step.SourceRangeMS[1] - step.SourceRangeMS[0]})
+		plan.Beats = append(plan.Beats, model.DirectorStoryBeat{BeatID: "beat_" + step.StepID, Purpose: step.Chapter, StepIDs: []string{step.StepID}, Caption: approvedCaption(digest.PublicFacts, step.PublicNarrativeFactID), DurationMS: step.SourceRangeMS[1] - step.SourceRangeMS[0]})
 	}
 	if err := model.ValidateDirectorStoryPlan(plan, policy.TargetDuration); err != nil {
 		return model.DirectorStoryPlan{}, err
 	}
 	return plan, nil
+}
+
+func approvedCaption(facts []model.PublicNarrativeFact, factID string) string {
+	for _, fact := range facts {
+		if fact.FactID == factID && len(fact.ApprovedCaptionVariants) > 0 {
+			return fact.ApprovedCaptionVariants[0]
+		}
+	}
+	return ""
 }
 
 func dominantColorsFromCatalog(catalog model.AssetTimelineCatalog) []string {

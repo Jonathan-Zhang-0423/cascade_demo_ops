@@ -1202,19 +1202,13 @@ function defaultShotForStep(
     id: `shot_${String(index + 1).padStart(3, "0")}_${safeName(step.step_id)}`,
     source_artifact_id: sourceArtifactID,
     source_step_id: step.step_id,
-    purpose: step.expected_outcome || step.observed_state || `Show ${step.action} step ${step.step_id}`,
+    // Runtime assertions and execution vocabulary are never presentation copy.
+    // Final-film captions are added later from PublicNarrativeFact only.
+    purpose: "Verified product interaction",
     ...(still
       ? { presentation_kind: "still" as const, output_duration_ms: Math.max(250, Math.min(15_000, step.duration_ms)), operations: [] }
       : { source_time_range_ms: [step.start_ms, step.end_ms] as [number, number], operations: defaultOperationsForStep(step, geometryEvidence?.geometry) }),
-    overlays: [
-      {
-        type: "caption",
-        text: step.expected_outcome || titleForAction(step),
-        source_step_id: step.step_id,
-        start_ms: 0,
-        end_ms: Math.min(step.duration_ms, 3000),
-      },
-    ],
+    overlays: [],
   };
   if (geometryEvidence) {
     const box = paddedNormalizedTargetBox(geometryEvidence.geometry.element_box_normalized);
@@ -3478,9 +3472,10 @@ function buildVideoOperationFilters(operations: CompositorShot["edit_operations"
       case "zoom_pan": {
         const zoom = boundedNumber(operation.zoom ?? operation.scale ?? 1.08, 1.08, 1, 3);
         const x = boundedNumber(operation.x ?? 0.5, 0.5, 0, 1); const y = boundedNumber(operation.y ?? 0.5, 0.5, 0, 1);
-        filters.push(operation.style === "ambient_motion"
-          ? ambientMotionFilter(zoom)
-          : `scale=iw*${zoom.toFixed(3)}:ih*${zoom.toFixed(3)},crop=iw/${zoom.toFixed(3)}:ih/${zoom.toFixed(3)}:(iw-ow)*${x.toFixed(3)}:(ih-oh)*${y.toFixed(3)}`);
+        if (operation.style === "ambient_motion") {
+          throw new Error("ambient_motion is prohibited for factual UI footage");
+        }
+        filters.push(`scale=iw*${zoom.toFixed(3)}:ih*${zoom.toFixed(3)},crop=iw/${zoom.toFixed(3)}:ih/${zoom.toFixed(3)}:(iw-ow)*${x.toFixed(3)}:(ih-oh)*${y.toFixed(3)}`);
         break;
       }
       case "pan": filters.push("crop=iw*0.94:ih*0.94:iw*0.03:ih*0.03"); break;
@@ -3492,7 +3487,10 @@ function buildVideoOperationFilters(operations: CompositorShot["edit_operations"
         }
         break;
       }
-      case "transition": filters.push(`fade=t=in:st=0:d=${Math.min(0.4, Math.max(0.1, durationMS / 1000)).toFixed(3)}`); break;
+      // Segments concatenate with a deterministic hard cut. A transition
+      // marker must never compile to an independent fade-in on every segment;
+      // that produced one-to-three-frame full-screen flashes in the r62 film.
+      case "transition": break;
       case "color_grade": filters.push("eq=contrast=1.03:saturation=1.04:brightness=0.01"); break;
       // Regional privacy blur is composed in composeWithFFmpeg after the
       // normalized frame is available. Do not add a global blur here.
@@ -3500,11 +3498,6 @@ function buildVideoOperationFilters(operations: CompositorShot["edit_operations"
     }
   }
   return { filters, audioTempo };
-}
-
-export function ambientMotionFilter(zoom: number): string {
-  const value = boundedNumber(zoom, 1.12, 1.02, 1.25).toFixed(3);
-  return `scale=iw*${value}:ih*${value},crop=iw/${value}:ih/${value}:x='(iw-ow)*(0.5+0.35*sin(t*0.22))':y='(ih-oh)*(0.5+0.25*cos(t*0.17))'`;
 }
 
 function playbackSpeedForOperations(operations: Array<{ type: string; speed?: number }>): number {

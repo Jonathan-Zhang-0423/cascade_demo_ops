@@ -69,6 +69,9 @@ type FinalFilmJob struct {
 	AutomationPolicy           *FinalFilmAutomationPolicy     `json:"automation_policy,omitempty"`
 	RunAuthorization           *FinalFilmRunAuthorization     `json:"run_authorization,omitempty"`
 	EvidenceDigest             *DirectorEvidenceDigest        `json:"evidence_digest,omitempty"`
+	PublicNarrativeFacts       []PublicNarrativeFact          `json:"public_narrative_facts,omitempty"`
+	MediaCoverage              *MediaCoverageReport           `json:"media_coverage,omitempty"`
+	RepairDirectives           []RepairDirective              `json:"repair_directives,omitempty"`
 	QualityReports             []CandidateQualityReport       `json:"quality_reports,omitempty"`
 	ReviewPackage              *FinalFilmReviewPackage        `json:"review_package,omitempty"`
 	FinalReview                *FinalFilmFinalReview          `json:"final_review,omitempty"`

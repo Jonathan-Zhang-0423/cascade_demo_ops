@@ -757,7 +757,7 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 		if err := emit(experiment.LegExecutionUpdate{Kind: "final_film_bound", FinalFilmJobID: job.JobID, FinalFilmRevision: job.Revision, ProviderCallsUsed: 0}); err != nil {
 			return err
 		}
-		job, err = a.service.RunFinalFilmAutomation(ctx, job.JobID, FinalFilmRunRequest{ExpectedRevision: job.Revision, AuthorizationRef: request.AuthorizationRef, MaxProviderCalls: 8})
+		job, err = a.service.RunFinalFilmAutomation(ctx, job.JobID, FinalFilmRunRequest{ExpectedRevision: job.Revision, AuthorizationRef: request.AuthorizationRef, MaxProviderCalls: 6})
 		if err != nil {
 			return &experiment.AdapterError{Code: "final_film_authorization_failed", Phase: "director_media", State: experiment.RunStateWaitingInput, Retryable: false, Cause: err}
 		}
@@ -768,7 +768,7 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 		}
 	}
 	if job.State == model.FinalFilmJobBaselineReady && job.RunAuthorization == nil {
-		job, err = a.service.RunFinalFilmAutomation(ctx, job.JobID, FinalFilmRunRequest{ExpectedRevision: job.Revision, AuthorizationRef: request.AuthorizationRef, MaxProviderCalls: 8})
+		job, err = a.service.RunFinalFilmAutomation(ctx, job.JobID, FinalFilmRunRequest{ExpectedRevision: job.Revision, AuthorizationRef: request.AuthorizationRef, MaxProviderCalls: 6})
 		if err != nil {
 			return &experiment.AdapterError{Code: "final_film_authorization_failed", Phase: "director_media", State: experiment.RunStateWaitingInput, Retryable: false, Cause: err}
 		}

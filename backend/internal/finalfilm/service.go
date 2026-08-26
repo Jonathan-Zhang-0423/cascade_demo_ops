@@ -63,15 +63,17 @@ type Service struct {
 }
 
 type CreateJobRequest struct {
-	EditorSessionID   string
-	EditorRevision    int
-	SourcePackageID   string
-	Catalog           model.AssetTimelineCatalog
-	BaselinePlan      model.DemoEditPlan
-	Intents           []model.PresentationGenerationIntent
-	RenderProfile     model.EditorRenderProfile
-	AutomationProfile string
-	ReviewSupplements []model.FinalFilmReviewSupplement
+	EditorSessionID      string
+	EditorRevision       int
+	SourcePackageID      string
+	Catalog              model.AssetTimelineCatalog
+	BaselinePlan         model.DemoEditPlan
+	Intents              []model.PresentationGenerationIntent
+	RenderProfile        model.EditorRenderProfile
+	AutomationProfile    string
+	ReviewSupplements    []model.FinalFilmReviewSupplement
+	PublicNarrativeFacts []model.PublicNarrativeFact
+	MediaCoverage        *model.MediaCoverageReport
 }
 
 func NewService(options ServiceOptions) (*Service, error) {
@@ -140,6 +142,19 @@ func (s *Service) CreateJob(ctx context.Context, request CreateJobRequest) (mode
 		}
 		request.RenderProfile = automatedFinalDeliveryProfile(request.RenderProfile)
 		request.Intents = guidedDemoPresentationIntents(request.Catalog)
+		if len(request.PublicNarrativeFacts) == 0 {
+			request.PublicNarrativeFacts = defaultPublicNarrativeFacts(request.Catalog)
+		}
+		for _, fact := range request.PublicNarrativeFacts {
+			if err := model.ValidatePublicNarrativeFact(fact); err != nil {
+				return model.FinalFilmJob{}, fmt.Errorf("validate public narrative fact: %w", err)
+			}
+		}
+		if request.MediaCoverage != nil {
+			if err := model.ValidateMediaCoverageReport(*request.MediaCoverage); err != nil {
+				return model.FinalFilmJob{}, fmt.Errorf("validate media coverage: %w", err)
+			}
+		}
 		automationPolicy = &policy
 	}
 	constraints, err := CompileStoryboardConstraints(ConstraintCompileInput{
@@ -167,6 +182,7 @@ func (s *Service) CreateJob(ctx context.Context, request CreateJobRequest) (mode
 		Constraints: constraints, Catalog: request.Catalog, BaselinePlan: request.BaselinePlan,
 		RenderProfile: request.RenderProfile, PresentationIntents: append([]model.PresentationGenerationIntent{}, request.Intents...),
 		AutomationProfile: automationProfile, AutomationPolicy: automationPolicy,
+		PublicNarrativeFacts: append([]model.PublicNarrativeFact{}, request.PublicNarrativeFacts...), MediaCoverage: request.MediaCoverage,
 		ReviewSupplements: append([]model.FinalFilmReviewSupplement{}, request.ReviewSupplements...),
 	}
 	if err := validateReviewSupplements(job.ReviewSupplements); err != nil {
