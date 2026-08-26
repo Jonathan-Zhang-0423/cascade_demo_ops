@@ -58,6 +58,7 @@ func (p *ProductSpecPlanner) Generate(ctx context.Context, shortGoal string) (Pr
 		_, err := p.client.GenerateJSON(ctx, config.ModelTaskPlanning, request, &spec)
 		if err == nil {
 			spec.BuildBrief = normalizedOptionalBuildBrief(spec.BuildBrief)
+			spec.ObservableAcceptance = normalizedAcceptanceEvidence(spec.ObservableAcceptance)
 			err = ValidateProductSpecQuality(spec)
 		}
 		if err == nil {
@@ -67,6 +68,44 @@ func (p *ProductSpecPlanner) Generate(ctx context.Context, shortGoal string) (Pr
 		request.User = fmt.Sprintf("The previous draft failed the deterministic ProductSpec quality gate: %s\nRegenerate the same product goal once and correct only those structural issues:\n%s", boundedPlanningError(err), shortGoal)
 	}
 	return ProductSpec{}, fmt.Errorf("product specification failed after one regeneration: %w", lastErr)
+}
+
+// Evidence channel names are a protocol detail, not product judgment. Models
+// occasionally express a sound criterion with only one channel even though
+// the runtime always requires visual plus independent structural proof. Fill
+// that mechanical omission deterministically so a one-sentence user request
+// is not rejected for JSON-shape drift; the execution Gate still has to
+// produce both real evidence channels before the criterion can pass.
+func normalizedAcceptanceEvidence(criteria []AcceptanceCriterion) []AcceptanceCriterion {
+	normalized := append([]AcceptanceCriterion(nil), criteria...)
+	for index := range normalized {
+		seen := map[string]bool{}
+		kinds := make([]string, 0, len(normalized[index].EvidenceKinds)+2)
+		visual := false
+		independent := false
+		for _, rawKind := range normalized[index].EvidenceKinds {
+			kind := strings.ToLower(strings.TrimSpace(rawKind))
+			if kind == "" || seen[kind] {
+				continue
+			}
+			seen[kind] = true
+			kinds = append(kinds, kind)
+			switch kind {
+			case "visual", "frame", "region_change":
+				visual = true
+			case "dom", "aria", "route", "network":
+				independent = true
+			}
+		}
+		if !visual {
+			kinds = append(kinds, "visual")
+		}
+		if !independent {
+			kinds = append(kinds, "dom")
+		}
+		normalized[index].EvidenceKinds = kinds
+	}
+	return normalized
 }
 
 // The builder never receives BuildBrief: CompileBuildPrompt forwards the

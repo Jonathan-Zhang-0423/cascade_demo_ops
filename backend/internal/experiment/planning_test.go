@@ -69,6 +69,33 @@ func TestProductSpecPlannerDropsInvalidOptionalBuildBrief(t *testing.T) {
 	}
 }
 
+func TestProductSpecPlannerNormalizesEvidenceChannelShapeWithoutRegeneration(t *testing.T) {
+	valid := validProductSpecFixture()
+	valid.ObservableAcceptance[0].EvidenceKinds = []string{"visual", "VISUAL", " "}
+	valid.ObservableAcceptance[1].EvidenceKinds = []string{"aria"}
+	client := &productSpecLLM{specs: []ProductSpec{valid}}
+	planner, err := NewProductSpecPlanner(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := planner.Generate(t.Context(), "Build a polished responsive interactive product")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.calls != 1 {
+		t.Fatalf("mechanical evidence normalization consumed regeneration: calls=%d", client.calls)
+	}
+	if got := strings.Join(result.ObservableAcceptance[0].EvidenceKinds, ","); got != "visual,dom" {
+		t.Fatalf("visual-only criterion normalized to %q", got)
+	}
+	if got := strings.Join(result.ObservableAcceptance[1].EvidenceKinds, ","); got != "aria,visual" {
+		t.Fatalf("structural-only criterion normalized to %q", got)
+	}
+	if err := ValidateProductSpecQuality(result); err != nil {
+		t.Fatalf("normalized ProductSpec did not satisfy contract: %v", err)
+	}
+}
+
 func TestProductSpecQualityRejectsHarnessLeakAndWeakEvidence(t *testing.T) {
 	for name, mutate := range map[string]func(*ProductSpec){
 		"harness leak": func(spec *ProductSpec) { spec.Objective = "prepare DemoOps recording" },
