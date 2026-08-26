@@ -245,6 +245,36 @@ func TestAdaptiveObservationTimeoutDefersWithoutDeclaringBusinessFailure(t *test
 	}
 }
 
+func TestAdaptiveV2ActionProofFailureRoutesToSameEntityProductRepair(t *testing.T) {
+	request := experiment.LegExecutionRequest{
+		HarnessProfile: experiment.HarnessProfileAdaptiveBusinessV2,
+		InteractionPlan: experiment.InteractionPlan{Steps: []experiment.InteractionStep{
+			{StepID: "surface_ready", ReplayPolicy: experiment.ReplayObserveOnly, CapabilityLayer: "core", CapabilityScore: 20},
+			{StepID: "directional_moves", ReplayPolicy: experiment.ReplayIdempotentWrite, CapabilityLayer: "core", CapabilityScore: 25},
+			{StepID: "touch", ReplayPolicy: experiment.ReplayIdempotentWrite, CapabilityLayer: "core", CapabilityScore: 10},
+		}},
+	}
+	result := model.RecordingResultPackage{
+		ResultID: "result-failed-proof",
+		FailureDiagnostic: &model.ScriptFailureDiagnostic{
+			FailedNodeID: "business_stage_contract_experiment_interaction_directional_moves",
+			Error:        model.AgentError{Code: "outcome_verification_failed"},
+		},
+		StepResults: []model.StepResult{{NodeID: "business_stage_contract_experiment_interaction_surface_ready", Status: "passed"}},
+	}
+	score, repairable := adaptiveFailedCapabilityScore(request, result)
+	if !repairable || score.CorePassed || score.EligibleForFilm || score.CoreScore != 20 {
+		t.Fatalf("action proof failure did not become a bounded failed capability score: repairable=%v score=%+v", repairable, score)
+	}
+	if got := strings.Join(score.Missing, ","); got != "directional_moves,touch" {
+		t.Fatalf("missing required capabilities = %q", got)
+	}
+	result.FailureDiagnostic.FailedNodeID = "business_stage_contract_experiment_interaction_surface_ready"
+	if _, repairable := adaptiveFailedCapabilityScore(request, result); repairable {
+		t.Fatal("passive build uncertainty was incorrectly turned into a product edit")
+	}
+}
+
 func TestAdaptiveTransportWaitDoesNotPreemptWorkerProgressWindow(t *testing.T) {
 	request := experiment.LegExecutionRequest{
 		HarnessProfile:  experiment.HarnessProfileAdaptiveBusinessV1,

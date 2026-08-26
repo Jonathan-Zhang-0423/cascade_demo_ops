@@ -2202,7 +2202,12 @@ export function browserVisualTerminalWithStructuralEvidence(observations: Browse
 
 export function browserVisualProductSurfaceAdmitted(observation: BrowserVisualObservation, stateful: boolean, focusable: boolean, minimumConfidence = 0.85): boolean {
 	void focusable;
-	return observation.decision !== "failed" && observation.confidence >= minimumConfidence
+	// The model contract requires a terminal `succeeded` decision when it
+	// believes the surface is ready.  Do not silently promote a contradictory
+	// `in_progress` response merely because its auxiliary booleans look
+	// optimistic: that admitted partially rendered builders in the r62/v3
+	// regression before deterministic interaction proof could succeed.
+	return observation.decision === "succeeded" && observation.confidence >= minimumConfidence
 		&& observation.product_surface_visible === true && observation.generation_covering_surface !== true
 		&& stateful;
 }
@@ -2373,7 +2378,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 				return { surface: true, score: target.stateful, controls: target.focusable };
 			}
 			const terminal = browserVisualTerminalWithStructuralEvidence(existing, config.maxCalls);
-			if (terminal === "succeeded") return { surface: true, score: target.stateful, controls: target.focusable };
+			if (terminal === "succeeded" && !busyNow) return { surface: true, score: target.stateful, controls: target.focusable };
 			if (terminal === "failed") return { surface: false, score: false, controls: false };
 			// A stage can contain more than one validation that observes the same
 			// interactive surface. Reuse the latest layered visual fact instead of
@@ -2382,7 +2387,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			// product surface. The current runtime target remains the independent
 			// structural channel, so this does not turn vision into an action gate.
 			const latest = existing.at(-1);
-			if (latest && browserVisualProductSurfaceAdmitted(latest, target.stateful, target.focusable)) {
+			if (!busyNow && latest && browserVisualProductSurfaceAdmitted(latest, target.stateful, target.focusable)) {
 				return { surface: true, score: true, controls: true };
 			}
 			if (browserVisualFinalObservationDue({
@@ -2394,12 +2399,12 @@ async function waitForPlayableSurfaceWithVisualObservation(
 				// plus the mandatory independent terminal confirmation.
 				nextCaptureAt = Date.now() + config.intervalMS * browserVisualNextDelayMultiplier(observed.decision);
 				const updatedTerminal = browserVisualTerminalWithStructuralEvidence(session.visionVerdictsByNodeID.get(stage.node_id) || [], config.maxCalls);
-				if (updatedTerminal === "succeeded") return { surface: true, score: target.stateful, controls: target.focusable };
+				if (updatedTerminal === "succeeded" && !busyNow) return { surface: true, score: target.stateful, controls: target.focusable };
 				if (updatedTerminal === "failed") return { surface: false, score: false, controls: false };
-				if (browserVisualProductSurfaceAdmitted(observed, target.stateful, target.focusable)) {
+				if (!busyNow && browserVisualProductSurfaceAdmitted(observed, target.stateful, target.focusable)) {
 					return { surface: true, score: true, controls: true };
 				}
-				if (observed.decision === "unknown" && surfaceChanged && target.stateful && target.focusable) {
+				if (!busyNow && observed.decision === "unknown" && surfaceChanged && target.stateful && target.focusable) {
 					return { surface: true, score: true, controls: true };
 				}
 			}
@@ -3304,14 +3309,44 @@ async function pageStillBusy(page: any): Promise<boolean> {
       if (style?.display === "none" || style?.visibility === "hidden" || Number(style?.opacity) === 0 || !rect || rect.width <= 0 || rect.height <= 0) return "";
       return String(element.getAttribute?.("aria-label") || element.innerText || element.textContent || "").trim().toLowerCase();
     };
+	const lifecycleTextBusy = (value: string): boolean => {
+		const text = String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+		if (/\b(running|in progress|generating|building|executing|processing)\b|执行中|进行中|生成中|构建中|处理中|正在执行|正在生成|正在构建/.test(text)) return true;
+		for (const match of text.matchAll(/(?:^|\s)(\d{1,3})\s*\/\s*(\d{1,3})\s*(?:completed|done|complete|已完成|完成)(?=$|\s|[，。,:：])/g)) {
+			if (Number(match[2]) > 0 && Number(match[1]) >= 0 && Number(match[1]) < Number(match[2])) return true;
+		}
+		for (const match of text.matchAll(/(?:^|\s)(\d{1,3})\s+of\s+(\d{1,3})\s+(?:steps?\s+)?(?:completed|done)(?=$|\s|[,.])/g)) {
+			if (Number(match[2]) > 0 && Number(match[1]) >= 0 && Number(match[1]) < Number(match[2])) return true;
+		}
+		return false;
+	};
     const lifecycleNodes = Array.from(pageDocument.querySelectorAll?.('progress,[role="progressbar"],[role="status"],[aria-live],button,[role="button"]') || []).slice(0, 160) as any[];
     const activeLifecycleSignal = lifecycleNodes.some((element) => {
       const text = visibleText(element);
       if (!text) return element.matches?.('progress:not([value]),[role="progressbar"]') || false;
-      return /\b(running|in progress|generating|building|executing)\b|执行中|生成中|构建中|处理中|正在执行|正在生成|正在构建/.test(text);
+		  return lifecycleTextBusy(text);
     });
-    return documentBusy || ariaBusy || activeLifecycleSignal;
+	const bodyText = String(pageDocument.body?.innerText || "").replace(/\s+/g, " ").slice(0, 48_000);
+	return documentBusy || ariaBusy || activeLifecycleSignal || lifecycleTextBusy(bodyText);
   }).catch(() => false);
+}
+
+export function businessLifecycleTextBusy(value: string): boolean {
+	const text = String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+	if (/\b(running|in progress|generating|building|executing|processing)\b|执行中|进行中|生成中|构建中|处理中|正在执行|正在生成|正在构建/.test(text)) return true;
+	const fractions = text.matchAll(/(?:^|\s)(\d{1,3})\s*\/\s*(\d{1,3})\s*(?:completed|done|complete|已完成|完成)(?=$|\s|[，。,:：])/g);
+	for (const match of fractions) {
+		const current = Number(match[1]);
+		const total = Number(match[2]);
+		if (Number.isFinite(current) && Number.isFinite(total) && total > 0 && current >= 0 && current < total) return true;
+	}
+	const wordFractions = text.matchAll(/(?:^|\s)(\d{1,3})\s+of\s+(\d{1,3})\s+(?:steps?\s+)?(?:completed|done)(?=$|\s|[,.])/g);
+	for (const match of wordFractions) {
+		const current = Number(match[1]);
+		const total = Number(match[2]);
+		if (Number.isFinite(current) && Number.isFinite(total) && total > 0 && current >= 0 && current < total) return true;
+	}
+	return false;
 }
 
 function numericParameter(parameters: Record<string, unknown> | undefined, key: string, fallback: number, min: number, max: number): number {

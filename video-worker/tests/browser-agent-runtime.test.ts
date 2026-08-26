@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairTargetScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairTargetScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -35,11 +35,19 @@ describe("browser visual polling terminal evidence", () => {
 	});
 
 	it("hands a visible product surface to deterministic interaction proof", () => {
-		const observation = { ...verdict("in_progress", .9), product_surface_visible: true, generation_covering_surface: false };
+		const observation = { ...verdict("succeeded", .9), product_surface_visible: true, generation_covering_surface: false };
 		expect(browserVisualProductSurfaceAdmitted(observation, true, true)).toBe(true);
 		expect(browserVisualProductSurfaceAdmitted(observation, true, false)).toBe(true);
 		expect(browserVisualProductSurfaceAdmitted({ ...observation, generation_covering_surface: true }, true, true)).toBe(false);
 		expect(browserVisualProductSurfaceAdmitted(observation, false, true)).toBe(false);
+		expect(browserVisualProductSurfaceAdmitted({ ...observation, decision: "in_progress" }, true, true)).toBe(false);
+	});
+
+	it("keeps partial generic task progress in the build-running state", () => {
+		expect(businessLifecycleTextBusy("2/5 已完成")).toBe(true);
+		expect(businessLifecycleTextBusy("2 of 5 steps completed")).toBe(true);
+		expect(businessLifecycleTextBusy("5/5 已完成")).toBe(false);
+		expect(businessLifecycleTextBusy("release date 8/27")).toBe(false);
 	});
 
 	it("spends the final visual call only after the business process becomes idle", () => {

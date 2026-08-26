@@ -26,8 +26,13 @@ func (s *Service) prepareAdaptiveSameEntityProductRepair(ctx context.Context, pr
 		result = *state.DesktopCloudRun.ResultPackage
 		err = nil
 	}
-	if err != nil || result.Status == model.RecordingResultStatusFailed {
-		return ProductRunPrepareResult{}, errors.New("same-entity repair requires a completed source result")
+	if err != nil {
+		return ProductRunPrepareResult{}, errors.New("same-entity repair requires a materialized source result")
+	}
+	if result.Status == model.RecordingResultStatusFailed {
+		if _, repairable := adaptiveFailedCapabilityScore(request, result); !repairable {
+			return ProductRunPrepareResult{}, errors.New("same-entity repair requires a completed result or a verified interaction-stage failure")
+		}
 	}
 	observed := s.adaptiveObservedSuccessorEvidence(ctx, projectID, state, result)
 	entityURL := strings.TrimSpace(observed.URL)
@@ -141,9 +146,9 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, missing []string) 
 	if len(selected) == 0 {
 		return ""
 	}
-	value := "请修复当前项目，使以下要求能够实际使用：" + strings.Join(selected, "；") + "。保留现有功能和视觉风格，直接更新当前项目。"
-	if len([]rune(value)) > 600 {
-		value = string([]rune(value)[:600])
+	value := "请继续完成并修复当前项目，使以下要求能够实际使用：" + strings.Join(selected, "；") + "。保留已有内容，直接更新当前项目。"
+	if len([]rune(value)) > 280 {
+		value = string([]rune(value)[:279]) + "。"
 	}
 	return value
 }

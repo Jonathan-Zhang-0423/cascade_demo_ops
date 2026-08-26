@@ -461,8 +461,37 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 		return &experiment.AdapterError{Code: "direct_result_unavailable", Phase: "result_materialization", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
 	}
 	if result.Status == model.RecordingResultStatusFailed {
+		if score, repairable := adaptiveFailedCapabilityScore(request, result); repairable {
+			downloads, downloadErr := a.downloadDirectArtifacts(ctx, projectID, jobID, status.Artifacts)
+			if downloadErr != nil {
+				return &experiment.AdapterError{Code: "artifact_materialization_failed", Phase: "result_materialization", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: downloadErr}
+			}
+			evidenceRefs := resultEvidenceRefs(result)
+			history = append(append([]closedLoopCaptureBatch{}, history...), closedLoopCaptureBatch{Result: result, Downloads: downloads})
+			scoreEvidence := firstNonEmptyString(result.ResultID, jobID)
+			summary := &experiment.CapabilitySummary{CoreScore: score.CoreScore, EnhancementScore: score.EnhancementScore, TotalScore: score.TotalScore, CorePassed: score.CorePassed, EligibleForFilm: score.EligibleForFilm, Missing: append([]string{}, score.Missing...)}
+			if err := emit(experiment.LegExecutionUpdate{Kind: "capability_scored", Summary: "必需产品交互未通过，已从真实阶段结果生成失败能力报告", EvidenceRefs: []string{scoreEvidence}, CapabilityScore: summary}); err != nil {
+				return err
+			}
+			if request.ProductRepairRounds >= 3 {
+				return &experiment.AdapterError{Code: "product_repair_budget_exhausted", Phase: "product_verification", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: evidenceRefs}
+			}
+			directive := model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "surface-validation", FailureClass: "required_product_criteria_failed", TargetModule: "execution-capture", Action: "submit_product_repair", ArtifactRefs: []string{scoreEvidence}, Attempt: request.ProductRepairRounds + 1, MaxAttempts: 3, ResumePhase: "product_verification"}
+			if err := emit(experiment.LegExecutionUpdate{Kind: "repair_directive", Summary: "必需产品能力未通过；只在本次绑定实体内提交简短修复要求", EvidenceRefs: []string{scoreEvidence}, RepairDirective: &directive}); err != nil {
+				return err
+			}
+			if err := emit(experiment.LegExecutionUpdate{Kind: "artifacts", Artifacts: experimentArtifactRefs(downloads), Summary: "失败轮次的事实录制已保留；同实体修复不会丢失原始链路"}); err != nil {
+				return err
+			}
+			return a.executeSameEntityProductRepair(ctx, request, projectID, jobID, score, history, emit)
+		}
 		if adaptiveObservationFailureShouldDefer(request, result) {
-			return &experiment.AdapterError{Code: "confidence_deferred", Phase: "confidence_deferred", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: resultEvidenceRefs(result)}
+			state := experiment.RunStateWaitingInput
+			phase := "confidence_deferred"
+			if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
+				state, phase = experiment.RunStateWaitingExternal, "build_observing"
+			}
+			return &experiment.AdapterError{Code: "confidence_deferred", Phase: phase, State: state, Retryable: true, EvidenceRefs: resultEvidenceRefs(result)}
 		}
 		return &experiment.AdapterError{Code: "explicit_terminal_build_failure", Phase: "terminal_failed", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: resultEvidenceRefs(result)}
 	}
@@ -665,6 +694,53 @@ func adaptiveObservationFailureShouldDefer(request experiment.LegExecutionReques
 	return false
 }
 
+// adaptiveFailedCapabilityScore converts an actual interaction-stage failure
+// into the same criterion-driven score used by a completed proof session. It
+// never guesses that a missing stage passed: only persisted passed StepResults
+// receive credit. Passive surface uncertainty remains a waiting-external case
+// and is deliberately not turned into a product edit.
+func adaptiveFailedCapabilityScore(request experiment.LegExecutionRequest, result model.RecordingResultPackage) (model.CapabilityScore, bool) {
+	if request.HarnessProfile != experiment.HarnessProfileAdaptiveBusinessV2 || result.FailureDiagnostic == nil {
+		return model.CapabilityScore{}, false
+	}
+	code := strings.TrimSpace(result.FailureDiagnostic.Error.Code)
+	if code != "outcome_verification_failed" && code != "browser_agent_observation_failed" {
+		return model.CapabilityScore{}, false
+	}
+	failedNodeID := strings.TrimSpace(result.FailureDiagnostic.FailedNodeID)
+	failedStepID := strings.TrimPrefix(failedNodeID, "business_stage_contract_experiment_interaction_")
+	if failedStepID == failedNodeID || failedStepID == "" {
+		return model.CapabilityScore{}, false
+	}
+	passed := map[string]bool{}
+	for _, step := range result.StepResults {
+		if strings.EqualFold(strings.TrimSpace(step.Status), "passed") {
+			passed[strings.TrimPrefix(strings.TrimSpace(step.NodeID), "business_stage_contract_experiment_interaction_")] = true
+		}
+	}
+	results := make([]model.CapabilityResult, 0, len(request.InteractionPlan.Steps))
+	foundFailed, failedIsPassive := false, false
+	for _, step := range request.InteractionPlan.Steps {
+		if step.StepID == failedStepID {
+			foundFailed = true
+			failedIsPassive = step.ReplayPolicy == experiment.ReplayObserveOnly
+		}
+		layer := strings.TrimSpace(step.CapabilityLayer)
+		if layer == "" {
+			layer = "core"
+		}
+		weight := step.CapabilityScore
+		if weight <= 0 {
+			weight = 1
+		}
+		results = append(results, model.CapabilityResult{ID: step.StepID, Layer: layer, Score: weight, Passed: passed[step.StepID], Evidence: resultEvidenceRefs(result)})
+	}
+	if !foundFailed || failedIsPassive || len(results) == 0 {
+		return model.CapabilityScore{}, false
+	}
+	return model.ScoreCapabilities(results), true
+}
+
 func readAdaptiveCapabilityScore(downloads []CloudDeliverableDownloadResult) (*model.CapabilityScore, string, error) {
 	var latest *model.CapabilityScore
 	evidence := ""
@@ -766,8 +842,20 @@ func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context,
 			return status, nil
 		case "failed":
 			if isAdaptiveExperimentHarness(request.HarnessProfile) {
-				if result, resultErr := a.service.GetDirectResult(ctx, projectID, jobID); resultErr == nil && adaptiveObservationFailureShouldDefer(request, result) {
-					return status, &experiment.AdapterError{Code: "confidence_deferred", Phase: "confidence_deferred", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: resultEvidenceRefs(result)}
+				if result, resultErr := a.service.GetDirectResult(ctx, projectID, jobID); resultErr == nil {
+					if _, repairable := adaptiveFailedCapabilityScore(request, result); repairable {
+						// Let completeDirectLeg materialize the failed proof artifacts and
+						// route a bounded repair into the already-bound entity.
+						return status, nil
+					}
+					if adaptiveObservationFailureShouldDefer(request, result) {
+						state := experiment.RunStateWaitingInput
+						phase := "confidence_deferred"
+						if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
+							state, phase = experiment.RunStateWaitingExternal, "build_observing"
+						}
+						return status, &experiment.AdapterError{Code: "confidence_deferred", Phase: phase, State: state, Retryable: true, EvidenceRefs: resultEvidenceRefs(result)}
+					}
 				}
 			}
 			return status, &experiment.AdapterError{Code: firstNonEmptyString(status.BlockingErrorCode, "explicit_terminal_build_failure"), Phase: "terminal_failed", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: []string{jobID}}
