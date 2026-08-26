@@ -1,4 +1,4 @@
 interface:
   display_name: "Director Generated Shots"
   short_description: "Design safe H3 and Seedance chapter packaging"
-  default_prompt: "Use $director-generated-shots to design provider-neutral presentation shots and retry feedback for the supplied factual story plan."
+  default_prompt: "Use $director-generated-shots to design text-free H3 and Seedance packaging with one bounded regeneration."

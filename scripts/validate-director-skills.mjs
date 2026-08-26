@@ -23,7 +23,7 @@ for (const entry of readdirSync(root, { withFileTypes: true })) {
   if (!skill.startsWith(`---\nname: ${skillID}\n`) && !skill.startsWith(`---\r\nname: ${skillID}\r\n`)) throw new Error(`${skillID} has invalid frontmatter`);
   if (/\bTODO\b/.test(skill)) throw new Error(`${skillID} still contains TODO content`);
   const runtime = JSON.parse(readFileSync(runtimePath, "utf8"));
-  if (runtime.schema_version !== "demoops.director_skill_runtime.v1" || runtime.skill_id !== skillID || runtime.version !== "1.1.0") throw new Error(`${skillID} runtime identity is invalid`);
+  if (runtime.schema_version !== "demoops.director_skill_runtime.v1" || runtime.skill_id !== skillID || runtime.version !== "2.0.0") throw new Error(`${skillID} runtime identity is invalid`);
   if (!Array.isArray(runtime.inputs) || runtime.inputs.length === 0 || !Array.isArray(runtime.outputs) || runtime.outputs.length === 0) throw new Error(`${skillID} runtime IO is incomplete`);
   const machineText = JSON.stringify(runtime).toLowerCase();
   for (const forbidden of ["cascadeai.cn", "2048", "tetris", "俄罗斯方块", "data-testid", "preview-iframe"]) if (machineText.includes(forbidden)) throw new Error(`${skillID} runtime contains site-specific token ${forbidden}`);

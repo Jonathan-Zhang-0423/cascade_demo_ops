@@ -1,4 +1,4 @@
 interface:
   display_name: "Director Evidence Story"
-  short_description: "Turn verified cross-site evidence into factual story beats"
-  default_prompt: "Use $director-evidence-story to convert the supplied verified evidence digest into a factual, site-neutral demo story plan."
+  short_description: "Turn public evidence into a complete factual demo story"
+  default_prompt: "Use $director-evidence-story to plan a complete factual demo from approved public facts and evidence-bound media."

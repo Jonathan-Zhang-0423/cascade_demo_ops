@@ -54,7 +54,9 @@ func (s *Service) PlanDirectorGeneratedShots(ctx context.Context, jobID string, 
 	if automatedState {
 		plan.AutomationProfile = job.AutomationProfile
 		plan.EvidenceDigestID = job.EvidenceDigest.DigestID
-		plan.StoryPlan = storyPlan
+		if plan.StoryPlan == nil {
+			return model.FinalFilmJob{}, errors.New("automated Director omitted its story and material decisions")
+		}
 	}
 	return s.SubmitDirectorPlan(ctx, jobID, expectedRevision, plan)
 }

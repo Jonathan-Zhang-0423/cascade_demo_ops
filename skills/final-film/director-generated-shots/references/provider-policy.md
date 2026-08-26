@@ -5,6 +5,6 @@
 - duration: 4 seconds
 - aspect ratio: 16:9
 - maximum attempts per slot: 2
-- failure: continue with factual track
+- second terminal failure: `provider_revision_required`; block delivery
 
-Generated shots are non-authoritative and remain pending final-output human review.
+Generated shots are non-authoritative and remain pending final-output human review. Reference media is a stable, text-free palette board derived from factual colors, never a product UI screenshot.

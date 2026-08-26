@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -83,5 +84,81 @@ func TestFinalFilmDirectorPlannerRejectsOutOfVocabularyRecipe(t *testing.T) {
 	}
 	if _, err := planner.PlanGeneratedShots(context.Background(), finalfilm.DirectorPlanRequest{JobID: "job", Constraints: constraints, Intents: []model.PresentationGenerationIntent{intent}, Catalog: catalog, Baseline: baseline}); err == nil {
 		t.Fatal("expected out-of-vocabulary Director recipe to be rejected")
+	}
+}
+
+func TestAutomatedDirectorSafeEvidenceOmitsExecutionIdentifiers(t *testing.T) {
+	digest := model.DirectorEvidenceDigest{SourceDurationMS: 120_000, WaitRanges: []model.MillisecondRange{{20_000, 80_000}}, VisualStyle: model.DirectorVisualStyleEvidence{DominantColors: []string{"#112244"}}, Audio: model.DirectorAudioEvidence{SourceAudioPresent: true}}
+	for index, chapter := range model.RequiredDemoChapters() {
+		factID := "public_" + chapter
+		fact := model.PublicNarrativeFact{SchemaVersion: model.PublicNarrativeFactSchemaVersion, FactID: factID, Chapter: chapter, ApprovedCaptionVariants: []string{"公开字幕"}, VisibleEvidenceRefs: []string{"artifact_" + chapter}, SourceKind: "visible_ui"}
+		digest.PublicFacts = append(digest.PublicFacts, fact)
+		digest.RequiredSteps = append(digest.RequiredSteps, model.DirectorEvidenceStep{StepID: "internal_node_" + chapter, Order: index + 1, Chapter: chapter, PublicNarrativeFactID: factID, SourceRangeMS: model.MillisecondRange{index * 10_000, (index + 1) * 10_000}, ArtifactIDs: []string{"artifact_" + chapter}})
+	}
+	safe, err := compileFinalFilmDirectorSafeEvidence(&digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(safe)
+	text := string(raw)
+	for _, forbidden := range []string{"internal_node_", "step_id", "observed_state", "expected_outcome", "selector"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("Director safe evidence leaked %q: %s", forbidden, text)
+		}
+	}
+}
+
+func TestAutomatedDirectorStoryPreservesPublicOrderAndOnlyCompressesWait(t *testing.T) {
+	digest := &model.DirectorEvidenceDigest{DigestID: "digest", SourceDurationMS: 120_000}
+	draft := &finalFilmDirectorStoryDraft{TargetDurationMS: 105_000, BackgroundMode: "light_electronic_music_with_source_interaction_audio", DecisionLog: []string{"preserve causal order"}}
+	for index, chapter := range model.RequiredDemoChapters() {
+		factID := "fact_" + chapter
+		digest.PublicFacts = append(digest.PublicFacts, model.PublicNarrativeFact{SchemaVersion: model.PublicNarrativeFactSchemaVersion, FactID: factID, Chapter: chapter, ApprovedCaptionVariants: []string{"公开字幕"}, VisibleEvidenceRefs: []string{"artifact_" + chapter}, SourceKind: "visible_ui"})
+		digest.RequiredSteps = append(digest.RequiredSteps, model.DirectorEvidenceStep{StepID: "server_step_" + chapter, Order: index + 1, Chapter: chapter, PublicNarrativeFactID: factID, SourceRangeMS: model.MillisecondRange{index * 12_000, (index + 1) * 12_000}, ArtifactIDs: []string{"artifact_" + chapter}})
+		speed := float64(1)
+		if chapter == "build_wait" {
+			speed = 8
+		}
+		draft.Facts = append(draft.Facts, struct {
+			PublicFactID string  `json:"public_fact_id"`
+			Speed        float64 `json:"speed"`
+			Reason       string  `json:"reason"`
+		}{factID, speed, "preserve visible evidence"})
+	}
+	purposes := []string{"intro", "section_divider", "outro"}
+	intents := []model.PresentationGenerationIntent{}
+	for _, purpose := range purposes {
+		intent, _ := model.PresentationGenerationIntentDefaults("intent_"+purpose, purpose, nil)
+		intents = append(intents, intent)
+	}
+	draft.Generated = append(draft.Generated,
+		struct {
+			IntentID                string `json:"intent_id"`
+			Placement               string `json:"placement"`
+			AnchorAfterPublicFactID string `json:"anchor_after_public_fact_id,omitempty"`
+			Reason                  string `json:"reason"`
+		}{intents[0].IntentID, "before_first_fact", "", "opening"},
+		struct {
+			IntentID                string `json:"intent_id"`
+			Placement               string `json:"placement"`
+			AnchorAfterPublicFactID string `json:"anchor_after_public_fact_id,omitempty"`
+			Reason                  string `json:"reason"`
+		}{intents[1].IntentID, "after_public_fact", "fact_build_wait", "chapter bridge"},
+		struct {
+			IntentID                string `json:"intent_id"`
+			Placement               string `json:"placement"`
+			AnchorAfterPublicFactID string `json:"anchor_after_public_fact_id,omitempty"`
+			Reason                  string `json:"reason"`
+		}{intents[2].IntentID, "after_last_fact", "", "closing"},
+	)
+	fallback := &model.DirectorStoryPlan{SkillVersions: map[string]string{"a": "1", "b": "1", "c": "1", "d": "1", "e": "1"}}
+	story, err := compileAutomatedDirectorStory(draft, finalfilm.DirectorPlanRequest{Intents: intents, EvidenceDigest: digest, StoryPlan: fallback})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, segment := range story.Timeline {
+		if segment.Kind == "fact" && segment.SourceStepID != "server_step_build_wait" && segment.Speed != 1 {
+			t.Fatalf("non-wait fact was altered: %+v", segment)
+		}
 	}
 }

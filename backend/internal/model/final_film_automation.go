@@ -134,20 +134,21 @@ type DirectorAudioPlan struct {
 }
 
 type CandidateQualityReport struct {
-	SchemaVersion string    `json:"schema_version"`
-	ReportID      string    `json:"report_id"`
-	IntentID      string    `json:"intent_id"`
-	CandidateID   string    `json:"candidate_id,omitempty"`
-	Provider      string    `json:"provider"`
-	Attempt       int       `json:"attempt"`
-	TechnicalPass bool      `json:"technical_pass"`
-	TemporalPass  bool      `json:"temporal_pass"`
-	TextPass      bool      `json:"text_pass"`
-	ContentPass   bool      `json:"content_pass"`
-	Score         float64   `json:"score"`
-	Findings      []string  `json:"findings,omitempty"`
-	Decision      string    `json:"decision"`
-	CheckedAt     time.Time `json:"checked_at"`
+	SchemaVersion    string    `json:"schema_version"`
+	ReportID         string    `json:"report_id"`
+	IntentID         string    `json:"intent_id"`
+	CandidateID      string    `json:"candidate_id,omitempty"`
+	Provider         string    `json:"provider"`
+	Attempt          int       `json:"attempt"`
+	TechnicalPass    bool      `json:"technical_pass"`
+	TemporalPass     bool      `json:"temporal_pass"`
+	TextPass         bool      `json:"text_pass"`
+	ContentPass      bool      `json:"content_pass"`
+	Score            float64   `json:"score"`
+	Findings         []string  `json:"findings,omitempty"`
+	Decision         string    `json:"decision"`
+	CheckedAt        time.Time `json:"checked_at"`
+	ContactSheetPath string    `json:"contact_sheet_path,omitempty"`
 }
 
 type FinalFilmReviewPackage struct {
@@ -190,9 +191,9 @@ func DefaultFinalFilmAutomationPolicy() FinalFilmAutomationPolicy {
 			MaxAttemptsPerSlot: 2, FailurePolicy: "block_provider_revision_required",
 		},
 		SkillVersions: map[string]string{
-			"director-evidence-story": "1.1.0", "director-generated-shots": "1.1.0",
-			"director-timeline-compose": "1.1.0", "director-quality-gate": "1.1.0",
-			"final-film-director-harness": "1.1.0",
+			"director-evidence-story": "2.0.0", "director-generated-shots": "2.0.0",
+			"director-timeline-compose": "2.0.0", "director-quality-gate": "2.0.0",
+			"final-film-director-harness": "2.0.0",
 		},
 		MaxProviderCalls: 6,
 	}

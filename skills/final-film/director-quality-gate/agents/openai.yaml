@@ -1,4 +1,4 @@
 interface:
   display_name: "Director Quality Gate"
-  short_description: "Score candidates, retry once, then fall back safely"
-  default_prompt: "Use $director-quality-gate to evaluate candidate reports and decide accept, one retry, or factual-track fallback."
+  short_description: "Gate technical, temporal, text, and content quality"
+  default_prompt: "Use $director-quality-gate to batch-review generated contact sheets and route failed candidates or final films."
