@@ -35,7 +35,7 @@ func (f *browserVisualFallbackTestLLM) GenerateMultimodalText(_ context.Context,
 	if !request.TextMode {
 		return "", nil, errors.New("visual fallback did not request text mode")
 	}
-	return "DECISION=SUCCEEDED\nCONFIDENCE=96%\nSUMMARY=The requested product is complete.\nEVIDENCE_1=Rendered primary surface\nEVIDENCE_2=Two requested controls are visible\nBLOCKING_REASON=NONE", &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "glm-4.5v", Task: task}, nil
+	return "DECISION=SUCCEEDED\nCONFIDENCE=96%\nPRODUCT_SURFACE_VISIBLE=TRUE\nGENERATION_COVERING_SURFACE=FALSE\nSUMMARY=The requested product is complete.\nEVIDENCE_1=Rendered primary surface\nEVIDENCE_2=Two requested controls are visible\nBLOCKING_REASON=NONE", &llm.CallTrace{Provider: config.ModelProviderGLM, Model: "glm-4.5v", Task: task}, nil
 }
 
 func (f *browserVisualTestLLM) GenerateMultimodal(_ context.Context, task config.ModelTask, request llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
@@ -146,6 +146,9 @@ func TestBrowserVisualObserverUsesBoundedLineFallbackAfterJSONShapeFailure(t *te
 	}
 	if result.Decision != "succeeded" || result.ProviderCalls != 2 || len(result.VisibleEvidence) != 2 {
 		t.Fatalf("bounded line fallback was not normalized: %+v", result)
+	}
+	if !result.ProductSurfaceVisible || result.GenerationCoveringSurface {
+		t.Fatalf("bounded fallback lost layered surface facts: %+v", result)
 	}
 	if client.multimodalCalls != 1 || client.textCalls != 1 {
 		t.Fatalf("large-budget fallback calls=%d/%d", client.multimodalCalls, client.textCalls)

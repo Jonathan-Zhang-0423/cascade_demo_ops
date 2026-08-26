@@ -340,6 +340,8 @@ export type BrowserVisualObservation = {
 	summary: string;
 	visible_evidence?: string[];
 	blocking_reason?: string;
+	product_surface_visible?: boolean;
+	generation_covering_surface?: boolean;
 	model_trace?: Record<string, unknown>;
 	provider_calls_used?: number;
 	observed_at: string;
@@ -2041,6 +2043,12 @@ export function browserVisualTerminalWithStructuralEvidence(observations: Browse
 	return confirmedBrowserVisualTerminalDecision(observations, minimumConfidence);
 }
 
+export function browserVisualProductSurfaceAdmitted(observation: BrowserVisualObservation, stateful: boolean, focusable: boolean, minimumConfidence = 0.85): boolean {
+	return observation.decision !== "failed" && observation.confidence >= minimumConfidence
+		&& observation.product_surface_visible === true && observation.generation_covering_surface !== true
+		&& stateful && focusable;
+}
+
 export function browserVisualObservationAllocation(maxCalls: number, requireVisualTerminal: boolean): { heartbeatLimit: number; terminalReserve: number } {
 	const bounded = Math.max(1, Math.min(12, Math.trunc(Number(maxCalls) || 1)));
 	const terminalReserve = requireVisualTerminal ? Math.max(0, bounded - 1) : 0;
@@ -2218,6 +2226,9 @@ async function waitForPlayableSurfaceWithVisualObservation(
 				const updatedTerminal = browserVisualTerminalWithStructuralEvidence(session.visionVerdictsByNodeID.get(stage.node_id) || [], config.maxCalls);
 				if (updatedTerminal === "succeeded") return { surface: true, score: target.stateful, controls: target.focusable };
 				if (updatedTerminal === "failed") return { surface: false, score: false, controls: false };
+				if (browserVisualProductSurfaceAdmitted(observed, target.stateful, target.focusable)) {
+					return { surface: true, score: true, controls: true };
+				}
 				if (observed.decision === "unknown" && surfaceChanged && target.stateful && target.focusable) {
 					return { surface: true, score: true, controls: true };
 				}
