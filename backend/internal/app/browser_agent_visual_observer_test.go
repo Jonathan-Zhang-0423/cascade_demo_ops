@@ -100,7 +100,7 @@ func TestBrowserVisualObservationDoesNotFailOnIncompletePage(t *testing.T) {
 
 func TestBrowserVisualGateDefersInteractionAndPolishToLayeredProof(t *testing.T) {
 	for _, prompt := range []string{browserVisualGateSystemPrompt, browserVisualLineGateSystemPrompt} {
-		if !strings.Contains(prompt, "screenshot cannot prove or disprove interactivity") || !strings.Contains(prompt, "Do not score visual polish") {
+		if !strings.Contains(prompt, "screenshot cannot prove or disprove interactivity") || !strings.Contains(prompt, "Do not score visual polish") || !strings.Contains(prompt, "initial data states") {
 			t.Fatalf("visual Gate prompt collapsed later proof layers into preview admission: %q", prompt)
 		}
 		if !strings.Contains(prompt, "at least two concrete matching identity, status, data, or control elements") {
