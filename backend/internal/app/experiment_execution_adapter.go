@@ -57,6 +57,9 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 			return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 		}
 		if err == nil && status.Status == "awaiting_credentials" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+			if directStatusHasRecoveredStageLog(status) {
+				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
+			}
 			if _, restoreErr := a.service.ReuploadDirectCredential(ctx, projectID, jobID); restoreErr != nil {
 				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 			}
@@ -82,6 +85,9 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 			}
 			if statusErr == nil && status.Status == "awaiting_credentials" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+				if directStatusHasRecoveredStageLog(status) {
+					return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
+				}
 				if _, restoreErr := a.service.ReuploadDirectCredential(ctx, projectID, jobID); restoreErr != nil {
 					return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 				}
@@ -592,6 +598,9 @@ func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context,
 		case "canceled", "expired":
 			return status, &experiment.AdapterError{Code: firstNonEmptyString(status.BlockingErrorCode, "explicit_terminal_build_failure"), Phase: "terminal_failed", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: []string{jobID}}
 		case "awaiting_credentials":
+			if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 && directStatusHasRecoveredStageLog(status) {
+				return status, &experiment.AdapterError{Code: "observed_state_reconciliation_ready", Phase: "reconcile_observed_state", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: []string{jobID}}
+			}
 			if _, err := a.service.ReuploadDirectCredential(ctx, projectID, jobID); err != nil {
 				return status, &experiment.AdapterError{Code: "credential_restore_failed", Phase: "waiting_input", State: experiment.RunStateWaitingInput, Retryable: true, Cause: err}
 			}
@@ -615,6 +624,15 @@ func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context,
 		case <-time.After(a.pollInterval):
 		}
 	}
+}
+
+func directStatusHasRecoveredStageLog(status model.DirectJobStatus) bool {
+	for _, artifact := range status.Artifacts {
+		if artifact.Kind == "browser_agent_stage_event_log" && artifact.ArtifactID != "" && artifact.SizeBytes > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func directObservationTransportTimeout(request experiment.LegExecutionRequest) time.Duration {

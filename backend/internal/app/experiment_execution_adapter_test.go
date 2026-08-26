@@ -269,6 +269,17 @@ func TestAdaptiveResumePrefersLatestReconciliationJobWithoutReplayingEffect(t *t
 	}
 }
 
+func TestRecoveredStageLogTriggersReconciliationInsteadOfCredentialReplay(t *testing.T) {
+	status := model.DirectJobStatus{Status: "awaiting_credentials", Artifacts: []model.DirectArtifact{{ArtifactID: "events", Kind: "browser_agent_stage_event_log", SizeBytes: 128}}}
+	if !directStatusHasRecoveredStageLog(status) {
+		t.Fatal("bounded recovery evidence was not recognized")
+	}
+	status.Artifacts[0].SizeBytes = 0
+	if directStatusHasRecoveredStageLog(status) {
+		t.Fatal("empty recovery evidence was accepted")
+	}
+}
+
 func interactionPredicatesContain(values []model.InteractionPredicate, kind string) bool {
 	for _, value := range values {
 		if value.Kind == kind {

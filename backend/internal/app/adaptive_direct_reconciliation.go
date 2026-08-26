@@ -91,15 +91,19 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	if err := normalizeAdaptiveReconciliationResume(graph, result.FailureDiagnostic.CurrentURL, directDiagnosticRefs(*result.FailureDiagnostic)); err != nil {
 		return adaptiveDirectReconciliationBuild{}, err
 	}
-	pendingContinuation, err := insertPendingAdaptiveContinuation(graph, repairState.WorkflowGraph, observed.Events, result.FailureDiagnostic.CurrentURL, result.FailureDiagnostic.FailedNodeID)
-	if err != nil {
-		return adaptiveDirectReconciliationBuild{}, err
-	}
-	if !pendingContinuation && sourcePackage != nil && sourcePackage.ExecutableScriptBundle != nil && sourcePackage.ExecutableScriptBundle.RepairLineage != nil {
+	pendingContinuation := false
+	// Prefer the earliest approved continuation from the original package. A
+	// repair package may retain only its later follow-up; choosing that node
+	// would correctly avoid duplicate input but could never answer the original
+	// conversational confirmation.
+	if sourcePackage != nil && sourcePackage.ExecutableScriptBundle != nil && sourcePackage.ExecutableScriptBundle.RepairLineage != nil {
 		parentJobID := strings.TrimSpace(sourcePackage.ExecutableScriptBundle.RepairLineage.SourceCloudJobID)
 		if parentJobID != "" && parentJobID != strings.TrimSpace(sourceJobID) {
 			parentPackage, parentPackageErr := s.GetDirectSourcePackage(ctx, projectID, parentJobID)
 			parentResult, parentResultErr := s.getDirectHistoricalResult(ctx, projectID, parentJobID)
+			if parentPackageErr == nil && parentResultErr != nil {
+				parentResult, parentResultErr = s.adaptiveInterruptedResultFromStageLog(ctx, projectID, parentJobID, state, parentPackage)
+			}
 			if parentPackageErr == nil && parentResultErr == nil {
 				parentGraph, parentGraphErr := hydrateAdaptiveSourceGraph(parentPackage)
 				if parentGraphErr == nil {
@@ -110,6 +114,12 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 					}
 				}
 			}
+		}
+	}
+	if !pendingContinuation {
+		pendingContinuation, err = insertPendingAdaptiveContinuation(graph, repairState.WorkflowGraph, observed.Events, result.FailureDiagnostic.CurrentURL, result.FailureDiagnostic.FailedNodeID)
+		if err != nil {
+			return adaptiveDirectReconciliationBuild{}, err
 		}
 	}
 	if sourcePackage != nil {
@@ -177,9 +187,13 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 // expired. This value is never presented as a completed server result; it only
 // drives an observe/verify continuation with a fresh Direct package.
 func (s *Service) adaptiveInterruptedResultFromStageLog(ctx context.Context, projectID, sourceJobID string, state *orchestrator.CascadeState, source model.ClientExecutionPackage) (model.RecordingResultPackage, error) {
-	status, err := s.GetDirectExecutionStatus(ctx, projectID, sourceJobID)
+	var status model.DirectJobStatus
+	err := s.directProjectRead(ctx, projectID, "/v1/direct/jobs/"+url.PathEscape(sourceJobID), "job_status", &status)
 	if err != nil {
 		return model.RecordingResultPackage{}, err
+	}
+	if status.JobID != sourceJobID {
+		return model.RecordingResultPackage{}, errors.New("interrupted Direct status job binding mismatch")
 	}
 	if status.Status != "awaiting_credentials" {
 		return model.RecordingResultPackage{}, errors.New("interrupted Direct job is not awaiting credential recovery")
@@ -250,7 +264,8 @@ func (s *Service) adaptiveObservedSuccessorEvidence(ctx context.Context, project
 		}
 	}
 	if descriptor == nil {
-		if status, err := s.GetDirectExecutionStatus(ctx, projectID, result.CloudJobID); err == nil {
+		var status model.DirectJobStatus
+		if err := s.directProjectRead(ctx, projectID, "/v1/direct/jobs/"+url.PathEscape(result.CloudJobID), "job_status", &status); err == nil && status.JobID == result.CloudJobID {
 			for index := range status.Artifacts {
 				if status.Artifacts[index].ArtifactID == result.StageEventLogRef.ID {
 					descriptor = &status.Artifacts[index]
@@ -314,6 +329,7 @@ func insertPendingAdaptiveContinuation(repair, source *model.DemoWorkflowGraph, 
 			continue
 		}
 		candidate = node
+		break
 	}
 	if candidate == nil && adaptivePassiveObservationFailed(source, failedNodeID) {
 		for _, node := range source.Nodes {

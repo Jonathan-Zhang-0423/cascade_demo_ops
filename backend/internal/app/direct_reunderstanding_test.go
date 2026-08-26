@@ -194,6 +194,23 @@ func TestInsertPendingAdaptiveContinuationRestoresOnlySkippedUnstartedEffect(t *
 	}
 }
 
+func TestInsertPendingAdaptiveContinuationPrefersFirstSkippedEffect(t *testing.T) {
+	primary := &model.GraphNode{ID: "primary_confirmation", Type: model.GraphNodeTypeAction, ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "continue_execution"}}}
+	followup := &model.GraphNode{ID: "followup_confirmation", Type: model.GraphNodeTypeAction, ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "continue_execution"}}}
+	source := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/workspace")
+	source.Nodes = []*model.GraphNode{primary, followup}
+	repair := model.NewDemoWorkflowGraph("repair", "project", "https://app.example.com/entity/runtime-42")
+	repair.Nodes = []*model.GraphNode{{ID: "resume", Type: model.GraphNodeTypeStart, ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate}}, {ID: "verify", Type: model.GraphNodeTypeEnd, ActionSpec: &model.GraphAction{Type: model.GraphActionInspect}}}
+	events := []model.StageExecutionEvent{
+		{NodeID: primary.ID, EventType: model.StageExecutionEventStepSatisfied, HarnessDecision: &model.HarnessDecision{Kind: model.HarnessDecisionSkip}},
+		{NodeID: followup.ID, EventType: model.StageExecutionEventStepSatisfied, HarnessDecision: &model.HarnessDecision{Kind: model.HarnessDecisionSkip}},
+	}
+	inserted, err := insertPendingAdaptiveContinuation(repair, source, events, "https://app.example.com/entity/runtime-42", "verify")
+	if err != nil || !inserted || len(repair.Nodes) != 3 || repair.Nodes[1].ID != primary.ID {
+		t.Fatalf("earliest skipped continuation was not restored: inserted=%t nodes=%+v err=%v", inserted, repair.Nodes, err)
+	}
+}
+
 func TestInsertPendingAdaptiveContinuationRetriesConfirmedRollbackOnce(t *testing.T) {
 	continuation := &model.GraphNode{
 		ID: "continue_execution", Type: model.GraphNodeTypeAction,
