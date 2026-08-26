@@ -140,6 +140,17 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 			return adaptiveDirectReconciliationBuild{}, err
 		}
 	}
+	// Older v2 packages could omit the generic plan-to-execution continuation
+	// entirely. When audited events prove that a submit action reached the bound
+	// successor and the run later stalled in passive observation, synthesize one
+	// bounded runtime-discovered continuation. This is a new once-effect on the
+	// same entity; it never replays project creation or the original submit.
+	if !pendingContinuation && !adaptiveContinuationEffectObserved(repairState.WorkflowGraph, observed.Events) {
+		pendingContinuation, err = synthesizeMissingAdaptiveContinuation(graph, repairState.WorkflowGraph, observed.Events, result.FailureDiagnostic.CurrentURL, result.FailureDiagnostic.FailedNodeID, observationPlan)
+		if err != nil {
+			return adaptiveDirectReconciliationBuild{}, err
+		}
+	}
 	if sourcePackage != nil {
 		if _, err := prependReusableSessionSetup(graph, *sourcePackage); err != nil {
 			return adaptiveDirectReconciliationBuild{}, err
@@ -529,6 +540,13 @@ func insertPendingAdaptiveContinuation(repair, source *model.DemoWorkflowGraph, 
 	if candidate == nil {
 		return false, nil
 	}
+	return insertAdaptiveContinuationNode(repair, candidate, observedURL)
+}
+
+func insertAdaptiveContinuationNode(repair *model.DemoWorkflowGraph, candidate *model.GraphNode, observedURL string) (bool, error) {
+	if repair == nil || candidate == nil || len(repair.Nodes) == 0 || strings.TrimSpace(observedURL) == "" {
+		return false, nil
+	}
 	encoded, err := json.Marshal(candidate)
 	if err != nil {
 		return false, err
@@ -565,6 +583,108 @@ func insertPendingAdaptiveContinuation(repair, source *model.DemoWorkflowGraph, 
 		repair.Edges = append(repair.Edges, &model.GraphEdge{ID: fmt.Sprintf("edge_adaptive_reconcile_%02d", index), FromNode: repair.Nodes[index-1].ID, ToNode: repair.Nodes[index].ID, Condition: "validated", Priority: index})
 	}
 	return true, nil
+}
+
+func synthesizeMissingAdaptiveContinuation(repair, source *model.DemoWorkflowGraph, events []model.StageExecutionEvent, observedURL, failedNodeID string, observationPlan experiment.ObservationPlan) (bool, error) {
+	if repair == nil || source == nil || strings.TrimSpace(observedURL) == "" || strings.TrimSpace(failedNodeID) == "" {
+		return false, nil
+	}
+	nodes := make(map[string]*model.GraphNode, len(source.Nodes))
+	failedIndex := -1
+	for index, node := range source.Nodes {
+		if node == nil || node.ActionSpec == nil {
+			continue
+		}
+		nodes[node.ID] = node
+		if recipe, _ := node.ActionSpec.Parameters["action_recipe"].(string); recipe == "continue_execution" {
+			return false, nil
+		}
+		if node.ID == failedNodeID {
+			failedIndex = index
+		}
+	}
+	failed := nodes[failedNodeID]
+	if failedIndex < 0 || failed == nil || failed.ActionSpec == nil || (failed.ActionSpec.Type != model.GraphActionInspect && failed.ActionSpec.Type != model.GraphActionWait) {
+		return false, nil
+	}
+
+	var submitEvent model.StageExecutionEvent
+	for _, event := range events {
+		node := nodes[event.NodeID]
+		if event.EventType != model.StageExecutionEventActionCompleted || event.Observation == nil || node == nil || node.ActionSpec == nil || node.ActionSpec.Type != model.GraphActionClick {
+			continue
+		}
+		if strings.TrimSpace(event.Observation.URL) != strings.TrimSpace(observedURL) {
+			continue
+		}
+		nodeIndex := -1
+		for index, candidate := range source.Nodes {
+			if candidate == node {
+				nodeIndex = index
+				break
+			}
+		}
+		if nodeIndex < 0 || nodeIndex >= failedIndex || event.Sequence <= submitEvent.Sequence {
+			continue
+		}
+		submitEvent = event
+	}
+	if submitEvent.Sequence == 0 {
+		return false, nil
+	}
+
+	evidence := append([]model.EvidenceRef(nil), submitEvent.EvidenceRefs...)
+	for _, event := range events {
+		if event.NodeID == failedNodeID {
+			evidence = append(evidence, event.EvidenceRefs...)
+		}
+	}
+	if len(evidence) == 0 {
+		return false, nil
+	}
+	timeoutMS := observationPlan.DeferAfterMS
+	if timeoutMS <= 0 {
+		timeoutMS = 300_000
+	}
+	target := model.ActionTarget{URL: observedURL, Role: "button", EvidenceRefs: append([]model.EvidenceRef(nil), evidence...)}
+	parameters := map[string]any{
+		"action_recipe":                   "continue_execution",
+		"optional_when_target_absent":     "true",
+		"capture_result_surface_baseline": "true",
+		"target_wait_timeout_ms":          fmt.Sprintf("%d", timeoutMS),
+		"target_poll_interval_ms":         "5000",
+		"continuation_chain_index":        "1",
+		"continuation_chain_limit":        "1",
+		"continuation_confirmation_value": "确认，继续执行。",
+	}
+	predicate := model.InteractionPredicate{
+		ID: "observe_synthesized_execution_transition", Kind: "state_changed", Target: model.ActionTarget{URL: observedURL},
+		Expected: "execution_started_or_result_changed", Required: true, TimeoutMS: 30_000, EvidenceRefs: append([]model.EvidenceRef(nil), evidence...),
+	}
+	candidate := &model.GraphNode{
+		ID: "business_stage_runtime_execution_continuation", Type: model.GraphNodeTypeAction,
+		Title: "继续运行时已准备的执行", Goal: "若已提交请求停在计划确认态，则在当前实体继续执行；若已进入执行态则跳过。",
+		Action: string(model.GraphActionClick), ExpectedOutcome: "当前实体进入执行态或结果区域发生变化。",
+		IsScreenshot: true, RetryPolicy: 1, PageRef: observedURL, DurationHintMS: 1_000,
+		ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Target: target, Parameters: parameters, TimeoutMS: 12_000, WaitUntil: "domcontentloaded"},
+		Validations: []model.ValidationSpec{{
+			ID: predicate.ID, Kind: predicate.Kind, Target: predicate.Target, Expected: predicate.Expected,
+			Required: true, TimeoutMS: predicate.TimeoutMS, Severity: "blocking", EvidenceRefs: append([]model.EvidenceRef(nil), evidence...),
+		}},
+		EvidenceRefs: evidence,
+		InteractionContract: &model.InteractionContract{
+			SchemaVersion: model.InteractionContractSchemaVersion, ContractID: "interaction_runtime_execution_continuation",
+			SemanticGoal: "在当前已绑定实体中继续执行已准备的方案。", Archetype: model.ProductArchetypeAsyncBuilder,
+			ActionKind: model.GraphActionClick, ReplayPolicy: model.InteractionReplayOnceEffect,
+			TargetSemanticID: "runtime_execution_continuation", ActionTarget: target, Parameters: parameters,
+			ExpectedTransitions: []model.InteractionPredicate{predicate}, EvidenceRefs: append([]model.EvidenceRef(nil), evidence...), NonDestructive: true,
+		},
+		Metadata: map[string]any{
+			"business_stage_kind": string(model.BusinessStageKindBusinessSubmit), "runtime_adaptive": true,
+			"non_destructive": true, "replay_policy": string(model.InteractionReplayOnceEffect),
+		},
+	}
+	return insertAdaptiveContinuationNode(repair, candidate, observedURL)
 }
 
 func selectObservedSuccessorURL(project *model.ProjectContext, current string, events []model.StageExecutionEvent) string {

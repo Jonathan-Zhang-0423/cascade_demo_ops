@@ -211,6 +211,56 @@ func TestInsertPendingAdaptiveContinuationPrefersFirstSkippedEffect(t *testing.T
 	}
 }
 
+func TestSynthesizeMissingAdaptiveContinuationForSubmittedPassiveStall(t *testing.T) {
+	observedURL := "https://app.example.com/entity/runtime-42"
+	evidence := model.EvidenceRef{ID: "evidence-runtime", Kind: "webpage_screenshot", Confidence: 1}
+	submit := &model.GraphNode{ID: "submit", Type: model.GraphNodeTypeAction, ActionSpec: &model.GraphAction{Type: model.GraphActionClick}}
+	failed := &model.GraphNode{ID: "surface", Type: model.GraphNodeTypeEnd, ActionSpec: &model.GraphAction{Type: model.GraphActionInspect}, InteractionContract: &model.InteractionContract{ReplayPolicy: model.InteractionReplayObserveOnly}}
+	source := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/workspace")
+	source.Nodes = []*model.GraphNode{submit, failed}
+	repair := model.NewDemoWorkflowGraph("repair", "project", observedURL)
+	repair.Nodes = []*model.GraphNode{
+		{ID: "resume", Type: model.GraphNodeTypeStart, ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate}},
+		{ID: "verify", Type: model.GraphNodeTypeEnd, ActionSpec: &model.GraphAction{Type: model.GraphActionInspect}},
+	}
+	events := []model.StageExecutionEvent{{
+		Sequence: 10, NodeID: submit.ID, EventType: model.StageExecutionEventActionCompleted,
+		Observation:  &model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, URL: observedURL},
+		EvidenceRefs: []model.EvidenceRef{evidence},
+	}}
+	inserted, err := synthesizeMissingAdaptiveContinuation(repair, source, events, observedURL, failed.ID, experiment.ObservationPlan{DeferAfterMS: 1_800_000})
+	if err != nil || !inserted {
+		t.Fatalf("missing continuation was not synthesized: inserted=%t err=%v", inserted, err)
+	}
+	if len(repair.Nodes) != 3 || repair.Nodes[1].ID != "business_stage_runtime_execution_continuation" {
+		t.Fatalf("unexpected synthesized repair graph: %+v", repair.Nodes)
+	}
+	pending := repair.Nodes[1]
+	if pending.InteractionContract == nil || pending.InteractionContract.ReplayPolicy != model.InteractionReplayOnceEffect || pending.Metadata["adaptive_pending_continuation"] != true {
+		t.Fatalf("synthesized continuation is not a once-effect: %+v", pending)
+	}
+	if pending.ActionSpec.Parameters["target_wait_timeout_ms"] != "1800000" || pending.ActionSpec.Parameters["action_recipe"] != "continue_execution" {
+		t.Fatalf("synthesized continuation lost runtime policy: %+v", pending.ActionSpec.Parameters)
+	}
+	if err := model.ValidateInteractionContract(*pending.InteractionContract); err != nil {
+		t.Fatalf("synthesized continuation contract is invalid: %v", err)
+	}
+}
+
+func TestSynthesizeMissingAdaptiveContinuationRequiresAuditedSubmitEvidence(t *testing.T) {
+	source := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/workspace")
+	source.Nodes = []*model.GraphNode{
+		{ID: "submit", ActionSpec: &model.GraphAction{Type: model.GraphActionClick}},
+		{ID: "surface", ActionSpec: &model.GraphAction{Type: model.GraphActionInspect}},
+	}
+	repair := model.NewDemoWorkflowGraph("repair", "project", "https://app.example.com/entity/runtime-42")
+	repair.Nodes = []*model.GraphNode{{ID: "resume", ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate}}, {ID: "verify", ActionSpec: &model.GraphAction{Type: model.GraphActionInspect}}}
+	inserted, err := synthesizeMissingAdaptiveContinuation(repair, source, nil, "https://app.example.com/entity/runtime-42", "surface", experiment.ObservationPlan{})
+	if err != nil || inserted || len(repair.Nodes) != 2 {
+		t.Fatalf("continuation was synthesized without submit evidence: inserted=%t nodes=%d err=%v", inserted, len(repair.Nodes), err)
+	}
+}
+
 func TestInterruptedStageSelectionFallsBackToUnfinishedAction(t *testing.T) {
 	events := []model.StageExecutionEvent{
 		{Sequence: 1, NodeID: "completed", EventType: model.StageExecutionEventActionStarted},

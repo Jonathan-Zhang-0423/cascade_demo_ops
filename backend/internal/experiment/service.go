@@ -580,8 +580,10 @@ func (s *Service) Resume(ctx context.Context, runID string, expectedRevision int
 		// run can benefit from the adaptive harness without changing its user
 		// goal, project identity, authorization, or once-effect checkpoint.
 		if loaded, loadErr := LoadDefinition(s.definitionRoot, run.DefinitionRef); loadErr == nil {
-			next.HarnessProfile = HarnessProfileAdaptiveBusinessV1
-			next.ProductSpec = loaded.ProductSpec
+			if next.HarnessProfile != HarnessProfileAdaptiveBusinessV2 {
+				next.HarnessProfile = HarnessProfileAdaptiveBusinessV1
+				next.ProductSpec = loaded.ProductSpec
+			}
 			next.ObservationPlan = loaded.ObservationPlan
 			next.InteractionPlan = loaded.InteractionPlan
 			next.Budget.VisualCallsPerRun = loaded.Definition.AuthorizationBudget.VisualCallsPerRun

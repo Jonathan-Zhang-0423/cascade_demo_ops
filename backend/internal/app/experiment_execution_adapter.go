@@ -57,7 +57,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 			return err
 		}
 		status, err := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
-		if err == nil && status.Status == "failed" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+		if err == nil && status.Status == "failed" && isAdaptiveExperimentHarness(request.HarnessProfile) {
 			return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 		}
 		if err == nil && status.Status == "awaiting_credentials" && isAdaptiveExperimentHarness(request.HarnessProfile) {
@@ -88,7 +88,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 				return err
 			}
 			status, statusErr := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
-			if statusErr == nil && status.Status == "failed" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+			if statusErr == nil && status.Status == "failed" && isAdaptiveExperimentHarness(request.HarnessProfile) {
 				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 			}
 			if statusErr == nil && status.Status == "awaiting_credentials" && isAdaptiveExperimentHarness(request.HarnessProfile) {
@@ -129,7 +129,8 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 			AllowedDomains:       []string{parsed.Hostname()}, DemoCredentialRef: request.CredentialRef,
 			WorkflowExecution: &model.WorkflowExecutionHints{
 				TaskPackID: request.WorkflowTemplateID, RequiresFreshEntity: true, EntityName: request.ProjectName,
-				PrimaryInputSemantic: "product_spec", DirectExecution: true, RequiresSubmission: true, ObserveAsyncResult: true,
+				PrimaryInputSemantic: "product_spec", DirectExecution: true, RequiresSubmission: true,
+				MayRequireExecutionConfirmation: true, ObserveAsyncResult: true,
 			},
 		}
 		prepared, err = a.service.PrepareProductRun(ctx, CloudLifecycleRequest{UserInput: &input})
@@ -249,7 +250,7 @@ func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Con
 }
 
 func (a *appExperimentExecutionAdapter) latestAdaptiveReconciliationJobID(ctx context.Context, projectID, sourceJobID, harnessProfile string) string {
-	if a == nil || a.service == nil || a.service.states == nil || harnessProfile != experiment.HarnessProfileAdaptiveBusinessV1 {
+	if a == nil || a.service == nil || a.service.states == nil || !isAdaptiveExperimentHarness(harnessProfile) {
 		return sourceJobID
 	}
 	state, err := a.service.states.Load(ctx, projectID)
