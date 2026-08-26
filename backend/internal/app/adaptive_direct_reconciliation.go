@@ -129,7 +129,10 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 			}
 		}
 	}
-	if !pendingContinuation {
+	// A continuation that reached action_completed/effect_committed is a
+	// once-effect. A later observation failure must never turn it back into a
+	// pending action: resume from the observed entity and inspect only.
+	if !pendingContinuation && !adaptiveContinuationEffectObserved(repairState.WorkflowGraph, observed.Events) {
 		pendingContinuation, err = insertPendingAdaptiveContinuation(graph, repairState.WorkflowGraph, observed.Events, result.FailureDiagnostic.CurrentURL, result.FailureDiagnostic.FailedNodeID)
 		if err != nil {
 			return adaptiveDirectReconciliationBuild{}, err
@@ -384,14 +387,13 @@ func insertPendingAdaptiveContinuation(repair, source *model.DemoWorkflowGraph, 
 	if repair == nil || source == nil || len(repair.Nodes) == 0 {
 		return false, nil
 	}
-	actionStarted, actionCompleted, skipped := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	actionStarted, skipped := map[string]bool{}, map[string]bool{}
 	for _, event := range events {
 		switch event.EventType {
 		case model.StageExecutionEventActionStarted, model.StageExecutionEventActionEffectCommitted:
 			actionStarted[event.NodeID] = true
 		case model.StageExecutionEventActionCompleted:
 			actionStarted[event.NodeID] = true
-			actionCompleted[event.NodeID] = true
 		case model.StageExecutionEventStepSatisfied:
 			if event.HarnessDecision != nil && event.HarnessDecision.Kind == model.HarnessDecisionSkip {
 				skipped[event.NodeID] = true
@@ -399,7 +401,6 @@ func insertPendingAdaptiveContinuation(repair, source *model.DemoWorkflowGraph, 
 		}
 	}
 	var candidate *model.GraphNode
-	interruptedRetry := false
 	for _, node := range source.Nodes {
 		if node == nil || node.ActionSpec == nil || actionStarted[node.ID] || !skipped[node.ID] {
 			continue
@@ -409,17 +410,6 @@ func insertPendingAdaptiveContinuation(repair, source *model.DemoWorkflowGraph, 
 		}
 		candidate = node
 		break
-	}
-	if candidate == nil && adaptivePassiveObservationFailed(source, failedNodeID) {
-		for _, node := range source.Nodes {
-			if node == nil || node.ActionSpec == nil || !actionStarted[node.ID] || !actionCompleted[node.ID] {
-				continue
-			}
-			if value, _ := node.ActionSpec.Parameters["action_recipe"].(string); value != "continue_execution" {
-				continue
-			}
-			candidate, interruptedRetry = node, true
-		}
 	}
 	if candidate == nil {
 		return false, nil
@@ -451,9 +441,6 @@ func insertPendingAdaptiveContinuation(repair, source *model.DemoWorkflowGraph, 
 		pending.Metadata = map[string]any{}
 	}
 	pending.Metadata["adaptive_pending_continuation"] = true
-	if interruptedRetry {
-		pending.Metadata["adaptive_interrupted_continuation_retry"] = true
-	}
 	pending.Metadata["runtime_adaptive"] = true
 	pending.Metadata["non_destructive"] = true
 	pending.Metadata["replay_policy"] = string(model.InteractionReplayOnceEffect)
@@ -463,16 +450,6 @@ func insertPendingAdaptiveContinuation(repair, source *model.DemoWorkflowGraph, 
 		repair.Edges = append(repair.Edges, &model.GraphEdge{ID: fmt.Sprintf("edge_adaptive_reconcile_%02d", index), FromNode: repair.Nodes[index-1].ID, ToNode: repair.Nodes[index].ID, Condition: "validated", Priority: index})
 	}
 	return true, nil
-}
-
-func adaptivePassiveObservationFailed(source *model.DemoWorkflowGraph, failedNodeID string) bool {
-	for _, node := range source.Nodes {
-		if node == nil || node.ID != strings.TrimSpace(failedNodeID) || node.InteractionContract == nil {
-			continue
-		}
-		return node.InteractionContract.ReplayPolicy == model.InteractionReplayObserveOnly && node.ActionSpec != nil && node.ActionSpec.Type == model.GraphActionInspect
-	}
-	return false
 }
 
 func selectObservedSuccessorURL(project *model.ProjectContext, current string, events []model.StageExecutionEvent) string {

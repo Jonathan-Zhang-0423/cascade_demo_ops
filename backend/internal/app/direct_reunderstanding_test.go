@@ -245,7 +245,7 @@ func TestPostContinuationObservationBecomesReplayDenialResumePoint(t *testing.T)
 	}
 }
 
-func TestInsertPendingAdaptiveContinuationRetriesConfirmedRollbackOnce(t *testing.T) {
+func TestInsertPendingAdaptiveContinuationDoesNotReplayCompletedOnceEffect(t *testing.T) {
 	continuation := &model.GraphNode{
 		ID: "continue_execution", Type: model.GraphNodeTypeAction,
 		ActionSpec:          &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "continue_execution"}},
@@ -266,11 +266,8 @@ func TestInsertPendingAdaptiveContinuationRetriesConfirmedRollbackOnce(t *testin
 		{NodeID: continuation.ID, EventType: model.StageExecutionEventActionCompleted},
 	}
 	inserted, err := insertPendingAdaptiveContinuation(repair, source, events, "https://app.example.com/entity/runtime-42", failedObserve.ID)
-	if err != nil || !inserted || len(repair.Nodes) != 3 || repair.Nodes[1].ID != continuation.ID {
-		t.Fatalf("confirmed rollback continuation was not restored: inserted=%t nodes=%+v err=%v", inserted, repair.Nodes, err)
-	}
-	if retried, _ := repair.Nodes[1].Metadata["adaptive_interrupted_continuation_retry"].(bool); !retried {
-		t.Fatalf("restored continuation did not retain bounded retry provenance: %+v", repair.Nodes[1].Metadata)
+	if err != nil || inserted || len(repair.Nodes) != 2 {
+		t.Fatalf("completed once-effect was made replayable: inserted=%t nodes=%+v err=%v", inserted, repair.Nodes, err)
 	}
 }
 
