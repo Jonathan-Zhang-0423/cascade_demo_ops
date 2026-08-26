@@ -56,6 +56,12 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		if err == nil && status.Status == "failed" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
 			return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 		}
+		if err == nil && status.Status == "awaiting_credentials" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+			if _, restoreErr := a.service.ReuploadDirectCredential(ctx, projectID, jobID); restoreErr != nil {
+				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
+			}
+			status, err = a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
+		}
 		if err != nil || status.Status != "completed" {
 			return &experiment.AdapterError{Code: "confirmed_result_revalidation_failed", Phase: "resume_observe_only", State: experiment.RunStateWaitingInput, Retryable: false, EvidenceRefs: []string{jobID}, Cause: err}
 		}
@@ -74,6 +80,11 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 			status, statusErr := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
 			if statusErr == nil && status.Status == "failed" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
 				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
+			}
+			if statusErr == nil && status.Status == "awaiting_credentials" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+				if _, restoreErr := a.service.ReuploadDirectCredential(ctx, projectID, jobID); restoreErr != nil {
+					return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
+				}
 			}
 			status, err := a.waitForDirectResult(ctx, projectID, jobID, request, emit)
 			if err != nil {

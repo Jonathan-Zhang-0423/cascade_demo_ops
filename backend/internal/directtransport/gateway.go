@@ -1427,6 +1427,7 @@ func validateResultArtifactsAgainstUploads(result model.RecordingResultPackage, 
 func (g *Gateway) handleWorkerArtifact(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("job_id")
 	artifactID := safeSegment(r.PathValue("artifact_id"))
+	recovery := r.Header.Get("X-Artifact-Recovery") == "stage-event-log-v1"
 	g.mu.Lock()
 	record, ok := g.jobs[jobID]
 	g.mu.Unlock()
@@ -1434,7 +1435,13 @@ func (g *Gateway) handleWorkerArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "job_not_found", "Job was not found.")
 		return
 	}
-	if record.Status.Status != "running" {
+	if recovery {
+		expectedID := "stage_event_log_" + safeSegment(jobID)
+		if record.Status.Status != "awaiting_credentials" || artifactID != expectedID || r.Header.Get("X-Artifact-Kind") != "browser_agent_stage_event_log" || r.Header.Get("Content-Type") != "application/x-ndjson" {
+			writeError(w, http.StatusConflict, "job_not_awaiting_recovery", "Only the bounded stage-event log may be recovered for an interrupted credential-gated job.")
+			return
+		}
+	} else if record.Status.Status != "running" {
 		writeError(w, http.StatusConflict, "job_not_claimed", "Worker may upload artifacts only for a claimed running job.")
 		return
 	}
@@ -1455,9 +1462,13 @@ func (g *Gateway) handleWorkerArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hasher := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(file, hasher), io.LimitReader(r.Body, maxWorkerArtifactBytes+1))
+	uploadLimit := int64(maxWorkerArtifactBytes)
+	if recovery {
+		uploadLimit = 1 << 20
+	}
+	written, copyErr := io.Copy(io.MultiWriter(file, hasher), io.LimitReader(r.Body, uploadLimit+1))
 	closeErr := file.Close()
-	if copyErr != nil || closeErr != nil || written > maxWorkerArtifactBytes {
+	if copyErr != nil || closeErr != nil || written > uploadLimit {
 		_ = os.Remove(temporary)
 		writeError(w, http.StatusRequestEntityTooLarge, "artifact_too_large", "Artifact exceeds the transport limit.")
 		return

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -39,6 +40,7 @@ type worker struct {
 const (
 	workerHTTPTimeout         = 15 * time.Minute
 	workerFinalizationTimeout = 20 * time.Minute
+	maxRecoveryEventLogBytes  = 1 << 20
 )
 
 func main() {
@@ -77,6 +79,13 @@ func main() {
 }
 
 func (w *worker) run(ctx context.Context) error {
+	// A previous execution can finish the browser session but lose its bounded
+	// finalization window while large recordings are still uploading. Publish
+	// the small, authoritative stage log before claiming more work so the App
+	// can reconcile an already-created successor without replaying submission.
+	if err := w.recoverOrphanedStageEventLogs(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "orphaned stage-event recovery incomplete:", redactError(err))
+	}
 	for {
 		job, ok, err := w.claim(ctx)
 		if err != nil {
@@ -157,6 +166,7 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 	}
 	finalizeCtx, finalizeCancel := workerFinalizationContext(parent)
 	defer finalizeCancel()
+	prioritizeRecoveryArtifacts(files)
 	for _, file := range files {
 		if err := w.uploadArtifact(finalizeCtx, job.JobID, file); err != nil {
 			fmt.Fprintln(os.Stderr, "artifact upload failed job=", safeID(job.JobID), "artifact=", safeID(file.Artifact.ID), "size_bytes=", file.Artifact.SizeBytes, "class=artifact_upload_failed", "gateway_code=", gatewayErrorCode(err))
@@ -173,6 +183,59 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 	}
 	completed = true
 	fmt.Fprintln(os.Stdout, "job completed job=", safeID(job.JobID), "artifacts=", len(files))
+}
+
+func prioritizeRecoveryArtifacts(files []app.DirectWorkerArtifactFile) {
+	sort.SliceStable(files, func(i, j int) bool {
+		left := files[i].Artifact.Kind == "browser_agent_stage_event_log"
+		right := files[j].Artifact.Kind == "browser_agent_stage_event_log"
+		return left && !right
+	})
+}
+
+func (w *worker) recoverOrphanedStageEventLogs(ctx context.Context) error {
+	jobsRoot := filepath.Join(w.outputRoot, "jobs")
+	entries, err := os.ReadDir(jobsRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, entry := range entries {
+		jobID := entry.Name()
+		if !entry.IsDir() || jobID == "" || safeID(jobID) != jobID {
+			continue
+		}
+		jobRoot := filepath.Join(jobsRoot, jobID)
+		marker := filepath.Join(jobRoot, ".stage-event-recovery-uploaded")
+		if _, err := os.Stat(marker); err == nil {
+			continue
+		}
+		path := filepath.Join(jobRoot, "recording", "browser-agent-stage-events.jsonl")
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxRecoveryEventLogBytes {
+			continue
+		}
+		file := app.DirectWorkerArtifactFile{Artifact: model.ArtifactRef{
+			ID: "stage_event_log_" + jobID, Kind: "browser_agent_stage_event_log",
+			MimeType: "application/x-ndjson", SizeBytes: info.Size(),
+			Metadata: map[string]any{"role": "stage_event_log"},
+		}, Path: path}
+		if err := w.uploadRecoveryArtifact(ctx, jobID, file); err != nil {
+			// Completed jobs and still-running jobs do not need orphan recovery.
+			// Keep scanning other spools, but surface real transport failures.
+			if gatewayErrorCode(err) != "job_not_awaiting_recovery" && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if err := os.WriteFile(marker, []byte("uploaded\n"), 0o600); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func workerWasInterrupted(parent context.Context) bool {
@@ -233,6 +296,14 @@ func (w *worker) updateStatus(ctx context.Context, jobID, stage, message string,
 }
 
 func (w *worker) uploadArtifact(ctx context.Context, jobID string, file app.DirectWorkerArtifactFile) error {
+	return w.uploadArtifactWithRecovery(ctx, jobID, file, false)
+}
+
+func (w *worker) uploadRecoveryArtifact(ctx context.Context, jobID string, file app.DirectWorkerArtifactFile) error {
+	return w.uploadArtifactWithRecovery(ctx, jobID, file, true)
+}
+
+func (w *worker) uploadArtifactWithRecovery(ctx context.Context, jobID string, file app.DirectWorkerArtifactFile, recovery bool) error {
 	opened, err := os.Open(file.Path)
 	if err != nil {
 		return err
@@ -251,6 +322,9 @@ func (w *worker) uploadArtifact(ctx context.Context, jobID string, file app.Dire
 	}
 	path := "/v1/worker/jobs/" + url.PathEscape(jobID) + "/artifacts/" + url.PathEscape(file.Artifact.ID) + "?file_name=" + url.QueryEscape(filepath.Base(file.Path))
 	headers := map[string]string{"Content-Type": file.Artifact.MimeType, "X-Artifact-SHA256": hash, "X-Artifact-Role": stringValue(file.Artifact.Metadata, "role"), "X-Artifact-Kind": file.Artifact.Kind}
+	if recovery {
+		headers["X-Artifact-Recovery"] = "stage-event-log-v1"
+	}
 	response, err := w.request(ctx, http.MethodPut, path, opened, headers)
 	if err != nil {
 		return err

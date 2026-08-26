@@ -624,6 +624,50 @@ func TestGatewayWorkerReleaseRestoresCredentialGateOrQueue(t *testing.T) {
 	}
 }
 
+func TestGatewayAcceptsOnlyBoundedStageLogForCredentialGatedRecovery(t *testing.T) {
+	port := reserveTestPort(t)
+	gateway, err := NewGateway(Config{ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1", DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true, BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: t.TempDir(), LeaseTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gateway.Close(context.Background()) })
+	pkg := loadDirectPackageFixture(t)
+	pkg.CredentialGrants = []model.CredentialGrant{{GrantID: "grant_recovery", Kind: "username_password", Purpose: "browser_login", CloudSecretRef: "credential://demo/account", ExpiresAt: time.Now().Add(time.Hour), AllowedDomains: []string{"example.com"}, AllowedOperations: []string{"fill_username"}, DeleteAfterRun: true}}
+	canonical, _ := model.CanonicalJSON(pkg)
+	jobID := "job_recovery_log"
+	record, err := gateway.persistNewJob(jobID, "lease_recovery", "install_recovery", pkg, model.SHA256Hex(canonical))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway.jobs[jobID] = record
+	data := []byte("{\"event_type\":\"stage_failed\"}\n")
+	hash := fmt.Sprintf("%x", sha256.Sum256(data))
+	upload := httptest.NewRequest(http.MethodPut, "/v1/worker/jobs/"+jobID+"/artifacts/stage_event_log_"+jobID+"?file_name=browser-agent-stage-events.jsonl", bytes.NewReader(data))
+	upload.Header.Set("Authorization", "Bearer "+testWorkerToken)
+	upload.Header.Set("Content-Type", "application/x-ndjson")
+	upload.Header.Set("X-Artifact-SHA256", hash)
+	upload.Header.Set("X-Artifact-Role", "stage_event_log")
+	upload.Header.Set("X-Artifact-Kind", "browser_agent_stage_event_log")
+	upload.Header.Set("X-Artifact-Recovery", "stage-event-log-v1")
+	response := httptest.NewRecorder()
+	gateway.WorkerHandler().ServeHTTP(response, upload)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("recovery stage log rejected: code=%d body=%s", response.Code, response.Body.String())
+	}
+	artifact, ok := gateway.jobs[jobID].Artifacts["stage_event_log_"+jobID]
+	if !ok || artifact.Artifact.SizeBytes != int64(len(data)) {
+		t.Fatalf("recovery artifact not persisted: %+v", artifact)
+	}
+
+	wrong := httptest.NewRequest(http.MethodPut, "/v1/worker/jobs/"+jobID+"/artifacts/not_the_stage_log?file_name=browser-agent-stage-events.jsonl", bytes.NewReader(data))
+	wrong.Header = upload.Header.Clone()
+	wrongResponse := httptest.NewRecorder()
+	gateway.WorkerHandler().ServeHTTP(wrongResponse, wrong)
+	if wrongResponse.Code != http.StatusConflict {
+		t.Fatalf("unbound recovery artifact was accepted: %d", wrongResponse.Code)
+	}
+}
+
 func TestDirectResultReunderstandingDecisionProducesStableStructuredTerminalStatus(t *testing.T) {
 	result := model.RecordingResultPackage{
 		ResultID: "result_reunderstanding",

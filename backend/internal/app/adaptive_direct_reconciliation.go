@@ -54,7 +54,10 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		if !hasPersistedResult || result.CloudJobID != strings.TrimSpace(sourceJobID) {
 			result, err = s.getDirectHistoricalResult(ctx, projectID, sourceJobID)
 			if err != nil {
-				return adaptiveDirectReconciliationBuild{}, fmt.Errorf("load adaptive reconciliation source result: %w", err)
+				result, err = s.adaptiveInterruptedResultFromStageLog(ctx, projectID, sourceJobID, state, loadedPackage)
+				if err != nil {
+					return adaptiveDirectReconciliationBuild{}, fmt.Errorf("load adaptive reconciliation source result: %w", err)
+				}
 			}
 		}
 		if result.SourcePackageID != loadedPackage.PackageID {
@@ -166,6 +169,72 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		return adaptiveDirectReconciliationBuild{}, fmt.Errorf("build adaptive successor package: %w", err)
 	}
 	return adaptiveDirectReconciliationBuild{State: next, Build: build, SourceResult: result, PendingContinuation: pendingContinuation}, nil
+}
+
+// adaptiveInterruptedResultFromStageLog promotes the bounded Worker recovery
+// log into reconciliation evidence when execution reached a real successor
+// but the terminal result could not be uploaded before the credential grant
+// expired. This value is never presented as a completed server result; it only
+// drives an observe/verify continuation with a fresh Direct package.
+func (s *Service) adaptiveInterruptedResultFromStageLog(ctx context.Context, projectID, sourceJobID string, state *orchestrator.CascadeState, source model.ClientExecutionPackage) (model.RecordingResultPackage, error) {
+	status, err := s.GetDirectExecutionStatus(ctx, projectID, sourceJobID)
+	if err != nil {
+		return model.RecordingResultPackage{}, err
+	}
+	if status.Status != "awaiting_credentials" {
+		return model.RecordingResultPackage{}, errors.New("interrupted Direct job is not awaiting credential recovery")
+	}
+	var eventArtifact *model.DirectArtifact
+	for index := range status.Artifacts {
+		if status.Artifacts[index].Kind == "browser_agent_stage_event_log" {
+			eventArtifact = &status.Artifacts[index]
+			break
+		}
+	}
+	if eventArtifact == nil {
+		return model.RecordingResultPackage{}, errors.New("interrupted Direct job has no recovered stage-event log")
+	}
+	now := time.Now().UTC()
+	eventRef := model.ArtifactRef{
+		ID: eventArtifact.ArtifactID, Kind: eventArtifact.Kind, URI: directArtifactURI(sourceJobID, eventArtifact.ArtifactID),
+		MimeType: eventArtifact.MimeType, SHA256: eventArtifact.SHA256, SizeBytes: eventArtifact.SizeBytes, Sensitive: true,
+	}
+	result := model.RecordingResultPackage{
+		ResultID: "interrupted_recovery_" + safePathSegment(sourceJobID), SourcePackageID: source.PackageID,
+		CloudJobID: sourceJobID, SchemaVersion: model.RecordingResultPackageSchemaVersion,
+		Status: model.RecordingResultStatusFailed, ExecutionRuntime: model.ExecutableScriptRuntimeBrowserAgentOutlineV1,
+		StageEventLogRef: &eventRef, CreatedAt: now,
+		FailureDiagnostic: &model.ScriptFailureDiagnostic{
+			ID: "diag_interrupted_" + safePathSegment(sourceJobID), SchemaVersion: model.ScriptFailureDiagnosticSchemaVersion,
+			SourcePackageID: source.PackageID, CloudJobID: sourceJobID, Attempt: 1,
+			Error:           model.AgentError{Code: "worker_interrupted_after_checkpoint", Message: "Worker finalization ended after browser evidence was persisted; reconcile the observed successor without replaying submission.", Retryable: true},
+			RedactionReport: model.DiagnosticRedactionReport{Applied: true, PolicyRef: source.PackageID + ".redactions", FullHTMLIncluded: false}, CapturedAt: now,
+		},
+	}
+	observed := s.adaptiveObservedSuccessorEvidence(ctx, projectID, state, result)
+	if len(observed.Events) == 0 || strings.TrimSpace(observed.URL) == "" {
+		return model.RecordingResultPackage{}, errors.New("recovered stage-event log has no observed successor evidence")
+	}
+	var failed model.StageExecutionEvent
+	for _, event := range observed.Events {
+		if event.EventType == model.StageExecutionEventStageFailed && event.Sequence >= failed.Sequence {
+			failed = event
+		}
+	}
+	if strings.TrimSpace(failed.NodeID) == "" {
+		return model.RecordingResultPackage{}, errors.New("recovered stage-event log has no terminal failed stage")
+	}
+	result.FailureDiagnostic.FailedNodeID = failed.NodeID
+	result.FailureDiagnostic.CurrentURL = observed.URL
+	if source.ExecutableScriptBundle != nil && source.ExecutableScriptBundle.PlanJSON != nil {
+		for _, step := range source.ExecutableScriptBundle.PlanJSON.Steps {
+			if step.NodeID == failed.NodeID {
+				result.FailureDiagnostic.FailedStepOrder = step.Order
+				break
+			}
+		}
+	}
+	return result, nil
 }
 
 func (s *Service) adaptiveObservedSuccessorEvidence(ctx context.Context, projectID string, state *orchestrator.CascadeState, result model.RecordingResultPackage) adaptiveObservedSuccessorEvidence {
