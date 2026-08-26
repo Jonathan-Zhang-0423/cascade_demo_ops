@@ -62,7 +62,9 @@ func TestCreateV2RunUsesOneFreshLegAndOriginalSentence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := CreateRunRequest{DefinitionRef: "2048-v3", UserGoal: "构建一款适合产品演示的精致响应式 2048 网页游戏", TargetURL: "https://target.example.test/app", CredentialRef: "secret://demo/account", AuthorizationRef: "approval://experiment/start", IdempotencyKey: "closed-loop-v2-idem", HarnessProfile: HarnessProfileAdaptiveBusinessV2}
+	// The Windows runner intentionally omits user_goal by default so the UTF-8
+	// definition remains the authoritative one-sentence source.
+	request := CreateRunRequest{DefinitionRef: "2048-v3", TargetURL: "https://target.example.test/app", CredentialRef: "secret://demo/account", AuthorizationRef: "approval://experiment/start", IdempotencyKey: "closed-loop-v2-idem", HarnessProfile: HarnessProfileAdaptiveBusinessV2}
 	run, err := service.CreateRun(t.Context(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +72,7 @@ func TestCreateV2RunUsesOneFreshLegAndOriginalSentence(t *testing.T) {
 	if run.SchemaVersion != RunSchemaVersionV2 || len(run.Legs) != 1 || run.Legs[0].Kind != "main" {
 		t.Fatalf("v2 run created a recovery leg: %+v", run.Legs)
 	}
-	if run.Legs[0].BuildPrompt != request.UserGoal || run.Budget.TargetSubmissions != 1 || run.Budget.ProviderCalls != 6 || run.Budget.VisualCallsPerRun != 5 || run.Budget.DirectorVisualCalls != 3 {
+	if run.UserGoal != loaded.Definition.ShortGoal || run.Legs[0].BuildPrompt != loaded.Definition.ShortGoal || strings.Contains(run.Legs[0].BuildPrompt, "?") || run.Budget.TargetSubmissions != 1 || run.Budget.ProviderCalls != 6 || run.Budget.VisualCallsPerRun != 5 || run.Budget.DirectorVisualCalls != 3 {
 		t.Fatalf("v2 one-sentence boundary or budget drifted: prompt=%q budget=%+v", run.Legs[0].BuildPrompt, run.Budget)
 	}
 	if run.Legs[0].ProjectName == loaded.Definition.MainProjectName || !strings.Contains(run.Legs[0].ProjectName, "·") {

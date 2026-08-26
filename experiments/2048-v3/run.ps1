@@ -1,7 +1,7 @@
 param(
   [string]$AppBaseURL = "http://127.0.0.1:4318",
   [string]$TargetURL = "https://cascadeai.cn/app",
-  [string]$UserGoal = "构建一款适合产品演示的精致响应式 2048 网页游戏",
+  [string]$UserGoal = "",
   [Parameter(Mandatory = $true)][string]$CredentialRef,
   [string]$AuthorizationRef = ("approval://experiment/2048-v3/" + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()),
   [string]$OutputDirectory = ""
@@ -11,22 +11,34 @@ $ErrorActionPreference = "Stop"
 $idempotencyKey = "experiment-2048-v3-" + [Guid]::NewGuid().ToString("N")
 $body = @{
   definition_ref = "2048-v3"
-  user_goal = $UserGoal
   target_url = $TargetURL
   credential_ref = $CredentialRef
   authorization_ref = $AuthorizationRef
   idempotency_key = $idempotencyKey
   harness_profile = "adaptive-business-harness-v2"
-} | ConvertTo-Json
+}
+if (-not [string]::IsNullOrWhiteSpace($UserGoal)) {
+  $body.user_goal = $UserGoal
+}
+$body = $body | ConvertTo-Json
 
 $created = Invoke-RestMethod -Method Post -ContentType "application/json" -Uri ($AppBaseURL.TrimEnd("/") + "/v1/experiment-runs") -Body $body
 if (-not $created.ok) { throw "DemoOps rejected the v3 experiment start request." }
 $runID = $created.data.run_id
 Write-Output ("experiment_run_id=" + $runID)
 
+$consecutivePollFailures = 0
 while ($true) {
   Start-Sleep -Seconds 5
-  $view = Invoke-RestMethod -Method Get -Uri ($AppBaseURL.TrimEnd("/") + "/v1/experiment-runs/" + $runID)
+  try {
+    $view = Invoke-RestMethod -Method Get -Uri ($AppBaseURL.TrimEnd("/") + "/v1/experiment-runs/" + $runID)
+    $consecutivePollFailures = 0
+  } catch {
+    $consecutivePollFailures += 1
+    if ($consecutivePollFailures -ge 12) { throw }
+    Write-Output ((Get-Date -Format o) + " polling_retry=" + $consecutivePollFailures)
+    continue
+  }
   if (-not $view.ok) { throw "DemoOps could not project the v3 experiment run." }
   $run = $view.data
   Write-Output ((Get-Date -Format o) + " state=" + $run.state + " phase=" + $run.phase + " revision=" + $run.revision)
