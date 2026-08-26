@@ -161,10 +161,14 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 	cancelCleanup()
 	closed = true
 	if closeErr != nil {
-		if runErr != nil {
-			return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_session_close_failed", fmt.Errorf("browser-agent execution failed and the session could not close: %w", closeErr))
+		if runErr == nil {
+			return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_session_close_failed", closeErr)
 		}
-		return model.RecordingResultPackage{}, newRuntimeExecutionError("browser_agent_session_close_failed", closeErr)
+		// The page-stage failure is the authoritative business result. A long
+		// recording may fail to finalize after the stage screenshots, visual
+		// observations, and audit events have already been persisted; do not
+		// replace that actionable diagnosis with a generic cleanup error.
+		progressBrowserAgent(request.Progress, "recording_finalize_warning", "录屏关闭未完整完成；保留已验证页面失败及现有证据。", 91)
 	}
 	for _, artifact := range closeResult.Artifacts {
 		stageRuntime.artifacts[artifact.ID] = artifact

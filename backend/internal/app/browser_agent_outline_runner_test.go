@@ -363,6 +363,35 @@ func TestLocalBrowserAgentOutlineRunnerPackagesRedactedFailureResult(t *testing.
 	}
 }
 
+func TestLocalBrowserAgentOutlineRunnerPreservesStageFailureWhenRecordingCloseFails(t *testing.T) {
+	pkg := readBrowserAgentOutlineFixture(t)
+	pkg.RecordingRunSpec.Outputs.FinalVideo = false
+	plan, err := compileBrowserAgentRuntimePlan(&pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &stubBrowserAgentWorkerSession{failNodeID: plan.Stages[1].NodeID, closeErr: errors.New("synthetic recording finalize failure")}
+	runner := localBrowserAgentOutlineRunner{
+		service: &Service{},
+		sessionFactory: func(_ context.Context, _ driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {
+			return session, driver.BrowserAgentWorkerOpenResult{SessionID: "session_failure_close", RuntimeVersions: map[string]string{"runner": "stub-browser-agent"}}, nil
+		},
+	}
+	result, err := runner.Run(context.Background(), BrowserAgentOutlineRunRequest{
+		Package: &pkg, RuntimePlan: plan, CloudJobID: "job_outline_failure_close", RecordingOutputDir: t.TempDir(),
+		ResultCreatedAt: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC), EventSink: &memoryStageEventSink{},
+	})
+	if err != nil {
+		t.Fatalf("recording cleanup must not mask a persisted stage failure: %v", err)
+	}
+	if result.Status != model.RecordingResultStatusFailed || result.FailureDiagnostic == nil {
+		t.Fatalf("stage failure package was not preserved: %+v", result)
+	}
+	if result.FailureDiagnostic.FailedNodeID != plan.Stages[1].NodeID || result.FailureDiagnostic.Error.Code == "browser_agent_session_close_failed" {
+		t.Fatalf("cleanup failure replaced the business diagnosis: %+v", result.FailureDiagnostic)
+	}
+}
+
 func TestLocalBrowserAgentOutlineRunnerUsesInjectedVerifierForApprovedRepair(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	pkg.RecordingRunSpec.Outputs.FinalVideo = false
@@ -635,6 +664,7 @@ type stubBrowserAgentWorkerSession struct {
 	closeCalls              int
 	recordingPath           string
 	failNodeID              string
+	closeErr                error
 }
 
 func TestBrowserAgentStageUsesCredentialBrokerWithoutEmbeddingSecretInStage(t *testing.T) {
@@ -754,6 +784,9 @@ func (s *stubBrowserAgentWorkerSession) Revalidate(_ context.Context, stage driv
 
 func (s *stubBrowserAgentWorkerSession) Close(context.Context) (driver.BrowserAgentWorkerCloseResult, error) {
 	s.closeCalls++
+	if s.closeErr != nil {
+		return driver.BrowserAgentWorkerCloseResult{}, s.closeErr
+	}
 	return driver.BrowserAgentWorkerCloseResult{
 		RecordingPath:   s.recordingPath,
 		Artifacts:       []model.ArtifactRef{{ID: "artifact_trace", Kind: "browser_trace", URI: "file:///trace.zip", SHA256: "trace_hash", SizeBytes: 10, Sensitive: true}},
