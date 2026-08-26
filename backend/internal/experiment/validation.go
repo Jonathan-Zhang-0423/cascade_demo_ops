@@ -197,9 +197,9 @@ func CompileBuildPrompt(value ProductSpec, userGoal string, deliveryProfiles ...
 		return "", err
 	}
 	userGoal = strings.TrimSpace(userGoal)
-	// The user supplies only one sentence. DemoOps may compile that intent into
-	// one concise downstream sentence, but never dumps the ProductSpec,
-	// acceptance matrix, safety rules, or director concerns into the builder.
+	// The ProductSpec is an internal planning and acceptance artifact. The
+	// downstream builder receives the user's original one-sentence intent; it
+	// must not pay the cost of reinterpreting DemoOps' full requirement matrix.
 	if len([]rune(userGoal)) < 10 {
 		return "", errors.New("one-sentence user goal is too short")
 	}
@@ -219,53 +219,15 @@ func CompileBuildPrompt(value ProductSpec, userGoal string, deliveryProfiles ...
 	if deliveryProfile != "" && deliveryProfile != BuildDeliveryPortableSingleHTML {
 		return "", errors.New("unsupported build delivery profile")
 	}
-	limit := 240
-	clauses := []string{compactBuildPromptClause(userGoal)}
-	if brief := compactBuildPromptClause(value.BuildBrief); brief != "" {
-		limit = 180
-		clauses = appendConciseBuildClause(clauses, brief, limit)
-	} else {
-		for _, requirement := range value.Requirements {
-			if requirement.Priority == "must" {
-				clauses = appendConciseBuildClause(clauses, requirement.Statement, limit)
-				if len(clauses) >= 3 {
-					break
-				}
-			}
-		}
-		clauses = appendConciseBuildClause(clauses, value.VisualDirection.Theme+"，"+value.VisualDirection.Motion, limit)
-		for _, requirement := range value.InteractionRequirements {
-			clauses = appendConciseBuildClause(clauses, requirement.Statement, limit)
-			if len(clauses) >= 6 {
-				break
-			}
-		}
+	prompt := userGoal
+	promptRunes := []rune(prompt)
+	if !strings.ContainsRune(".。!！?？", promptRunes[len(promptRunes)-1]) {
+		prompt += "。"
 	}
-	if deliveryProfile == BuildDeliveryPortableSingleHTML {
-		clauses = appendConciseBuildClause(clauses, "将界面、样式和逻辑内联在单个HTML入口中，确保可直接预览", limit)
-	}
-	prompt := strings.Join(clauses, "；") + "。"
-	if containsPromptForbiddenTerm(prompt) || len([]rune(prompt)) > limit {
+	if containsPromptForbiddenTerm(prompt) || len([]rune(prompt)) > 240 {
 		return "", errors.New("compiled target prompt violates the concise downstream boundary")
 	}
 	return prompt, nil
-}
-
-func appendConciseBuildClause(clauses []string, value string, limit int) []string {
-	clause := compactBuildPromptClause(value)
-	if clause == "" {
-		return clauses
-	}
-	candidate := strings.Join(append(append([]string{}, clauses...), clause), "；") + "。"
-	if len([]rune(candidate)) > limit {
-		return clauses
-	}
-	return append(clauses, clause)
-}
-
-func compactBuildPromptClause(value string) string {
-	value = strings.TrimSpace(value)
-	return strings.TrimRight(value, "。.!！；; ")
 }
 
 type LoadedDefinition struct {

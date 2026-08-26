@@ -953,13 +953,19 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   try {
     if (session.traceActive) await settleWithin(session.context.tracing.stop({ path: session.tracePath }), 8_000);
   } finally {
-    // Chromium finalizes a long Playwright recording only while closing its
-    // context. Never hash or upload the provisional WebM while ffmpeg is still
-    // appending bytes; keep the outer RPC bounded by the Go cleanup deadline.
-    const contextClosed = await valueWithin(session.context.close().then(() => true).catch(() => false), 8 * 60_000, false);
-    if (!contextClosed) throw new Error("browser_agent_recording_finalize_timeout");
-    const browserClosed = await valueWithin(session.browser.close().then(() => true).catch(() => false), 60_000, false);
-    if (!browserClosed) throw new Error("browser_agent_browser_close_timeout");
+    // A browser-bound builder can leave context.close waiting indefinitely on
+    // an active page task. Give the graceful path a bounded opportunity, then
+    // close the browser process itself so the already-recorded WebM and stage
+    // evidence can be finalized instead of discarding the whole result.
+    const contextClose = session.context.close().then(() => true).catch(() => false);
+    const contextClosed = await valueWithin(contextClose, 90_000, false);
+    const browserClosed = await valueWithin(session.browser.close().then(() => true).catch(() => false), contextClosed ? 60_000 : 120_000, false);
+    if (!browserClosed) {
+      // Continue to the stable-file check below. The worker process teardown
+      // may already have stopped the encoder even when Playwright did not
+      // acknowledge close; only an actually growing file is rejected.
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
   }
   if (await fileExists(session.tracePath)) {
     artifacts.push(await artifactRef(`artifact_${session.id}_trace`, "browser_trace", session.tracePath, "application/zip", undefined, { include_in_demo: false }));

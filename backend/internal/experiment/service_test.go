@@ -19,7 +19,7 @@ func TestCreateRunFreezesTwoLegsAndIsIdempotent(t *testing.T) {
 	if run.State != RunStateQueued || run.Phase != "product_spec_frozen" || len(run.Legs) != 2 || run.Legs[0].Kind != "main" || run.Legs[1].Kind != "recovery" {
 		t.Fatalf("unexpected frozen run: %+v", run)
 	}
-	if run.Legs[0].ProjectName == run.Legs[1].ProjectName || run.Legs[0].BuildPrompt == request.UserGoal || run.Legs[0].BuildPrompt != run.Legs[1].BuildPrompt {
+	if run.Legs[0].ProjectName == run.Legs[1].ProjectName || run.Legs[0].BuildPrompt != request.UserGoal || run.Legs[0].BuildPrompt != run.Legs[1].BuildPrompt {
 		t.Fatalf("main and recovery identities were not kept distinct: %+v", run.Legs)
 	}
 	if !strings.Contains(run.Legs[0].ProjectName, "·") || run.UserGoal != request.UserGoal {

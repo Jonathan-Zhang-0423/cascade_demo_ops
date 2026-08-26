@@ -84,7 +84,7 @@ func TestTaskPackSelectionIgnoresHostRouteAndCopy(t *testing.T) {
 	}
 }
 
-func TestCompileBuildPromptKeepsTargetBriefConciseAndAcceptanceInternal(t *testing.T) {
+func TestCompileBuildPromptKeepsOriginalSentenceAndAcceptanceInternal(t *testing.T) {
 	spec := validProductSpecFixture()
 	spec.BuildBrief = "Core state, persistence, undo, keyboard and touch input in a polished responsive interface"
 	spec.ResponsiveRequirements = []string{"Keep the primary surface usable on a narrow viewport", "A second internal verification detail"}
@@ -93,18 +93,25 @@ func TestCompileBuildPromptKeepsTargetBriefConciseAndAcceptanceInternal(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prompt == userGoal || !strings.HasPrefix(prompt, strings.TrimSuffix(userGoal, ".")+"；") || len([]rune(prompt)) > 180 || strings.Contains(prompt, "\n") {
-		t.Fatalf("compiled target brief is not a single concise user sentence: %s", prompt)
+	if prompt != userGoal || len([]rune(prompt)) > 240 || strings.Contains(prompt, "\n") {
+		t.Fatalf("builder did not receive the original one-sentence intent: %s", prompt)
 	}
-	for _, requiredDetail := range []string{spec.BuildBrief, "单个HTML入口"} {
-		if !strings.Contains(prompt, strings.TrimRight(requiredDetail, "。.!！；; ")) {
-			t.Fatalf("concise compiled intent lost a high-priority product detail %q: %s", requiredDetail, prompt)
-		}
-	}
-	for _, internalDetail := range []string{spec.Audience, spec.ObservableAcceptance[0].Statement, spec.ForbiddenOutcomes[0], spec.ResponsiveRequirements[1]} {
+	for _, internalDetail := range []string{spec.BuildBrief, spec.Audience, spec.ObservableAcceptance[0].Statement, spec.ForbiddenOutcomes[0], spec.ResponsiveRequirements[1], "单个HTML入口"} {
 		if strings.Contains(prompt, internalDetail) {
 			t.Fatalf("internal planning or acceptance detail leaked into target brief %q: %s", internalDetail, prompt)
 		}
+	}
+}
+
+func TestCompileBuildPromptAddsOnlyMissingSentenceTerminator(t *testing.T) {
+	spec := validProductSpecFixture()
+	withTerminator := "构建一款适合产品演示的精致响应式网页游戏。"
+	if prompt, err := CompileBuildPrompt(spec, withTerminator, BuildDeliveryPortableSingleHTML); err != nil || prompt != withTerminator {
+		t.Fatalf("existing sentence terminator drifted: prompt=%q err=%v", prompt, err)
+	}
+	withoutTerminator := strings.TrimSuffix(withTerminator, "。")
+	if prompt, err := CompileBuildPrompt(spec, withoutTerminator, BuildDeliveryPortableSingleHTML); err != nil || prompt != withTerminator {
+		t.Fatalf("missing sentence terminator was not normalized: prompt=%q err=%v", prompt, err)
 	}
 }
 
