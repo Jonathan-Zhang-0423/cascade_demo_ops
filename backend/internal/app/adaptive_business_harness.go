@@ -11,7 +11,12 @@ import (
 )
 
 func adaptiveBusinessHarnessEnabled(plan BrowserAgentRuntimePlan) bool {
-	return strings.TrimSpace(plan.HarnessProfile) == model.AdaptiveBusinessHarnessProfileV1
+	switch strings.TrimSpace(plan.HarnessProfile) {
+	case model.AdaptiveBusinessHarnessProfileV1, model.AdaptiveBusinessHarnessProfileV2:
+		return true
+	default:
+		return false
+	}
 }
 
 func businessTransitionForStage(stage BrowserAgentRuntimeStage) model.BusinessTransitionStep {

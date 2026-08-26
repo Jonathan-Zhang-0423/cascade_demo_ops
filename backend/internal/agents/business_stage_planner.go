@@ -157,11 +157,14 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		modeObjective := "在项目创建流程中选择构建模式。"
 		modeSuccess := "构建模式已被选中，后续可以启动 agent 构建。"
 		modeKeywords := []string{"构建模式", "build mode", "builder mode", "构建", "mode"}
+		modeParameters := map[string]string{"optional_when_target_absent": "true"}
 		if wantsDirectBuildMode {
 			modeTitle = "切换为直接构建模式"
 			modeObjective = "关闭仅规划模式，让项目提交后直接启动 agent 生成可运行代码。"
 			modeSuccess = "仅规划模式已关闭，项目将以直接构建模式启动。"
 			modeKeywords = append(modeKeywords, "计划", "规划", "plan", "direct build", "实际构建", "直接构建")
+			modeParameters["action_recipe"] = "configure_boolean"
+			modeParameters["desired_checked"] = "false"
 		}
 		builder.addStage(stageSpec{
 			id:            "select_build_mode",
@@ -178,6 +181,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			durationMS:    durationMSForIntentKeywords(intentText, "构建模式", "build mode", "builder mode"),
 			keywords:      modeKeywords,
 			capture:       []string{"构建模式选项", "已选择构建模式"},
+			parameters:    modeParameters,
 		})
 	}
 

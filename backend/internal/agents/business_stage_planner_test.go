@@ -308,6 +308,9 @@ func TestBusinessStagePlannerActualBuildDisablesPlanFirstMode(t *testing.T) {
 			foundInput = len(stage.Targets) > 0 && stage.Targets[0].Selector == "[data-testid='input-project-idea']"
 		case "business_stage_select_build_mode":
 			foundMode = len(stage.Targets) > 0 && stage.Targets[0].Selector == "[data-testid='button-mode-plan']" && strings.Contains(stage.Objective, "关闭仅规划模式")
+			if stage.Action.Parameters["action_recipe"] != "configure_boolean" || stage.Action.Parameters["desired_checked"] != "false" || stage.Action.Parameters["optional_when_target_absent"] != "true" {
+				t.Fatalf("direct-build mode must be observed as an optional boolean configuration: %+v", stage.Action.Parameters)
+			}
 			node := graphNodeFromBusinessStage(project, stage, project.ProductURL, "feature_direct_build")
 			modeHasVisualValidation = stage.EntryRoute == "/app" && stage.ExpectedRouteAfterAction == "/app" && len(node.Validations) == 2 && node.Validations[0].Kind == "page_changed" && node.Validations[0].Expected == true && node.Validations[1].Kind == "url_matches" && node.Validations[1].Target.URL == "/app"
 		}

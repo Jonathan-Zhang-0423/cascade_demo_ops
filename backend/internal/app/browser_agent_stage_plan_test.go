@@ -80,7 +80,7 @@ func TestAdaptiveHarnessPersistsOptionalModeSkipWhenControlIsAbsent(t *testing.T
 	plan := BrowserAgentRuntimePlan{
 		RunID: "run_optional_mode", SourcePackageID: "pkg_optional_mode",
 		SourceBundleHashSHA256: "bundle_optional_mode", PolicyHashSHA256: "policy_optional_mode",
-		HarnessProfile: model.AdaptiveBusinessHarnessProfileV1, Stages: []BrowserAgentRuntimeStage{stage},
+		HarnessProfile: model.AdaptiveBusinessHarnessProfileV2, Stages: []BrowserAgentRuntimeStage{stage},
 	}
 	observer := unresolvedOptionalModeObserver{}
 	executor := &countingStageExecutor{}
