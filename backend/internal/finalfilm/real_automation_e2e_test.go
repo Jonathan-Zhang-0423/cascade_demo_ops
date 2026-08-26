@@ -73,7 +73,12 @@ func runRealAutomatedFinalFilmE2E(t *testing.T, renderer Renderer, registry *med
 		Store: NewFileStore(filepath.Join(runRoot, "jobs")), Renderer: renderer,
 		OutputRoot: filepath.Join(runRoot, "outputs"), Providers: registry,
 		Planner: &recordingDirectorPlanner{}, SkillRoot: filepath.Join("..", "..", "..", "skills", "final-film"),
-		Now: func() time.Time { sequence++; return time.Unix(1_800_100_000+int64(sequence), 0).UTC() },
+		PaletteBuilder: FFmpegPaletteBoardBuilder{FFmpegPath: requiredRealAutomationEnv(t, "CASCADE_REAL_AUTOMATION_FFMPEG")}, VisualReviewer: allowingVisualQualityReviewer{},
+		// This E2E replays already-downloaded provider results, so the provider
+		// never dereferences the temporary palette URL. Keep the publication
+		// boundary present without performing a second external upload.
+		AssetPublisher: bridgePublisher{result: model.ArkAssetPublicationResult{Publisher: "persisted-replay", Status: "ready", CanUseForRealCall: true, Items: []model.ArkAssetPublicationResultItem{{ProposedPublicRef: &model.DirectorMaterialRef{ID: "palette", URI: "https://assets.example.test/replay-palette.png", MimeType: "image/png"}}}}},
+		Now:            func() time.Time { sequence++; return time.Unix(1_800_100_000+int64(sequence), 0).UTC() },
 		NewID: func(prefix string) (string, error) {
 			sequence++
 			return fmt.Sprintf("%s_real_auto_%02d_%d", prefix, run, sequence), nil

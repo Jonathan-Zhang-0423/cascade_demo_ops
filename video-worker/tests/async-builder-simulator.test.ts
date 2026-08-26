@@ -26,7 +26,10 @@ describe("site-neutral asynchronous builder simulator", () => {
       });
       try {
         const first = await captureBrowserAgentTemporalObservation({ session_id: session.session_id, scope_id: `leg-${variant}`, sequence: 1, phase: "request_submitted", reason: "submitted" });
-        await new Promise((resolve) => setTimeout(resolve, 1_400));
+        // Opening a real Playwright context can itself take several seconds on
+        // a loaded CI host. Keep the simulated build pending until after the
+        // first observation so this test measures a transition, not startup.
+        await new Promise((resolve) => setTimeout(resolve, 7_400));
         const second = await captureBrowserAgentTemporalObservation({ session_id: session.session_id, scope_id: `leg-${variant}`, sequence: 2, phase: "execution_active", reason: "material_change" });
         expect(first.artifact.uri).toMatch(/^file:/);
         expect(JSON.stringify(first)).not.toContain("data:image");
@@ -36,7 +39,7 @@ describe("site-neutral asynchronous builder simulator", () => {
       } finally {
         await closeBrowserAgentSession({ session_id: session.session_id });
       }
-    }, 20_000);
+    }, 30_000);
   }
 
   it("preserves recording segments across a restarted browser session", async () => {
@@ -69,7 +72,7 @@ async function serveVariant(variant: "dom" | "iframe" | "canvas"): Promise<{ url
 
 function pageForVariant(variant: "dom" | "iframe" | "canvas"): string {
   const common = `<style>body{margin:0;background:#071428;color:white;font:24px sans-serif}main{padding:40px}section{height:700px;border:4px solid #30d5ff;border-radius:24px;padding:24px}</style>`;
-  if (variant === "dom") return `<!doctype html><html><head>${common}</head><body><main><section id="surface" role="status" aria-busy="true">Preparing</section></main><script>setTimeout(()=>{surface.textContent='Interactive result ready';surface.setAttribute('aria-busy','false');surface.setAttribute('aria-label','Result ready')},1200)</script></body></html>`;
-  if (variant === "iframe") return `<!doctype html><html><head>${common}</head><body><main><iframe title="Result surface" style="width:90%;height:700px"></iframe></main><script>const frame=document.querySelector('iframe');frame.srcdoc='<body style="background:#17213d;color:white;font:32px sans-serif">Preparing</body>';setTimeout(()=>{frame.srcdoc='<body role="main" aria-label="Ready result" style="background:#123d51;color:white;font:32px sans-serif">Interactive result ready</body>'},1200)</script></body></html>`;
-  return `<!doctype html><html><head>${common}</head><body><main><canvas width="1200" height="700" aria-label="Interactive result surface"></canvas></main><script>const c=document.querySelector('canvas'),x=c.getContext('2d');x.fillStyle='#17213d';x.fillRect(0,0,c.width,c.height);setTimeout(()=>{x.fillStyle='#14d9c4';x.fillRect(80,80,900,500);c.setAttribute('aria-label','Ready interactive result')},1200)</script></body></html>`;
+  if (variant === "dom") return `<!doctype html><html><head>${common}</head><body><main><section id="surface" role="status" aria-busy="true">Preparing</section></main><script>setTimeout(()=>{surface.textContent='Interactive result ready';surface.setAttribute('aria-busy','false');surface.setAttribute('aria-label','Result ready')},7000)</script></body></html>`;
+  if (variant === "iframe") return `<!doctype html><html><head>${common}</head><body><main><iframe title="Result surface" style="width:90%;height:700px"></iframe></main><script>const frame=document.querySelector('iframe');frame.srcdoc='<body style="background:#17213d;color:white;font:32px sans-serif">Preparing</body>';setTimeout(()=>{frame.srcdoc='<body role="main" aria-label="Ready result" style="background:#123d51;color:white;font:32px sans-serif">Interactive result ready</body>'},7000)</script></body></html>`;
+  return `<!doctype html><html><head>${common}</head><body><main><canvas width="1200" height="700" aria-label="Interactive result surface"></canvas></main><script>const c=document.querySelector('canvas'),x=c.getContext('2d');x.fillStyle='#17213d';x.fillRect(0,0,c.width,c.height);setTimeout(()=>{x.fillStyle='#14d9c4';x.fillRect(80,80,900,500);c.setAttribute('aria-label','Ready interactive result')},7000)</script></body></html>`;
 }

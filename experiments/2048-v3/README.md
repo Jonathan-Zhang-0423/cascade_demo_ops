@@ -4,3 +4,10 @@ This fixture is the only place where the product name and its specific acceptanc
 
 The experiment is not valid unless the run owns one newly created entity, records the seven business chapters, performs no out-of-band browser action, and reaches final review only after all generated and assembled media gates pass.
 
+Run it only after the full offline suite passes:
+
+```powershell
+.\experiments\2048-v3\run.ps1 -CredentialRef 'credential://demo/<configured-ref>'
+```
+
+The script creates a new v3 run with a unique idempotency key, then only polls DemoOps. It never calls the target platform or a media provider directly and stops at the single final-review boundary.
