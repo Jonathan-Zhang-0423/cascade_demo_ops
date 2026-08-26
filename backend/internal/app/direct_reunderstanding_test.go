@@ -211,6 +211,18 @@ func TestInsertPendingAdaptiveContinuationPrefersFirstSkippedEffect(t *testing.T
 	}
 }
 
+func TestInterruptedStageSelectionFallsBackToUnfinishedAction(t *testing.T) {
+	events := []model.StageExecutionEvent{
+		{Sequence: 1, NodeID: "completed", EventType: model.StageExecutionEventActionStarted},
+		{Sequence: 2, NodeID: "completed", EventType: model.StageExecutionEventActionCompleted},
+		{Sequence: 3, NodeID: "interrupted", EventType: model.StageExecutionEventActionStarted},
+	}
+	failed := selectAdaptiveInterruptedStage(events)
+	if failed.NodeID != "interrupted" {
+		t.Fatalf("unfinished action was not selected: %+v", failed)
+	}
+}
+
 func TestInsertPendingAdaptiveContinuationRetriesConfirmedRollbackOnce(t *testing.T) {
 	continuation := &model.GraphNode{
 		ID: "continue_execution", Type: model.GraphNodeTypeAction,

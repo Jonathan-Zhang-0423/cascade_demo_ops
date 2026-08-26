@@ -229,14 +229,9 @@ func (s *Service) adaptiveInterruptedResultFromStageLog(ctx context.Context, pro
 	if len(observed.Events) == 0 || strings.TrimSpace(observed.URL) == "" {
 		return model.RecordingResultPackage{}, errors.New("recovered stage-event log has no observed successor evidence")
 	}
-	var failed model.StageExecutionEvent
-	for _, event := range observed.Events {
-		if event.EventType == model.StageExecutionEventStageFailed && event.Sequence >= failed.Sequence {
-			failed = event
-		}
-	}
+	failed := selectAdaptiveInterruptedStage(observed.Events)
 	if strings.TrimSpace(failed.NodeID) == "" {
-		return model.RecordingResultPackage{}, errors.New("recovered stage-event log has no terminal failed stage")
+		return model.RecordingResultPackage{}, errors.New("recovered stage-event log has no failed or interrupted stage")
 	}
 	result.FailureDiagnostic.FailedNodeID = failed.NodeID
 	result.FailureDiagnostic.CurrentURL = observed.URL
@@ -249,6 +244,31 @@ func (s *Service) adaptiveInterruptedResultFromStageLog(ctx context.Context, pro
 		}
 	}
 	return result, nil
+}
+
+func selectAdaptiveInterruptedStage(events []model.StageExecutionEvent) model.StageExecutionEvent {
+	var failed model.StageExecutionEvent
+	started := map[string]model.StageExecutionEvent{}
+	finished := map[string]bool{}
+	for _, event := range events {
+		if event.EventType == model.StageExecutionEventStageFailed && event.Sequence >= failed.Sequence {
+			failed = event
+		}
+		switch event.EventType {
+		case model.StageExecutionEventActionStarted:
+			started[event.NodeID] = event
+		case model.StageExecutionEventActionCompleted, model.StageExecutionEventStageCompleted, model.StageExecutionEventStageFailed:
+			finished[event.NodeID] = true
+		}
+	}
+	if strings.TrimSpace(failed.NodeID) == "" {
+		for nodeID, event := range started {
+			if !finished[nodeID] && event.Sequence >= failed.Sequence {
+				failed = event
+			}
+		}
+	}
+	return failed
 }
 
 func (s *Service) adaptiveObservedSuccessorEvidence(ctx context.Context, projectID string, state *orchestrator.CascadeState, result model.RecordingResultPackage) adaptiveObservedSuccessorEvidence {
