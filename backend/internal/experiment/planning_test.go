@@ -52,6 +52,23 @@ func TestProductSpecPlannerAllowsOneQualityRegeneration(t *testing.T) {
 	}
 }
 
+func TestProductSpecPlannerDropsInvalidOptionalBuildBrief(t *testing.T) {
+	valid := validProductSpecFixture()
+	valid.BuildBrief = strings.Repeat("过长的内部摘要", 40)
+	client := &productSpecLLM{specs: []ProductSpec{valid}}
+	planner, err := NewProductSpecPlanner(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := planner.Generate(t.Context(), "Build a polished responsive interactive product")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.calls != 1 || result.BuildBrief != "" {
+		t.Fatalf("optional build brief should not consume regeneration: calls=%d brief=%q", client.calls, result.BuildBrief)
+	}
+}
+
 func TestProductSpecQualityRejectsHarnessLeakAndWeakEvidence(t *testing.T) {
 	for name, mutate := range map[string]func(*ProductSpec){
 		"harness leak": func(spec *ProductSpec) { spec.Objective = "prepare DemoOps recording" },

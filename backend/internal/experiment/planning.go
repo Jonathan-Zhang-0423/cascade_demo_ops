@@ -57,6 +57,7 @@ func (p *ProductSpecPlanner) Generate(ctx context.Context, shortGoal string) (Pr
 		var spec ProductSpec
 		_, err := p.client.GenerateJSON(ctx, config.ModelTaskPlanning, request, &spec)
 		if err == nil {
+			spec.BuildBrief = normalizedOptionalBuildBrief(spec.BuildBrief)
 			err = ValidateProductSpecQuality(spec)
 		}
 		if err == nil {
@@ -66,6 +67,18 @@ func (p *ProductSpecPlanner) Generate(ctx context.Context, shortGoal string) (Pr
 		request.User = fmt.Sprintf("The previous draft failed the deterministic ProductSpec quality gate: %s\nRegenerate the same product goal once and correct only those structural issues:\n%s", boundedPlanningError(err), shortGoal)
 	}
 	return ProductSpec{}, fmt.Errorf("product specification failed after one regeneration: %w", lastErr)
+}
+
+// The builder never receives BuildBrief: CompileBuildPrompt forwards the
+// user's original sentence byte-for-byte. Treat a malformed model-authored
+// brief as absent so this optional internal convenience field cannot consume
+// the only regeneration or abort an otherwise valid product specification.
+func normalizedOptionalBuildBrief(value string) string {
+	brief := strings.TrimSpace(value)
+	if len([]rune(brief)) < 10 || len([]rune(brief)) > 140 || strings.ContainsAny(brief, "\r\n") || containsPromptForbiddenTerm(brief) {
+		return ""
+	}
+	return brief
 }
 
 func ValidateProductSpecQuality(spec ProductSpec) error {
