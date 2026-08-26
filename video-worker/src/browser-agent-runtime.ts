@@ -2099,6 +2099,10 @@ export function adaptiveObservationDeadline(startedAtMS: number, lastProgressAtM
 	return Math.min(absoluteDeadline, lastProgressAtMS + boundedIdle);
 }
 
+export function browserVisualHardRefreshDue(startedAtMS: number, nowMS: number, observationBudgetMS: number, refreshed: boolean): boolean {
+	return !refreshed && nowMS - startedAtMS >= interactiveSurfacePollTimeout(observationBudgetMS);
+}
+
 async function businessProgressDigest(page: any): Promise<string> {
 	const snapshot = await page.evaluate(() => {
 		const doc = (globalThis as any).document;
@@ -2144,6 +2148,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	let progressDigest = await businessProgressDigest(session.page);
 	let nextProgressProbeAtMS = startedAtMS + 5_000;
 	let refreshed = false;
+	let hardRefreshed = false;
 	let sawBusy = false;
 	let nextCaptureAt = Date.now();
 	while (Date.now() < deadline) {
@@ -2164,6 +2169,19 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			if (browserVisualRefreshShouldReload(busyBeforeRefresh) && !await refreshAndRestoreObservedEntry(session)) {
 				return { surface: false, score: false, controls: false };
 			}
+			nextCaptureAt = Date.now();
+		}
+		if (requireVisualTerminal && browserVisualHardRefreshDue(startedAtMS, Date.now(), idleTimeoutMS, hardRefreshed)) {
+			// A stale busy marker must not extend an observation indefinitely. At
+			// the explicit wall-clock budget, refresh the exact observed entity once
+			// even if the SPA still claims to be busy, then reserve a short final
+			// window for structural and visual terminal confirmation.
+			refreshed = true;
+			hardRefreshed = true;
+			if (!await refreshAndRestoreObservedEntry(session)) {
+				return { surface: false, score: false, controls: false };
+			}
+			deadline = Math.min(deadline, Date.now() + 60_000);
 			nextCaptureAt = Date.now();
 		}
 		const target = await interactiveSurfaceTargetOnce(session.page);
