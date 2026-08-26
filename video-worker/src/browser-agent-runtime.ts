@@ -1269,8 +1269,7 @@ async function executeInteraction(
 		const desired = booleanParameter(interaction.parameters, "desired_checked", false);
 		if (actual !== desired) await resolved.locator.click({ timeout });
 	} else if (recipe === "continue_execution" && resolved.strategy === "runtime_execution_confirmation_input") {
-		const value = stringParameter(interaction.parameters, "continuation_confirmation_value");
-		if (!value) throw new Error(`browser_agent_continuation_confirmation_value_missing: ${stage.node_id}`);
+		const value = await runtimeContinuationConfirmationValue(session.page, interaction);
 		await resolved.locator.fill(value, { timeout });
 		await resolved.locator.press("Enter", { timeout });
 	} else {
@@ -1488,7 +1487,7 @@ export function runtimeContinuationConfirmationPrompt(value: string): boolean {
 
 async function runtimeExecutionConfirmationInputLocator(page: any, stage: BrowserAgentWorkerStage): Promise<any | undefined> {
 	const interaction = stage.interactions[0];
-	if (!interaction || !stringParameter(interaction.parameters, "continuation_confirmation_value") || booleanParameter(interaction.parameters, "requires_prior_continuation_effect", false)) return undefined;
+	if (!interaction || booleanParameter(interaction.parameters, "requires_prior_continuation_effect", false)) return undefined;
 	const explicitPrompt = await page.evaluate(() => {
 		const body = String((globalThis as any).document?.body?.innerText || "").replace(/\s+/g, " ").trim().slice(-24_000);
 		return body;
@@ -1508,6 +1507,13 @@ async function runtimeExecutionConfirmationInputLocator(page: any, stage: Browse
 		if (!excluded) visible.push(item);
 	}
 	return visible.length === 1 ? visible[0] : undefined;
+}
+
+async function runtimeContinuationConfirmationValue(page: any, interaction: BrowserAgentInteraction): Promise<string> {
+	const configured = stringParameter(interaction.parameters, "continuation_confirmation_value");
+	if (configured) return configured;
+	const visibleText = await page.evaluate(() => String((globalThis as any).document?.body?.innerText || "").slice(-24_000)).catch(() => "");
+	return /\p{Script=Han}/u.test(visibleText) ? "确认，继续执行。" : "Confirm and continue.";
 }
 
 async function booleanControlState(locator: any): Promise<boolean | undefined> {
@@ -2096,7 +2102,7 @@ export function adaptiveObservationDeadline(startedAtMS: number, lastProgressAtM
 async function businessProgressDigest(page: any): Promise<string> {
 	const snapshot = await page.evaluate(() => {
 		const doc = (globalThis as any).document;
-		const bodyText = String(doc?.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 48_000);
+		const bodyText = String(doc?.body?.innerText || "");
 		const lifecycle = Array.from(doc?.querySelectorAll?.('progress,[role="progressbar"],[role="status"],[aria-live],[aria-busy]') || [])
 			.slice(0, 160)
 			.map((element: any) => ({
@@ -2110,7 +2116,15 @@ async function businessProgressDigest(page: any): Promise<string> {
 		return { url: String((globalThis as any).location?.href || ""), readyState: String(doc?.readyState || ""), bodyText, lifecycle };
 	}).catch(() => undefined);
 	if (!snapshot) return "";
+	snapshot.bodyText = normalizedBusinessProgressText(snapshot.bodyText);
 	return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+}
+
+export function normalizedBusinessProgressText(value: string): string {
+	return String(value || "")
+		.replace(/\b\d+\s*(?:s|m|h|d|sec|secs|min|mins|minute|minutes|hour|hours|day|days)\s*ago\b/gi, "<relative-time>")
+		.replace(/\d+\s*(?:秒|分钟|小时|天)前/g, "<relative-time>")
+		.replace(/\s+/g, " ").trim().slice(0, 48_000);
 }
 
 async function waitForPlayableSurfaceWithVisualObservation(

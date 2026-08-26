@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -305,6 +305,12 @@ describe("runtime execution continuation", () => {
 		expect(runtimeContinuationConfirmationPrompt("这听起来对吗？确认后我将开始详细构建计划。")).toBe(true);
 		expect(runtimeContinuationConfirmationPrompt("Does this look right? Confirm to continue building.")).toBe(true);
 		expect(runtimeContinuationConfirmationPrompt("The preview is still generating.")).toBe(false);
+	});
+
+	it("does not mistake relative timestamps for business progress", () => {
+		expect(normalizedBusinessProgressText("任务生成中 · 9m ago")).toBe(normalizedBusinessProgressText("任务生成中 · 10m ago"));
+		expect(normalizedBusinessProgressText("任务生成中 · 9分钟前")).toBe(normalizedBusinessProgressText("任务生成中 · 10分钟前"));
+		expect(normalizedBusinessProgressText("阶段 3/5")).not.toBe(normalizedBusinessProgressText("阶段 4/5"));
 	});
 });
 

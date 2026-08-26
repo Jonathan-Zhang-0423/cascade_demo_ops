@@ -182,6 +182,33 @@ func TestAdaptiveHarnessSkipsAbsentOptionalExecutionContinuation(t *testing.T) {
 	}
 }
 
+func TestAdaptiveHarnessReobservesPreviouslySkippedContinuationAfterWorkerRestart(t *testing.T) {
+	stage := BrowserAgentRuntimeStage{
+		ID: "stage_optional_continue_restart", Order: 1, NodeID: "node_optional_continue_restart",
+		StageKind: model.BusinessStageKindBusinessSubmit, EntryRoute: "https://product.example/entity/1",
+		TargetContract: model.BrowserAgentTargetContract{SemanticID: "continue_execution", Destructive: false, Confidence: .9},
+		Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionClick, NonDestructive: true, Parameters: map[string]any{
+			"action_recipe": "continue_execution", "optional_when_target_absent": "true",
+		}}},
+	}
+	plan := BrowserAgentRuntimePlan{
+		RunID: "run_optional_restart", SourcePackageID: "pkg_optional_restart",
+		SourceBundleHashSHA256: "bundle_optional_restart", PolicyHashSHA256: "policy_optional_restart",
+		HarnessProfile: model.AdaptiveBusinessHarnessProfileV1, Stages: []BrowserAgentRuntimeStage{stage},
+	}
+	skip := model.HarnessDecision{Kind: model.HarnessDecisionSkip, Confidence: .9, Reason: "optional target was absent"}
+	priorObservation := &model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, URL: stage.EntryRoute}
+	sink := &memoryStageEventSink{events: []model.StageExecutionEvent{
+		{RunID: plan.RunID, SourcePackageID: plan.SourcePackageID, SourceBundleHashSHA256: plan.SourceBundleHashSHA256, PolicyHashSHA256: plan.PolicyHashSHA256, StageID: stage.ID, NodeID: stage.NodeID, Sequence: 1, EventType: model.StageExecutionEventStepSatisfied, HarnessDecision: &skip, Observation: priorObservation},
+		{RunID: plan.RunID, SourcePackageID: plan.SourcePackageID, SourceBundleHashSHA256: plan.SourceBundleHashSHA256, PolicyHashSHA256: plan.PolicyHashSHA256, StageID: stage.ID, NodeID: stage.NodeID, Sequence: 2, EventType: model.StageExecutionEventStageCompleted, Observation: priorObservation},
+	}}
+	executor := &countingStageExecutor{}
+	result, err := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{}).Run(context.Background(), plan, stubStageObserver{}, executor, sink)
+	if err != nil || result.AuditError != nil || executor.calls != 1 {
+		t.Fatalf("a skipped continuation must be observed again and executed once when it later appears: err=%v calls=%d audit=%v", err, executor.calls, result.AuditError)
+	}
+}
+
 type unresolvedOptionalModeObserver struct{}
 
 func (unresolvedOptionalModeObserver) ObserveStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageObservation, error) {

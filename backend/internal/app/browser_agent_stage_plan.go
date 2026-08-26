@@ -216,6 +216,8 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 	}
 	sequence := int64(0)
 	completedStages := map[string]model.StageExecutionEvent{}
+	skippedOptionalStages := map[string]bool{}
+	actionCompletedStages := map[string]bool{}
 	latestCompletedOrder := 0
 	latestReachedOrder := 0
 	interruptionConsumed := false
@@ -241,6 +243,12 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 						latestCompletedOrder = stage.Order
 					}
 				}
+			}
+			if event.EventType == model.StageExecutionEventStepSatisfied && event.HarnessDecision != nil && event.HarnessDecision.Kind == model.HarnessDecisionSkip {
+				skippedOptionalStages[event.StageID] = true
+			}
+			if event.EventType == model.StageExecutionEventActionCompleted {
+				actionCompletedStages[event.StageID] = true
 			}
 			if event.EventType == model.StageExecutionEventStageResumed {
 				interruptionConsumed = true
@@ -286,7 +294,9 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		if completedEvent, completed := completedStages[stage.ID]; completed {
+		completedEvent, completed := completedStages[stage.ID]
+		reobserveSkippedContinuation := adaptiveBusinessHarnessEnabled(plan) && adaptiveStageOptionalWhenTargetAbsent(stage) && skippedOptionalStages[stage.ID] && !actionCompletedStages[stage.ID]
+		if completed && !reobserveSkippedContinuation {
 			if stage.Order < latestCompletedOrder {
 				if err := appendEvent(stage, model.StageExecutionEventStageResumed, completedEvent.Observation, completedEvent.EvidenceRefs); err != nil {
 					return result, err
