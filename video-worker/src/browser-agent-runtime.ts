@@ -965,6 +965,7 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   clearTaskSecrets(session.taskSecrets);
   const artifacts: ArtifactRef[] = [];
   let recordingPath: string | undefined;
+  let browserCloseConfirmed = false;
   const recordingPathPromise = session.video?.path().catch(() => undefined);
   try {
     if (session.traceActive) await settleWithin(session.context.tracing.stop({ path: session.tracePath }), 8_000);
@@ -975,8 +976,8 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
     // evidence can be finalized instead of discarding the whole result.
     const contextClose = session.context.close().then(() => true).catch(() => false);
     const contextClosed = await valueWithin(contextClose, 90_000, false);
-    const browserClosed = await valueWithin(session.browser.close().then(() => true).catch(() => false), contextClosed ? 60_000 : 120_000, false);
-    if (!browserClosed) {
+    browserCloseConfirmed = await valueWithin(session.browser.close().then(() => true).catch(() => false), contextClosed ? 60_000 : 120_000, false);
+    if (!browserCloseConfirmed) {
       // Continue to the stable-file check below. The worker process teardown
       // may already have stopped the encoder even when Playwright did not
       // acknowledge close; only an actually growing file is rejected.
@@ -988,7 +989,10 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   }
   recordingPath = recordingPathPromise ? await valueWithin(recordingPathPromise, 3_000, undefined) : undefined;
   if (recordingPath && await fileExists(recordingPath)) {
-    if (!await waitForFileStable(recordingPath, 3, 750)) throw new Error("browser_agent_recording_not_stable");
+    const stable = browserCloseConfirmed
+      ? await waitForFileStable(recordingPath, 3, 750, 45_000)
+      : await waitForFileStable(recordingPath, 3, 1_000, 180_000, 60_000);
+    if (!stable) throw new Error("browser_agent_recording_not_stable");
     const segmentEntries = (await readdir(session.outputDir).catch(() => [] as string[])).filter((entry) => /^recording-segment-\d+\.webm$/i.test(entry));
 		const fullPath = path.join(session.outputDir, `recording-full-${String(segmentEntries.length + 1).padStart(3, "0")}.webm`);
 		if (path.resolve(recordingPath) !== path.resolve(fullPath)) await rename(recordingPath, fullPath);
@@ -1127,17 +1131,20 @@ export function runtimeContinuationWaitTimeout(value: unknown): number {
 	return Math.max(0, Math.min(1_800_000, Math.trunc(Number(value) || 0)));
 }
 
-export async function waitForFileStable(filePath: string, requiredStableChecks: number, intervalMS: number, maxWaitMS = 45_000): Promise<boolean> {
+export async function waitForFileStable(filePath: string, requiredStableChecks: number, intervalMS: number, maxWaitMS = 45_000, minStableMS = requiredStableChecks * intervalMS): Promise<boolean> {
   let previousSize = -1;
   let stableChecks = 0;
+  let stableSince = 0;
   const deadline = Date.now() + Math.max(intervalMS, maxWaitMS);
   while (Date.now() <= deadline) {
     const size = await stat(filePath).then((value) => value.size).catch(() => -1);
     if (size > 0 && size === previousSize) {
+      if (stableChecks === 0) stableSince = Date.now();
       stableChecks++;
-      if (stableChecks >= requiredStableChecks) return true;
+      if (stableChecks >= requiredStableChecks && Date.now() - stableSince >= minStableMS) return true;
     } else {
       stableChecks = 0;
+      stableSince = 0;
     }
     previousSize = size;
     if (Date.now() + intervalMS > deadline) break;

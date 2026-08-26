@@ -34,4 +34,23 @@ describe("browser recording finalization", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("does not mistake a long encoder pause for final quiescence", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "demoops-recording-pause-"));
+    const recording = path.join(root, "recording.webm");
+    try {
+      await writeFile(recording, "initial");
+      const delayedWrite = (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        await appendFile(recording, "-late-browser-flush");
+      })();
+
+      const started = Date.now();
+      expect(await waitForFileStable(recording, 2, 10, 400, 100)).toBe(true);
+      await delayedWrite;
+      expect(Date.now() - started).toBeGreaterThanOrEqual(170);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
