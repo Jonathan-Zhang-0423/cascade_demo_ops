@@ -68,7 +68,11 @@ func TestAdaptiveExperimentPackageCompilesWithoutCascadeFlow(t *testing.T) {
 		if stage.NodeID != "business_stage_continue_prepared_execution" && stage.NodeID != "business_stage_continue_prepared_execution_followup" {
 			continue
 		}
-		foundContinuations[stage.NodeID] = stage.Interaction.Parameters["action_recipe"] == "continue_execution" && stage.Interaction.Parameters["optional_when_target_absent"] == "true" && stage.Interaction.Parameters["capture_result_surface_baseline"] == "true" && stage.Interaction.Parameters["target_wait_timeout_ms"] == "300000"
+		expectedWait := "300000"
+		if stage.NodeID == "business_stage_continue_prepared_execution" {
+			expectedWait = "1800000"
+		}
+		foundContinuations[stage.NodeID] = stage.Interaction.Parameters["action_recipe"] == "continue_execution" && stage.Interaction.Parameters["optional_when_target_absent"] == "true" && stage.Interaction.Parameters["capture_result_surface_baseline"] == "true" && stage.Interaction.Parameters["target_wait_timeout_ms"] == expectedWait
 	}
 	if !foundContinuations["business_stage_continue_prepared_execution"] || !foundContinuations["business_stage_continue_prepared_execution_followup"] {
 		t.Fatalf("adaptive async package did not include the bounded runtime execution continuation chain: %+v", foundContinuations)

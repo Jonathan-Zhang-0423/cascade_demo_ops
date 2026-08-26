@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,6 +73,7 @@ func (s *Service) prepareAdaptiveExperimentRun(ctx context.Context, request expe
 	if err != nil {
 		return ProductRunPrepareResult{}, err
 	}
+	applyAdaptiveContinuationObservationBudget(stagePlan, request.ObservationPlan)
 	intelligence := &model.ProjectIntelligencePack{
 		ID: "intel_" + shortID(projectID), ProjectID: projectID,
 		SchemaVersion:     model.ProjectIntelligencePackSchemaVersion,
@@ -111,6 +113,35 @@ func (s *Service) prepareAdaptiveExperimentRun(ctx context.Context, request expe
 		return ProductRunPrepareResult{}, err
 	}
 	return ProductRunPrepareResult{State: compactStateForPrepareResponse(state, &build), Build: &build}, nil
+}
+
+// applyAdaptiveContinuationObservationBudget lets the first runtime-discovered
+// execution confirmation live for the same idle window as the asynchronous
+// business observation. A generated plan may take substantially longer than
+// the generic planner's compatibility timeout to expose its confirmation
+// control. Only the first continuation receives the long wait: a follow-up is
+// conditional on a committed first effect and remains deliberately bounded.
+func applyAdaptiveContinuationObservationBudget(stagePlan *model.BusinessStagePlan, observationPlan experiment.ObservationPlan) {
+	if stagePlan == nil || observationPlan.DeferAfterMS <= 0 {
+		return
+	}
+	for index := range stagePlan.Stages {
+		stage := &stagePlan.Stages[index]
+		if stage.ID != "business_stage_continue_prepared_execution" {
+			continue
+		}
+		if stage.Action.Parameters == nil {
+			stage.Action.Parameters = map[string]string{}
+		}
+		stage.Action.Parameters["target_wait_timeout_ms"] = strconv.Itoa(observationPlan.DeferAfterMS)
+		if stage.InteractionContract != nil {
+			if stage.InteractionContract.Parameters == nil {
+				stage.InteractionContract.Parameters = map[string]any{}
+			}
+			stage.InteractionContract.Parameters["target_wait_timeout_ms"] = strconv.Itoa(observationPlan.DeferAfterMS)
+		}
+		return
+	}
 }
 
 func adaptiveExperimentRequirements(spec experiment.ProductSpec) []model.DemoRequirement {

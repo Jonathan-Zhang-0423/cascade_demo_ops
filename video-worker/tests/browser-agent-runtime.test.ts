@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationPollDecision, runtimeExecutionContinuationScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -23,6 +23,8 @@ describe("browser visual polling terminal evidence", () => {
     expect(browserVisualRefreshDue(1_000, 31_000, 30_000, false)).toBe(true);
     expect(browserVisualRefreshDue(1_000, 31_000, 30_000, true)).toBe(false);
 		expect(browserVisualTerminalWithStructuralEvidence([verdict("in_progress", .8), verdict("succeeded", .95)], 2)).toBe("succeeded");
+		expect(browserVisualTerminalWithStructuralEvidence([verdict("succeeded", .85)], 2)).toBe("succeeded");
+		expect(browserVisualTerminalWithStructuralEvidence([verdict("succeeded", .84)], 2)).toBeUndefined();
   });
 
 	it("retains the visual Gate when compatible RPC stages carry policy on the interaction", () => {
@@ -291,6 +293,12 @@ describe("runtime execution continuation", () => {
 		expect(runtimeContinuationPollDecision(false, "welcome", "product", false, true)).toBe("observe");
 		expect(runtimeContinuationPollDecision(false, "welcome", "welcome", true, true)).toBe("advance");
 		expect(runtimeContinuationPollDecision(false, "welcome", "welcome", false, false, true)).toBe("advance");
+	});
+
+	it("honors the adaptive idle budget without allowing an unbounded continuation wait", () => {
+		expect(runtimeContinuationWaitTimeout("1800000")).toBe(1_800_000);
+		expect(runtimeContinuationWaitTimeout(3_600_000)).toBe(1_800_000);
+		expect(runtimeContinuationWaitTimeout(-1)).toBe(0);
 	});
 });
 

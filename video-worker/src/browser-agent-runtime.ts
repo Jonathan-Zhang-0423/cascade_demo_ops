@@ -1060,7 +1060,7 @@ export function runtimeContinuationPollDecision(targetResolved: boolean, baselin
 }
 
 async function waitForRuntimeExecutionContinuation(session: BrowserAgentSession, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction): Promise<void> {
-	const timeoutMS = Math.max(0, Math.min(300_000, Math.trunc(Number(interaction.parameters?.target_wait_timeout_ms) || 0)));
+	const timeoutMS = runtimeContinuationWaitTimeout(interaction.parameters?.target_wait_timeout_ms);
 	if (timeoutMS <= 0) return;
 	const pollMS = Math.max(1_000, Math.min(15_000, Math.trunc(Number(interaction.parameters?.target_poll_interval_ms) || 5_000)));
 	const requiredCommittedEffects = booleanParameter(interaction.parameters, "requires_prior_continuation_effect", false)
@@ -1080,6 +1080,10 @@ async function waitForRuntimeExecutionContinuation(session: BrowserAgentSession,
 		if (decision !== "observe") return;
 		await session.page.waitForTimeout(Math.min(pollMS, Math.max(100, deadline - Date.now())));
 	}
+}
+
+export function runtimeContinuationWaitTimeout(value: unknown): number {
+	return Math.max(0, Math.min(1_800_000, Math.trunc(Number(value) || 0)));
 }
 
 async function waitForFileStable(filePath: string, requiredStableChecks: number, intervalMS: number): Promise<boolean> {
@@ -1958,7 +1962,7 @@ export function confirmedBrowserVisualTerminalDecision(observations: BrowserVisu
 	return latest.decision;
 }
 
-export function browserVisualTerminalWithStructuralEvidence(observations: BrowserVisualObservation[], maxCalls: number, minimumConfidence = 0.9): "succeeded" | "failed" | undefined {
+export function browserVisualTerminalWithStructuralEvidence(observations: BrowserVisualObservation[], maxCalls: number, minimumConfidence = 0.85): "succeeded" | "failed" | undefined {
 	const latest = observations.at(-1);
 	if (Math.trunc(maxCalls) <= 2 && latest && (latest.decision === "succeeded" || latest.decision === "failed") && latest.confidence >= minimumConfidence) {
 		return latest.decision;
