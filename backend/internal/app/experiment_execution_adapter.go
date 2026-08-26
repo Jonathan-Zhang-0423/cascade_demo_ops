@@ -58,6 +58,9 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		}
 		status, err := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
 		if err == nil && status.Status == "failed" && isAdaptiveExperimentHarness(request.HarnessProfile) {
+			if adaptiveRetryableRuntimeFailure(status.BlockingErrorCode) {
+				return a.retryAdaptiveRuntimeFailure(ctx, request, projectID, jobID, emit)
+			}
 			return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 		}
 		if err == nil && status.Status == "awaiting_credentials" && isAdaptiveExperimentHarness(request.HarnessProfile) {
@@ -92,6 +95,9 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 			}
 			status, statusErr := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
 			if statusErr == nil && status.Status == "failed" && isAdaptiveExperimentHarness(request.HarnessProfile) {
+				if adaptiveRetryableRuntimeFailure(status.BlockingErrorCode) {
+					return a.retryAdaptiveRuntimeFailure(ctx, request, projectID, jobID, emit)
+				}
 				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 			}
 			if statusErr == nil && status.Status == "awaiting_credentials" && isAdaptiveExperimentHarness(request.HarnessProfile) {
@@ -216,6 +222,54 @@ func adaptiveWaitResultNeedsReconciliation(request experiment.LegExecutionReques
 	}
 	var adapterErr *experiment.AdapterError
 	return errors.As(err, &adapterErr) && adapterErr.Code == "confidence_deferred"
+}
+
+func adaptiveRetryableRuntimeFailure(code string) bool {
+	switch strings.TrimSpace(code) {
+	case runtimeErrorVideoWorkerMissing, runtimeErrorNodeMissing, "browser_agent_session_start_failed":
+		return true
+	default:
+		return false
+	}
+}
+
+// retryAdaptiveRuntimeFailure resubmits the current already-approved
+// reconciliation package after a pre-browser infrastructure failure. The
+// package contains no create/submit stage, so this neither creates a second
+// entity nor replays the original target once-effect.
+func (a *appExperimentExecutionAdapter) retryAdaptiveRuntimeFailure(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, emit func(experiment.LegExecutionUpdate) error) error {
+	build, err := a.service.BuildClientExecutionPackage(ctx, projectID, defaultDesktopOrgID)
+	if err != nil || build.Package.ConfidenceSummary == nil {
+		return &experiment.AdapterError{Code: "runtime_recovery_package_unavailable", Phase: "waiting_external", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{sourceJobID}, Cause: err}
+	}
+	key := fmt.Sprintf("runtime-retry-%s-%s-%d", safePathSegment(request.RunID), safePathSegment(request.LegID), request.BrowserAttempt)
+	upload, err := a.service.UploadDirectExecutionPackage(ctx, projectID, DirectTransportUploadRequest{
+		OrgID: defaultDesktopOrgID, PackageDigestSHA256: build.PackageDigestSHA256,
+		ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256,
+		ConfidenceAssessmentHash:    build.Package.ConfidenceSummary.AssessmentHash,
+		RiskConfirmed:               true, IdempotencyKey: key,
+		RuntimeMetadata: map[string]any{
+			"experiment_run_id": request.RunID, "experiment_leg_id": request.LegID,
+			"harness_profile": request.HarnessProfile, "observation_plan": request.ObservationPlan,
+			"interaction_plan": request.InteractionPlan, "visual_call_budget": request.VisualCallBudget,
+			"expected_product_summary": experimentProductEvidenceSummary(request.ProductSpec), "reconciles_direct_job": sourceJobID,
+		},
+	})
+	if err != nil {
+		return &experiment.AdapterError{Code: "runtime_recovery_upload_failed", Phase: "waiting_external", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{sourceJobID}, Cause: err}
+	}
+	jobID := upload.Receipt.JobID
+	if err := emit(experiment.LegExecutionUpdate{Kind: "checkpoint_result_entry", ResultEntryRef: "direct:" + projectID + ":" + jobID, EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
+		return err
+	}
+	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "runtime_recovery", Summary: "运行时基础设施已恢复；重试同一只观察执行包，不重放项目创建或提交", EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
+		return err
+	}
+	status, err := a.waitForDirectResult(ctx, projectID, jobID, request, emit)
+	if err != nil {
+		return err
+	}
+	return a.completeDirectLeg(ctx, request, projectID, jobID, status, false, emit)
 }
 
 func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, emit func(experiment.LegExecutionUpdate) error) error {

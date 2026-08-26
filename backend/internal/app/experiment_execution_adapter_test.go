@@ -324,6 +324,19 @@ func TestAdaptiveWaitFailureKeepsObservedStateReconciliationRaceClosed(t *testin
 	}
 }
 
+func TestAdaptiveRuntimeFailureRetryIsLimitedToPreBrowserInfrastructure(t *testing.T) {
+	for _, code := range []string{runtimeErrorVideoWorkerMissing, runtimeErrorNodeMissing, "browser_agent_session_start_failed"} {
+		if !adaptiveRetryableRuntimeFailure(code) {
+			t.Fatalf("pre-browser infrastructure failure %q was not retryable", code)
+		}
+	}
+	for _, code := range []string{"outcome_verification_failed", "explicit_terminal_build_failure", ""} {
+		if adaptiveRetryableRuntimeFailure(code) {
+			t.Fatalf("business failure %q was incorrectly made retryable", code)
+		}
+	}
+}
+
 func TestAdaptiveResumePrefersLatestReconciliationJobWithoutReplayingEffect(t *testing.T) {
 	states := store.NewMemoryStateStore()
 	state := &orchestrator.CascadeState{
