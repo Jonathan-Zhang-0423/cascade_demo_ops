@@ -53,4 +53,17 @@ describe("browser recording finalization", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("requires the configured quiet period even after a close acknowledgement", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "demoops-recording-drain-"));
+    const recording = path.join(root, "recording.webm");
+    try {
+      await writeFile(recording, "complete");
+      const started = Date.now();
+      expect(await waitForFileStable(recording, 2, 10, 250, 80)).toBe(true);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(80);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

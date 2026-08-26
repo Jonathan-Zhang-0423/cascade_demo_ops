@@ -989,9 +989,12 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   }
   recordingPath = recordingPathPromise ? await valueWithin(recordingPathPromise, 3_000, undefined) : undefined;
   if (recordingPath && await fileExists(recordingPath)) {
-    const stable = browserCloseConfirmed
-      ? await waitForFileStable(recordingPath, 3, 750, 45_000)
-      : await waitForFileStable(recordingPath, 3, 1_000, 180_000, 60_000);
+    // browser.close() can resolve while Playwright's ffmpeg child is still
+    // draining a long image2pipe backlog. Treat the file, rather than the
+    // browser acknowledgement, as the source of truth and require sustained
+    // quiescence before segmenting it. A long capture can need several minutes
+    // to drain on a small Worker host.
+    const stable = await waitForFileStable(recordingPath, 3, 1_000, 900_000, 60_000);
     if (!stable) throw new Error("browser_agent_recording_not_stable");
     const segmentEntries = (await readdir(session.outputDir).catch(() => [] as string[])).filter((entry) => /^recording-segment-\d+\.webm$/i.test(entry));
 		const fullPath = path.join(session.outputDir, `recording-full-${String(segmentEntries.length + 1).padStart(3, "0")}.webm`);
