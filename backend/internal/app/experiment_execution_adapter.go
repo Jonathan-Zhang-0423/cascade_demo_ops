@@ -790,7 +790,10 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 			if job.ReviewPackage == nil {
 				return errors.New("final film reached review without an immutable review package")
 			}
-			return emit(experiment.LegExecutionUpdate{Kind: "final_film_bound", FinalFilmJobID: job.JobID, FinalFilmRevision: job.Revision, ProviderCallsUsed: used, FinalFilmPackageID: job.ReviewPackage.PackageID, EvidenceRefs: []string{job.ReviewPackage.PackageID}})
+			if err := emit(experiment.LegExecutionUpdate{Kind: "final_film_bound", FinalFilmJobID: job.JobID, FinalFilmRevision: job.Revision, ProviderCallsUsed: used, FinalFilmPackageID: job.ReviewPackage.PackageID, EvidenceRefs: []string{job.ReviewPackage.PackageID}}); err != nil {
+				return err
+			}
+			return &experiment.AdapterError{Code: "final_review_required", Phase: "final_review", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: []string{job.ReviewPackage.PackageID}}
 		case model.FinalFilmJobFailed, model.FinalFilmJobCancelled:
 			return &experiment.AdapterError{Code: "final_film_failed", Phase: string(job.State), State: experiment.RunStateFailed, Retryable: job.LastError != nil && job.LastError.Retryable}
 		}

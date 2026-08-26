@@ -3478,7 +3478,9 @@ function buildVideoOperationFilters(operations: CompositorShot["edit_operations"
       case "zoom_pan": {
         const zoom = boundedNumber(operation.zoom ?? operation.scale ?? 1.08, 1.08, 1, 3);
         const x = boundedNumber(operation.x ?? 0.5, 0.5, 0, 1); const y = boundedNumber(operation.y ?? 0.5, 0.5, 0, 1);
-        filters.push(`scale=iw*${zoom.toFixed(3)}:ih*${zoom.toFixed(3)},crop=iw/${zoom.toFixed(3)}:ih/${zoom.toFixed(3)}:(iw-ow)*${x.toFixed(3)}:(ih-oh)*${y.toFixed(3)}`);
+        filters.push(operation.style === "ambient_motion"
+          ? ambientMotionFilter(zoom)
+          : `scale=iw*${zoom.toFixed(3)}:ih*${zoom.toFixed(3)},crop=iw/${zoom.toFixed(3)}:ih/${zoom.toFixed(3)}:(iw-ow)*${x.toFixed(3)}:(ih-oh)*${y.toFixed(3)}`);
         break;
       }
       case "pan": filters.push("crop=iw*0.94:ih*0.94:iw*0.03:ih*0.03"); break;
@@ -3498,6 +3500,11 @@ function buildVideoOperationFilters(operations: CompositorShot["edit_operations"
     }
   }
   return { filters, audioTempo };
+}
+
+export function ambientMotionFilter(zoom: number): string {
+  const value = boundedNumber(zoom, 1.12, 1.02, 1.25).toFixed(3);
+  return `scale=iw*${value}:ih*${value},crop=iw/${value}:ih/${value}:x='(iw-ow)*(0.5+0.35*sin(t*0.22))':y='(ih-oh)*(0.5+0.25*cos(t*0.17))'`;
 }
 
 function playbackSpeedForOperations(operations: Array<{ type: string; speed?: number }>): number {
@@ -3729,7 +3736,9 @@ async function composeWithFFmpeg(
     }
     if (!still) ffmpegArgs.push("-ss", secondsArg(segmentStartMS));
     ffmpegArgs.push(
-      "-t", secondsArg(sourceDurationMS),
+      // -t is an output-duration cap here. Using the source duration truncates
+      // slow-motion shots (for example 2s at 0.5x) back to their input length.
+      "-t", secondsArg(segmentDurationMS),
       "-map", useSourceAudio ? "0:a:0" : "1:a:0",
     );
     if (blurOverlays.length > 0) {
@@ -3930,7 +3939,7 @@ async function applyNarrationsAndGlobalCaptions(
   }
   if (normalizeLoudness) {
     const inputLabel = narrationPlan.inputs.length > 0 ? "[mixed_audio_pre_normalize]" : "[0:a]";
-    filters.push(`${inputLabel}loudnorm=I=-16:TP=-1:LRA=11[normalized_audio]`);
+    filters.push(`${inputLabel}${finalLoudnessFilter()}[normalized_audio]`);
     outputAudioLabel = "[normalized_audio]";
   }
 
@@ -3953,6 +3962,12 @@ async function applyNarrationsAndGlobalCaptions(
   };
   if (encodingAudit) renderedResult.encoding_audit = { ...encodingAudit, post_process_video_mode: "stream_copy" };
   return renderedResult;
+}
+
+// Leave 0.5 dB of encoder margin below the delivery gate. A -1.0 dB loudnorm
+// target can become roughly -0.9 dB after AAC encoding.
+export function finalLoudnessFilter(): string {
+  return "loudnorm=I=-16:TP=-1.5:LRA=11";
 }
 
 function duckedSourceVolumeExpression(narrations: NarrationRenderInput[]): string {

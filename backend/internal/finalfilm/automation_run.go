@@ -101,7 +101,15 @@ func (s *Service) ResumeAutomation(ctx context.Context, jobID string) (model.Fin
 			if recovered.State == model.FinalFilmJobFailed {
 				return recovered, nil
 			}
-		case model.FinalFilmJobAwaitingFinalReview, model.FinalFilmJobCompleted, model.FinalFilmJobRevisionRequested:
+		case model.FinalFilmJobAwaitingFinalReview:
+			if needsAutomatedDeliveryProfileReconcile(job) {
+				if _, err = s.reconcileAutomatedDeliveryProfile(ctx, job); err != nil {
+					return model.FinalFilmJob{}, err
+				}
+				continue
+			}
+			return job, nil
+		case model.FinalFilmJobCompleted, model.FinalFilmJobRevisionRequested:
 			return job, nil
 		default:
 			return model.FinalFilmJob{}, fmt.Errorf("automatic runner cannot resume state %s", job.State)
@@ -116,6 +124,21 @@ func (s *Service) recoverFailedAutomation(ctx context.Context, job model.FinalFi
 	record, err := decodeGeneratedTrack(job.GeneratedTrack)
 	if err != nil {
 		return job, err
+	}
+	if retryableAutomatedCompositionFailure(job.LastError.Message) {
+		_, _, generationDone := nextAutomatedIntent(record.Intents, job.QualityReports, job.AutomationPolicy.ProviderPolicy.MaxAttemptsPerSlot)
+		if generationDone {
+			next := job
+			next.Revision++
+			next.UpdatedAt = s.now().UTC()
+			next.State, next.Phase = model.FinalFilmJobQualityGate, "retryable_composition_reconciled"
+			next.LastError, next.FinalCatalog, next.FinalPlan, next.FinalOutputValidation = nil, nil, nil, nil
+			next.FinalRender = model.FinalFilmRenderOutput{}
+			if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, next, s.event(next, next.Phase, "已保留通过质检的候选并重试确定性合成，不产生新的模型调用", map[string]any{"provider_calls_used": next.RunAuthorization.ProviderCallsUsed})); err != nil {
+				return model.FinalFilmJob{}, err
+			}
+			return next, nil
+		}
 	}
 	next := job
 	next.QualityReports = append([]model.CandidateQualityReport{}, job.QualityReports...)
@@ -205,6 +228,26 @@ func (s *Service) recoverFailedAutomation(ctx context.Context, job model.FinalFi
 		return model.FinalFilmJob{}, err
 	}
 	return next, nil
+}
+
+func retryableAutomatedCompositionFailure(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	for _, token := range []string{
+		"final requirement satisfaction report",
+		"automated final duration",
+		"automated final freeze duration",
+		"automated final black duration",
+		"automated final integrated loudness",
+		"automated final true peak",
+		"validate automated edl",
+		"render automated final",
+		"build review package",
+	} {
+		if strings.Contains(message, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func automatedIntentAccepted(reports []model.CandidateQualityReport, intentID string) bool {
@@ -513,11 +556,8 @@ func (s *Service) persistAutomatedProviderResult(ctx context.Context, job model.
 	next.UpdatedAt = report.CheckedAt
 	next.GeneratedTrack = raw
 	next.QualityReports = append(next.QualityReports, report)
-	if len(next.ProviderAttempts) > 0 {
-		last := &next.ProviderAttempts[len(next.ProviderAttempts)-1]
-		if last.IntentID == intent.IntentID && last.Attempt == attempt {
-			last.Status, last.ProviderTaskID, last.CompletedAt = decision, result.ProviderTaskID, report.CheckedAt
-		}
+	if stored := findAutomatedProviderAttempt(next.ProviderAttempts, intent.IntentID, result.Provider, attempt); stored != nil {
+		stored.Status, stored.ProviderTaskID, stored.CompletedAt = decision, result.ProviderTaskID, report.CheckedAt
 	}
 	if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, next, s.event(next, "candidate_quality_recorded", "候选技术与内容边界质检已记录", map[string]any{"intent_id": intent.IntentID, "attempt": attempt, "decision": decision})); err != nil {
 		return model.FinalFilmJob{}, err
@@ -537,6 +577,40 @@ func (s *Service) beginAutomatedComposition(ctx context.Context, job model.Final
 	return next, nil
 }
 
+func automatedFinalDeliveryProfile(source model.EditorRenderProfile) model.EditorRenderProfile {
+	result := source
+	result.Mode, result.Width, result.Height, result.FPS, result.Format = "final", 1920, 1080, 30, "mp4"
+	if strings.TrimSpace(result.Preset) == "" {
+		result.Preset = "medium"
+	}
+	if result.CRF <= 0 {
+		result.CRF = 18
+	}
+	return result
+}
+
+func needsAutomatedDeliveryProfileReconcile(job model.FinalFilmJob) bool {
+	if job.AutomationProfile != model.FinalFilmAutomationProfileGuidedDemoV1 || job.FinalOutputValidation == nil {
+		return false
+	}
+	validation := job.FinalOutputValidation
+	return validation.Width != 1920 || validation.Height != 1080 || math.Abs(validation.FPS-30) > 0.25 || automatedPlanContainsInternalCaption(job.FinalPlan) || automatedPlanMissingAmbientMotion(job.FinalPlan)
+}
+
+func (s *Service) reconcileAutomatedDeliveryProfile(ctx context.Context, job model.FinalFilmJob) (model.FinalFilmJob, error) {
+	next := job
+	next.Revision++
+	next.UpdatedAt = s.now().UTC()
+	next.State, next.Phase = model.FinalFilmJobQualityGate, "delivery_profile_reconciled"
+	next.RenderProfile = automatedFinalDeliveryProfile(job.RenderProfile)
+	next.FinalCatalog, next.FinalPlan, next.FinalOutputValidation, next.ReviewPackage = nil, nil, nil, nil
+	next.FinalRender = model.FinalFilmRenderOutput{}
+	if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, next, s.event(next, next.Phase, "最终交付规格与业务字幕已统一，使用既有候选重新合成", map[string]any{"provider_calls_used": next.RunAuthorization.ProviderCallsUsed})); err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	return next, nil
+}
+
 func (s *Service) finishAutomatedComposition(ctx context.Context, job model.FinalFilmJob) (model.FinalFilmJob, error) {
 	record, err := decodeGeneratedTrack(job.GeneratedTrack)
 	if err != nil {
@@ -550,11 +624,12 @@ func (s *Service) finishAutomatedComposition(ctx context.Context, job model.Fina
 	if err != nil || !validation.Valid {
 		return model.FinalFilmJob{}, fmt.Errorf("validate automated EDL: %v %+v", err, validation.Errors)
 	}
-	result, err := s.renderer.Render(ctx, executor.RenderRequest{OutputDir: filepath.Join(s.outputRoot, job.JobID, fmt.Sprintf("final-r%d", job.Revision)), DurationSec: maxInt(1, (plan.TargetDurationMS+999)/1000), GeneratedAssets: catalogArtifactRefs(catalog), AssetTimelineCatalog: &catalog, EditPlan: &plan, RenderProfile: &job.RenderProfile, ModelExecution: &executor.RenderModelExecutionAudit{Invoked: len(shotIDs) > 0, Provider: "multiple", PlanSource: "automated_final_output_review_pending", ProviderCallStatus: "candidate_quality_gated", RealCallMade: job.RunAuthorization.ProviderCallsUsed > 0, ProviderOutputAdopted: len(shotIDs) > 0, PatchID: "automated-edl", PatchApplied: true, AdoptedShotIDs: shotIDs, Note: "presentation-only candidates remain subject to final-output review"}})
+	renderProfile := automatedFinalDeliveryProfile(job.RenderProfile)
+	result, err := s.renderer.Render(ctx, executor.RenderRequest{OutputDir: filepath.Join(s.outputRoot, job.JobID, fmt.Sprintf("final-r%d", job.Revision)), DurationSec: maxInt(1, (plan.TargetDurationMS+999)/1000), GeneratedAssets: catalogArtifactRefs(catalog), AssetTimelineCatalog: &catalog, EditPlan: &plan, RenderProfile: &renderProfile, ModelExecution: &executor.RenderModelExecutionAudit{Invoked: len(shotIDs) > 0, Provider: "multiple", PlanSource: "automated_final_output_review_pending", ProviderCallStatus: "candidate_quality_gated", RealCallMade: job.RunAuthorization.ProviderCallsUsed > 0, ProviderOutputAdopted: len(shotIDs) > 0, PatchID: "automated-edl", PatchApplied: true, AdoptedShotIDs: shotIDs, Note: "presentation-only candidates remain subject to final-output review"}})
 	if err != nil {
 		return model.FinalFilmJob{}, err
 	}
-	outputValidation, err := validateFinalFilmOutput(ctx, s.renderer, result, job.RenderProfile, plan, s.requireTestNarration, s.now().UTC())
+	outputValidation, err := validateFinalFilmOutput(ctx, s.renderer, result, renderProfile, plan, s.requireTestNarration, s.now().UTC())
 	if err == nil && (outputValidation.DurationMS < job.AutomationPolicy.TargetDuration.MinMS || outputValidation.DurationMS > job.AutomationPolicy.TargetDuration.MaxMS) {
 		err = fmt.Errorf("automated final duration %dms is outside 90-120 seconds", outputValidation.DurationMS)
 	}
@@ -571,7 +646,7 @@ func (s *Service) finishAutomatedComposition(ctx context.Context, job model.Fina
 		// packaging cannot add a new long freeze to an otherwise valid demo.
 		allowedFreezeMS := 3000
 		if baselineProbe, probeErr := s.renderer.ProbeMedia(ctx, executor.MediaProbeRequest{Path: job.BaselineRender.VideoPath}); probeErr == nil && baselineProbe.QualityAnalysisAvailable {
-			allowedFreezeMS += baselineProbe.FreezeDurationMS
+			allowedFreezeMS = automatedFinalFreezeAllowanceMS(baselineProbe, outputValidation.DurationMS)
 		}
 		if outputValidation.FreezeDurationMS > allowedFreezeMS {
 			err = fmt.Errorf("automated final freeze duration %dms exceeds factual baseline allowance %dms", outputValidation.FreezeDurationMS, allowedFreezeMS)
@@ -593,7 +668,9 @@ func (s *Service) finishAutomatedComposition(ctx context.Context, job model.Fina
 	next.Phase = "awaiting_final_review"
 	next.FinalCatalog, next.FinalPlan = &catalog, &plan
 	next.FinalRender = model.FinalFilmRenderOutput{Status: "ready", VideoPath: result.VideoPath, RenderManifestPath: result.RenderManifestPath, PlanID: plan.PlanID, PlanRevision: job.EditorRevision, CompletedAt: next.UpdatedAt}
+	next.RenderProfile = renderProfile
 	next.FinalOutputValidation = &outputValidation
+	next.ProviderAttempts = reconcileAutomatedProviderAttemptAudit(job.ProviderAttempts, job.QualityReports)
 	reviewPackage, err := s.buildReviewPackage(ctx, next, record)
 	if err != nil {
 		return model.FinalFilmJob{}, err
@@ -603,6 +680,30 @@ func (s *Service) finishAutomatedComposition(ctx context.Context, job model.Fina
 		return model.FinalFilmJob{}, err
 	}
 	return next, nil
+}
+
+func automatedFinalFreezeAllowanceMS(baseline executor.MediaProbeResult, outputDurationMS int) int {
+	const graceMS = 3000
+	if baseline.DurationMS <= 0 || outputDurationMS <= 0 {
+		return graceMS
+	}
+	ratio := math.Min(0.80, math.Max(0, float64(baseline.FreezeDurationMS)/float64(baseline.DurationMS)))
+	return graceMS + int(math.Round(ratio*float64(outputDurationMS)))
+}
+
+func reconcileAutomatedProviderAttemptAudit(attempts []model.FinalFilmProviderAttempt, reports []model.CandidateQualityReport) []model.FinalFilmProviderAttempt {
+	result := append([]model.FinalFilmProviderAttempt{}, attempts...)
+	for index := range result {
+		report := automatedQualityReport(reports, result[index].IntentID, result[index].Provider, result[index].Attempt)
+		if report == nil {
+			continue
+		}
+		result[index].Status = report.Decision
+		if !report.CheckedAt.IsZero() {
+			result[index].CompletedAt = report.CheckedAt
+		}
+	}
+	return result
 }
 
 func compileAutomatedGeneratedPlan(job model.FinalFilmJob, record GeneratedTrackRecord) (model.AssetTimelineCatalog, model.DemoEditPlan, []string) {
@@ -673,6 +774,7 @@ func compileAutomatedGeneratedPlan(job model.FinalFilmJob, record GeneratedTrack
 		}
 	}
 	plan.Shots = append(assembled, suffix...)
+	replaceAutomatedFactCaptions(&plan, catalog)
 	plan.PlanID = job.BaselinePlan.PlanID + "+automated"
 	if job.DirectorPlan != nil && job.DirectorPlan.StoryPlan != nil {
 		target := job.DirectorPlan.StoryPlan.TargetDurationMS
@@ -681,8 +783,112 @@ func compileAutomatedGeneratedPlan(job model.FinalFilmJob, record GeneratedTrack
 		}
 		fitAutomatedFactTrackToTarget(&plan, target)
 	}
+	addAutomatedAmbientMotion(&plan)
 	plan.TargetDurationMS = timelineDuration(plan)
 	return catalog, plan, shotIDs
+}
+
+func replaceAutomatedFactCaptions(plan *model.DemoEditPlan, catalog model.AssetTimelineCatalog) {
+	if plan == nil {
+		return
+	}
+	steps := make(map[string]model.TimelineStep, len(catalog.Steps))
+	for _, step := range catalog.Steps {
+		steps[step.StepID] = step
+	}
+	for shotIndex := range plan.Shots {
+		shot := &plan.Shots[shotIndex]
+		step, ok := steps[shot.SourceStepID]
+		if !ok {
+			continue
+		}
+		caption := automatedFactCaption(step)
+		shot.Purpose = caption
+		for overlayIndex := range shot.Overlays {
+			if shot.Overlays[overlayIndex].Type == model.EditOverlayCaption {
+				shot.Overlays[overlayIndex].Text = caption
+			}
+		}
+	}
+}
+
+func automatedFactCaption(step model.TimelineStep) string {
+	signal := strings.ToLower(step.ObservedState + " " + step.Action)
+	switch {
+	case strings.Contains(signal, "required_numeric_increased"):
+		return "关键业务指标已确认增长"
+	case strings.Contains(signal, "required_distinct_actions_observed"):
+		return "多种交互均产生可见反馈"
+	case strings.Contains(signal, "required_state_changed") || strings.Contains(signal, "required_frame_surface_changed"):
+		return "操作后业务状态产生可见变化"
+	case strings.Contains(signal, "stability"):
+		return "连续交互后页面保持稳定"
+	case strings.Contains(signal, "required_interactive_surface_visible"):
+		return "真实可交互结果已就绪"
+	case strings.Contains(signal, "optional_capability_recorded"):
+		return "增强能力已记录为非阻断项"
+	case strings.Contains(signal, "action_navigate_completed"):
+		return "恢复已创建结果，继续事实验收"
+	case strings.Contains(signal, "url_matches"):
+		return "目标工作区与会话状态已确认"
+	default:
+		return "业务阶段已完成并留存证据"
+	}
+}
+
+func automatedPlanContainsInternalCaption(plan *model.DemoEditPlan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, shot := range plan.Shots {
+		for _, overlay := range shot.Overlays {
+			text := strings.ToLower(overlay.Text)
+			if overlay.Type == model.EditOverlayCaption && (strings.Contains(text, "source=") || strings.Contains(text, "assertion:") || strings.Contains(text, "url_observed")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func addAutomatedAmbientMotion(plan *model.DemoEditPlan) {
+	if plan == nil {
+		return
+	}
+	for shotIndex := range plan.Shots {
+		shot := &plan.Shots[shotIndex]
+		if shot.SourceStepID == "" || shot.SourceTimeRangeMS == nil || shot.SourceTimeRangeMS[1]-shot.SourceTimeRangeMS[0] < 1000 {
+			continue
+		}
+		alreadyPresent := false
+		for _, operation := range shot.Operations {
+			alreadyPresent = alreadyPresent || operation.Type == model.EditOperationZoomPan
+		}
+		if alreadyPresent {
+			continue
+		}
+		zoom, center := 1.12, 0.5
+		shot.Operations = append(shot.Operations, model.EditOperation{Type: model.EditOperationZoomPan, Zoom: &zoom, X: &center, Y: &center, Style: "ambient_motion"})
+	}
+}
+
+func automatedPlanMissingAmbientMotion(plan *model.DemoEditPlan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, shot := range plan.Shots {
+		if shot.SourceStepID == "" || shot.SourceTimeRangeMS == nil || shot.SourceTimeRangeMS[1]-shot.SourceTimeRangeMS[0] < 1000 {
+			continue
+		}
+		found := false
+		for _, operation := range shot.Operations {
+			found = found || operation.Type == model.EditOperationZoomPan && operation.Style == "ambient_motion"
+		}
+		if !found {
+			return true
+		}
+	}
+	return false
 }
 
 func automatedPlacement(job model.FinalFilmJob, intentID string) (string, string) {
@@ -792,7 +998,7 @@ func (s *Service) ResumeRunnableAutomations() {
 
 func automatedRunnableState(state model.FinalFilmJobState) bool {
 	switch state {
-	case model.FinalFilmJobAnalyzingEvidence, model.FinalFilmJobPlanning, model.FinalFilmJobGeneratingPresentation, model.FinalFilmJobQualityGate, model.FinalFilmJobComposing, model.FinalFilmJobFailed:
+	case model.FinalFilmJobAnalyzingEvidence, model.FinalFilmJobPlanning, model.FinalFilmJobGeneratingPresentation, model.FinalFilmJobQualityGate, model.FinalFilmJobComposing, model.FinalFilmJobFailed, model.FinalFilmJobAwaitingFinalReview:
 		return true
 	default:
 		return false

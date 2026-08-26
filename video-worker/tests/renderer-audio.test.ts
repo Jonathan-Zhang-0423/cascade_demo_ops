@@ -5,7 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { atempoFilterChain, audioVolumeExpression, globalCaptionCuesForOutputWindow, render, validateEditPlan, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
+import { ambientMotionFilter, atempoFilterChain, audioVolumeExpression, finalLoudnessFilter, globalCaptionCuesForOutputWindow, render, validateEditPlan, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
 
 const ffmpegPath = process.env.CASCADE_FFMPEG_PATH || "ffmpeg";
 const ffmpegAvailable = spawnSync(ffmpegPath, ["-version"], { stdio: "ignore", windowsHide: true }).status === 0;
@@ -72,6 +72,14 @@ function plan(): DemoEditPlan {
 }
 
 describe("editor audio policy", () => {
+  it("keeps AAC true-peak margin below the delivery threshold", () => {
+    expect(finalLoudnessFilter()).toBe("loudnorm=I=-16:TP=-1.5:LRA=11");
+  });
+
+  it("compiles ambient motion as a time-varying fact-track crop", () => {
+    expect(ambientMotionFilter(1.12)).toContain("sin(t*0.22)");
+    expect(ambientMotionFilter(1.12)).toContain("cos(t*0.17)");
+  });
   it("decomposes 4-12x speed into legal FFmpeg atempo factors", () => {
     expect(atempoFilterChain(8)).toBe("atempo=2.000,atempo=2.000,atempo=2.000");
     expect(atempoFilterChain(12)).toBe("atempo=2.000,atempo=2.000,atempo=2.000,atempo=1.500");

@@ -8,12 +8,19 @@ import { describe, expect, it } from "vitest";
 import { buildTimelineStepsFromTrace, defaultEditPlan, render, type AssetTimelineCatalog, type DemoEditPlan } from "../src/renderer.js";
 
 const ffmpegPath = process.env.CASCADE_FFMPEG_PATH || "ffmpeg";
+const ffprobePath = process.env.CASCADE_FFPROBE_PATH || path.join(path.dirname(ffmpegPath), process.platform === "win32" ? "ffprobe.exe" : "ffprobe");
 const ffmpegAvailable = spawnSync(ffmpegPath, ["-version"], { stdio: "ignore", windowsHide: true }).status === 0;
 const renderWithFFmpeg = ffmpegAvailable ? it : it.skip;
 
 function runFFmpeg(args: string[]): void {
   const result = spawnSync(ffmpegPath, args, { encoding: "utf8", windowsHide: true });
   if (result.status !== 0) throw new Error(`ffmpeg fixture failed: ${result.stderr || result.stdout || result.error?.message || "unknown error"}`);
+}
+
+function probeDurationSec(mediaPath: string): number {
+  const result = spawnSync(ffprobePath, ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", mediaPath], { encoding: "utf8", windowsHide: true });
+  if (result.status !== 0) throw new Error(`ffprobe fixture failed: ${result.stderr || result.stdout || result.error?.message || "unknown error"}`);
+  return Number(result.stdout.trim());
 }
 
 function generateScreenshot(screenshotPath: string): void {
@@ -365,6 +372,40 @@ describe("static screenshot compositor e2e", () => {
       expect(report.errors).toEqual(expect.arrayContaining([
         expect.objectContaining({ code: "edit_plan_timeline_duration_mismatch", path: "demo_edit_plan.shots" }),
       ]));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  renderWithFFmpeg("preserves the planned output duration for slow-motion video", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cascade-slow-motion-duration-"));
+    try {
+      const recordingPath = path.join(root, "recording.mp4");
+      const screenshotPath = path.join(root, "screenshot.png");
+      runFFmpeg(["-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30", "-t", "2", "-c:v", "mpeg4", recordingPath]);
+      generateScreenshot(screenshotPath);
+      const slowCatalog = catalog(recordingPath, screenshotPath);
+      slowCatalog.timeline.duration_ms = 2000;
+      slowCatalog.artifacts[0]!.duration_ms = 2000;
+      slowCatalog.constraints.allowed_edit_operations = ["trim", "speed"];
+      const slowPlan = plan();
+      slowPlan.target_duration_ms = 4000;
+      slowPlan.shots = [{
+        id: "slow_shot",
+        source_artifact_id: "recording",
+        source_time_range_ms: [0, 2000],
+        purpose: "Hold a verified result without inventing frames",
+        operations: [{ type: "speed", speed: 0.5 }],
+      }];
+      const result = await render({
+        output_dir: path.join(root, "render"),
+        asset_timeline_catalog: slowCatalog,
+        edit_plan: slowPlan,
+        render_profile: { mode: "preview", format: "mp4", width: 320, height: 180, fps: 30, preset: "ultrafast" },
+      });
+      const report = JSON.parse(await readFile(result.requirement_satisfaction_report_path, "utf8"));
+      expect(report.status).not.toBe("not_satisfied");
+      expect(Math.abs(probeDurationSec(result.video_path) - 4)).toBeLessThan(0.25);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

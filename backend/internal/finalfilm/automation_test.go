@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/media"
 	"cascade-demoops/backend/internal/model"
 )
@@ -123,11 +124,147 @@ func TestRecoverFailedAutomationRetriesOnlyProviderRejectedBeforeTaskCreation(t 
 	}
 }
 
+func TestRecoverFailedAutomationRetriesCompositionWithoutProviderConsumption(t *testing.T) {
+	service, _ := newFinalFilmTestService(t)
+	policy := model.DefaultFinalFilmAutomationPolicy()
+	intent := media.GeneratedShotIntent{IntentID: "intro", Purpose: media.GeneratedShotPurposeIntro}
+	record := GeneratedTrackRecord{SchemaVersion: generatedTrackRecordSchemaVersion, DirectorPlanID: "director_composition_recovery", Intents: []media.GeneratedShotIntent{intent}}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := model.FinalFilmJob{
+		SchemaVersion: model.FinalFilmJobSchemaVersion, JobID: "recover_composition", Revision: 1,
+		State: model.FinalFilmJobFailed, Phase: "automation_failed", AutomationProfile: model.FinalFilmAutomationProfileGuidedDemoV1,
+		AutomationPolicy: &policy, RunAuthorization: &model.FinalFilmRunAuthorization{AuthorizationRef: "approved", MaxProviderCalls: 8, ProviderCallsUsed: 3}, GeneratedTrack: raw,
+		QualityReports: []model.CandidateQualityReport{{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderMiniMaxH3, Attempt: 1, Decision: "accept"}},
+		LastError:      &model.FinalFilmJobError{Retryable: true, Message: "final requirement satisfaction report is not satisfied"},
+	}
+	if err := service.store.CreateJob(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := service.recoverFailedAutomation(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.State != model.FinalFilmJobQualityGate || recovered.RunAuthorization.ProviderCallsUsed != 3 || recovered.LastError != nil {
+		t.Fatalf("composition recovery changed provider budget or failed to resume deterministically: %+v", recovered)
+	}
+}
+
 func TestAutomatedBookendBlackGateAllowsShortFadeOnly(t *testing.T) {
 	intro := media.GeneratedShotIntent{Purpose: media.GeneratedShotPurposeIntro}
 	divider := media.GeneratedShotIntent{Purpose: media.GeneratedShotPurposeSectionDivider}
 	if automatedBlackDurationLimitMS(intro) != 750 || automatedBlackDurationLimitMS(divider) != 500 {
 		t.Fatal("purpose-aware black-frame limits drifted")
+	}
+}
+
+func TestAutomatedProviderDefaultWaitsForSlowSuccessfulGeneration(t *testing.T) {
+	service, _ := newFinalFilmTestService(t)
+	if service.providerTimeout != 30*time.Minute {
+		t.Fatalf("provider timeout=%s want 30m", service.providerTimeout)
+	}
+}
+
+func TestGuidedDemoLocksFinalDeliveryTo1080p30(t *testing.T) {
+	profile := automatedFinalDeliveryProfile(model.EditorRenderProfile{Mode: "final", Width: 2560, Height: 1440, FPS: 25, Format: "mov"})
+	if profile.Width != 1920 || profile.Height != 1080 || profile.FPS != 30 || profile.Format != "mp4" || profile.Preset != "medium" || profile.CRF != 18 {
+		t.Fatalf("guided delivery profile drifted: %+v", profile)
+	}
+	job := model.FinalFilmJob{AutomationProfile: model.FinalFilmAutomationProfileGuidedDemoV1, FinalOutputValidation: &model.FinalFilmOutputValidation{Width: 2560, Height: 1440, FPS: 30}}
+	if !needsAutomatedDeliveryProfileReconcile(job) {
+		t.Fatal("legacy 1440p final output was not selected for deterministic 1080p reconciliation")
+	}
+	job.FinalOutputValidation.Width, job.FinalOutputValidation.Height = 1920, 1080
+	if needsAutomatedDeliveryProfileReconcile(job) {
+		t.Fatal("valid 1080p30 final output should remain waiting for human review")
+	}
+}
+
+func TestAutomatedFactCaptionsHideInternalEvidenceVocabulary(t *testing.T) {
+	start, end := 0, 2000
+	plan := model.DemoEditPlan{Shots: []model.DemoEditShot{{
+		ID: "fact", SourceStepID: "step", Purpose: "source=browser_assertion",
+		Overlays: []model.EditOverlay{{Type: model.EditOverlayCaption, Text: "source=browser_assertion; assertion:required_numeric_increased=passed", StartMS: &start, EndMS: &end}},
+	}}}
+	catalog := model.AssetTimelineCatalog{Steps: []model.TimelineStep{{StepID: "step", Action: "inspect", ObservedState: "source=browser_assertion; assertion:required_numeric_increased=passed"}}}
+	replaceAutomatedFactCaptions(&plan, catalog)
+	if got := plan.Shots[0].Overlays[0].Text; got != "关键业务指标已确认增长" || automatedPlanContainsInternalCaption(&plan) {
+		t.Fatalf("internal evidence vocabulary leaked into the final caption: %q", got)
+	}
+}
+
+func TestAutomatedFactTrackAddsSiteNeutralAmbientMotion(t *testing.T) {
+	rangeMS := model.MillisecondRange{0, 4000}
+	plan := model.DemoEditPlan{Shots: []model.DemoEditShot{{ID: "fact", SourceStepID: "verified_step", SourceTimeRangeMS: &rangeMS}}}
+	if !automatedPlanMissingAmbientMotion(&plan) {
+		t.Fatal("long factual shot should request deterministic ambient motion")
+	}
+	addAutomatedAmbientMotion(&plan)
+	if automatedPlanMissingAmbientMotion(&plan) || len(plan.Shots[0].Operations) != 1 || plan.Shots[0].Operations[0].Style != "ambient_motion" {
+		t.Fatalf("ambient motion was not compiled: %+v", plan.Shots[0].Operations)
+	}
+	addAutomatedAmbientMotion(&plan)
+	if len(plan.Shots[0].Operations) != 1 {
+		t.Fatal("ambient motion compilation is not idempotent")
+	}
+}
+
+func TestAutomatedFinalFreezeGateUsesBoundedDurationRatio(t *testing.T) {
+	baseline := executor.MediaProbeResult{DurationMS: 65_556, FreezeDurationMS: 64_597}
+	if got := automatedFinalFreezeAllowanceMS(baseline, 105_000); got != 87_000 {
+		t.Fatalf("bounded freeze allowance=%d want 87000", got)
+	}
+	dynamicBaseline := executor.MediaProbeResult{DurationMS: 60_000, FreezeDurationMS: 12_000}
+	if got := automatedFinalFreezeAllowanceMS(dynamicBaseline, 105_000); got != 24_000 {
+		t.Fatalf("relative freeze allowance=%d want 24000", got)
+	}
+}
+
+func TestReconcileAutomatedProviderAttemptAuditUsesMatchingQualityReport(t *testing.T) {
+	checkedAt := time.Date(2026, 8, 26, 15, 0, 0, 0, time.UTC)
+	attempts := []model.FinalFilmProviderAttempt{
+		{IntentID: "outro", Provider: media.GeneratedShotProviderMiniMaxH3, Attempt: 2, Status: "submitted"},
+		{IntentID: "divider", Provider: media.GeneratedShotProviderSeedance25, Attempt: 2, Status: "submitted"},
+	}
+	reports := []model.CandidateQualityReport{
+		{IntentID: "outro", Provider: media.GeneratedShotProviderMiniMaxH3, Attempt: 2, Decision: "accept", CheckedAt: checkedAt},
+		{IntentID: "divider", Provider: media.GeneratedShotProviderSeedance25, Attempt: 2, Decision: "fallback_fact_track", CheckedAt: checkedAt},
+	}
+	reconciled := reconcileAutomatedProviderAttemptAudit(attempts, reports)
+	if reconciled[0].Status != "accept" || reconciled[1].Status != "fallback_fact_track" || reconciled[0].CompletedAt != checkedAt {
+		t.Fatalf("provider attempt audit was not reconciled: %+v", reconciled)
+	}
+}
+
+func TestPersistAutomatedProviderResultUpdatesMatchingAttemptAfterInterleavedResume(t *testing.T) {
+	service, _ := newFinalFilmTestService(t)
+	policy := model.DefaultFinalFilmAutomationPolicy()
+	intent := media.GeneratedShotIntent{IntentID: "outro", Purpose: media.GeneratedShotPurposeOutro}
+	record := GeneratedTrackRecord{SchemaVersion: generatedTrackRecordSchemaVersion, Intents: []media.GeneratedShotIntent{intent}}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := model.FinalFilmJob{
+		SchemaVersion: model.FinalFilmJobSchemaVersion, JobID: "interleaved_resume", Revision: 1,
+		State: model.FinalFilmJobGeneratingPresentation, AutomationPolicy: &policy, GeneratedTrack: raw,
+		ProviderAttempts: []model.FinalFilmProviderAttempt{
+			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderMiniMaxH3, Attempt: 2, Status: "submitted", ProviderTaskID: "h3_outro"},
+			{IntentID: "divider", Provider: media.GeneratedShotProviderSeedance25, Attempt: 2, Status: "submitted", ProviderTaskID: "seedance_divider"},
+		},
+	}
+	if err := service.store.CreateJob(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	result := media.GeneratedShotProviderExecutionResult{Provider: media.GeneratedShotProviderMiniMaxH3, ProviderTaskID: "h3_outro", ErrorMessage: "provider output rejected"}
+	updated, err := service.persistAutomatedProviderResult(context.Background(), job, record, intent, 2, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ProviderAttempts[0].Status != "fallback_fact_track" || updated.ProviderAttempts[1].Status != "submitted" {
+		t.Fatalf("matching interleaved attempt was not updated: %+v", updated.ProviderAttempts)
 	}
 }
 

@@ -15,6 +15,8 @@ import (
 	"cascade-demoops/backend/internal/model"
 )
 
+const defaultAutomatedProviderTimeout = 30 * time.Minute
+
 const finalFilmEventSchemaVersion = "demoops.final_film_event.v1"
 
 type Renderer interface {
@@ -89,7 +91,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 	}
 	providerTimeout := options.ProviderTimeout
 	if providerTimeout <= 0 {
-		providerTimeout = 20 * time.Minute
+		providerTimeout = defaultAutomatedProviderTimeout
 	}
 	var skills map[string]DirectorSkillRuntime
 	if strings.TrimSpace(options.SkillRoot) != "" {
@@ -136,6 +138,7 @@ func (s *Service) CreateJob(ctx context.Context, request CreateJobRequest) (mode
 				return model.FinalFilmJob{}, fmt.Errorf("guided-demo-v1 Director skill %s must be version %s", skillID, version)
 			}
 		}
+		request.RenderProfile = automatedFinalDeliveryProfile(request.RenderProfile)
 		request.Intents = guidedDemoPresentationIntents(request.Catalog)
 		automationPolicy = &policy
 	}
