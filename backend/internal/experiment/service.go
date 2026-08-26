@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"cascade-demoops/backend/internal/model"
 )
 
 type ServiceOptions struct {
@@ -766,6 +768,43 @@ func (s *Service) RecordCapabilityScore(ctx context.Context, runID string, expec
 	next.Revision++
 	next.UpdatedAt = s.now().UTC()
 	event := s.event(next, "capability_scored", "核心与增强能力已完成分层评分", legID, evidenceRefs)
+	if err := s.store.Transition(ctx, run.RunID, run.Revision, next, event); err != nil {
+		return Run{}, err
+	}
+	return next, nil
+}
+
+func (s *Service) RecordRepairDirective(ctx context.Context, runID string, expectedRevision int, legID string, directive model.RepairDirective) (Run, error) {
+	if err := model.ValidateRepairDirective(directive); err != nil {
+		return Run{}, err
+	}
+	run, err := s.store.Get(ctx, runID)
+	if err != nil {
+		return Run{}, err
+	}
+	if run.Revision != expectedRevision {
+		return Run{}, ErrRevisionConflict
+	}
+	index := legIndex(run, legID)
+	if index < 0 {
+		return Run{}, errors.New("experiment leg was not found")
+	}
+	if run.HarnessProfile != HarnessProfileAdaptiveBusinessV2 || directive.TargetModule != "execution-capture" || directive.Action != "submit_product_repair" {
+		return Run{}, errors.New("product repair directive is not valid for the closed-loop v2 execution module")
+	}
+	if run.Legs[index].ProductRepairRounds >= 3 || directive.Attempt != run.Legs[index].ProductRepairRounds+1 || directive.MaxAttempts != 3 {
+		return Run{}, errors.New("product repair directive exceeds or skips the same-entity repair budget")
+	}
+	if run.Legs[index].BoundEntityName == "" || run.Legs[index].CreateCount != 1 || run.Legs[index].BuildSubmitCount != 1 {
+		return Run{}, errors.New("product repair requires the fresh entity to be committed exactly once")
+	}
+	next := run
+	next.RepairDirectives = append(append([]model.RepairDirective{}, run.RepairDirectives...), directive)
+	next.Legs[index].ProductRepairRounds++
+	next.Legs[index].Phase = "product_repair"
+	next.Revision++
+	next.UpdatedAt = s.now().UTC()
+	event := s.event(next, "repair_directive_recorded", "同一实体产品修复指令已记录", legID, directive.ArtifactRefs)
 	if err := s.store.Transition(ctx, run.RunID, run.Revision, next, event); err != nil {
 		return Run{}, err
 	}

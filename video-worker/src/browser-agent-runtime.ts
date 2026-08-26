@@ -1442,6 +1442,11 @@ export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, i
     if (resolved) return resolved;
   }
   const structuralInput = structuralInputLocator(page, stage, interaction);
+	if (String(interaction.parameters?.action_recipe || "") === "product_repair") {
+		seen.add("runtime_product_repair_input");
+		const resolved = await runtimeProductRepairInputTarget(page, stage, attempts);
+		if (resolved) return resolved;
+	}
   if (structuralInput) {
     seen.add(structuralInput.strategy);
     const resolved = await resolveUniqueVisibleStructuralInputTarget(
@@ -1453,6 +1458,11 @@ export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, i
     if (resolved) return resolved;
   }
   const structuralSubmit = structuralModalSubmitLocator(page, stage, interaction);
+	if (String(interaction.parameters?.action_recipe || "") === "product_repair_submit") {
+		seen.add("runtime_product_repair_submit");
+		const resolved = await runtimeProductRepairSubmitTarget(page, stage, attempts);
+		if (resolved) return resolved;
+	}
   if (structuralSubmit) {
     seen.add(structuralSubmit.strategy);
     const resolved = await resolveUniqueVisibleStructuralSubmitTarget(
@@ -1590,6 +1600,99 @@ function structuralInputLocator(page: any, stage: BrowserAgentWorkerStage, inter
     };
   }
   return undefined;
+}
+
+export function runtimeProductRepairTargetScore(input: {
+	roleState: number;
+	semantic: number;
+	containerContext: number;
+	uniqueness: number;
+	transitionFeasibility: number;
+}): number {
+	return adaptiveTargetCandidateScore({
+		role_state: input.roleState,
+		semantic: input.semantic,
+		container_context: input.containerContext,
+		uniqueness: input.uniqueness,
+		transition_feasibility: input.transitionFeasibility,
+	});
+}
+
+async function runtimeProductRepairInputCandidates(page: any): Promise<Array<{ locator: any; score: number }>> {
+	const locator = page.locator('textarea, [contenteditable="true"], input:not([type]), input[type="text"]');
+	const count = Math.min(await locator.count().catch(() => 0), 32);
+	const candidates: Array<{ locator: any; score: number }> = [];
+	for (let index = 0; index < count; index += 1) {
+		const item = locator.nth(index);
+		if (!await item.isVisible().catch(() => false) || !await item.isEnabled().catch(() => false)) continue;
+		const metadata = await item.evaluate((element: any) => {
+			const type = String(element.getAttribute?.("type") || "").toLowerCase();
+			const name = String(element.getAttribute?.("aria-label") || element.getAttribute?.("placeholder") || element.getAttribute?.("name") || "").trim();
+			const tag = String(element.tagName || "").toLowerCase();
+			return {
+				type, name, tag,
+				editable: tag === "textarea" || element.isContentEditable || type === "text" || type === "",
+				primary: Boolean(element.closest("main, article, form, section, [role='main'], [role='region']")),
+			};
+		}).catch(() => ({ type: "", name: "", tag: "", editable: false, primary: false }));
+		if (!metadata.editable || /search|email|password|phone|tel|url|搜索|邮箱|邮件|密码|电话/.test(`${metadata.type} ${metadata.name}`.toLowerCase())) continue;
+		const semantic = /message|prompt|request|instruction|describe|需求|描述|要求|消息|修改|修复|补充|告诉/.test(metadata.name.toLowerCase()) ? 1 : (metadata.tag === "textarea" ? .8 : .6);
+		candidates.push({ locator: item, score: runtimeProductRepairTargetScore({ roleState: 1, semantic, containerContext: metadata.primary ? 1 : .4, uniqueness: 0, transitionFeasibility: 1 }) });
+	}
+	for (const candidate of candidates) {
+		candidate.score += candidates.length === 1 ? .15 : 0;
+	}
+	return candidates.sort((left, right) => right.score - left.score);
+}
+
+async function runtimeProductRepairInputTarget(page: any, stage: BrowserAgentWorkerStage, attempts: BrowserTargetResolutionAttempt[]): Promise<ResolvedTarget | undefined> {
+	if (stage.target_contract.destructive) return undefined;
+	const candidates = await runtimeProductRepairInputCandidates(page);
+	const best = candidates[0];
+	const second = candidates[1];
+	if (!best || !adaptiveTargetCandidateExecutable(Math.min(1, best.score), second ? Math.min(1, second.score) : undefined)) {
+		attempts.push(targetResolutionAttempt("runtime_product_repair_input", candidates.length, candidates.length === 1, Boolean(best), false, candidates.length === 0 ? "no_candidates" : "ambiguous"));
+		return undefined;
+	}
+	attempts.push(targetResolutionAttempt("runtime_product_repair_input", candidates.length, true, true, false, "resolved", true, true));
+	return { locator: best.locator, strategy: "runtime_product_repair_input" };
+}
+
+async function runtimeProductRepairSubmitTarget(page: any, stage: BrowserAgentWorkerStage, attempts: BrowserTargetResolutionAttempt[]): Promise<ResolvedTarget | undefined> {
+	if (stage.target_contract.destructive) return undefined;
+	const inputs = await runtimeProductRepairInputCandidates(page);
+	if (inputs.length === 0) {
+		attempts.push(targetResolutionAttempt("runtime_product_repair_submit", 0, false, false, false, "no_candidates"));
+		return undefined;
+	}
+	const input = inputs[0]!.locator;
+	let container = input.locator("xpath=ancestor::form[1]");
+	if (await container.count().catch(() => 0) !== 1) container = input.locator("xpath=ancestor::*[self::main or self::article or self::section or @role='region'][1]");
+	if (await container.count().catch(() => 0) !== 1) {
+		attempts.push(targetResolutionAttempt("runtime_product_repair_submit", 0, false, false, false, "no_candidates"));
+		return undefined;
+	}
+	const buttons = container.locator('button, [role="button"]');
+	const count = Math.min(await buttons.count().catch(() => 0), 24);
+	const candidates: Array<{ locator: any; score: number }> = [];
+	for (let index = 0; index < count; index += 1) {
+		const item = buttons.nth(index);
+		if (!await item.isVisible().catch(() => false) || !await item.isEnabled().catch(() => false)) continue;
+		const name = String(await item.getAttribute("aria-label").catch(() => "") || await item.innerText().catch(() => "")).trim();
+		if (structuralAbortActionName(name)) continue;
+		const semantic = /send|submit|apply|update|run|start|发送|提交|应用|更新|执行|开始/.test(name.toLowerCase()) ? 1 : .7;
+		candidates.push({ locator: item, score: runtimeProductRepairTargetScore({ roleState: 1, semantic, containerContext: 1, uniqueness: 0, transitionFeasibility: 1 }) });
+	}
+	for (const candidate of candidates) candidate.score += candidates.length === 1 ? .15 : 0;
+	candidates.sort((left, right) => right.score - left.score);
+	const best = candidates[0];
+	const second = candidates[1];
+	if (!best || !adaptiveTargetCandidateExecutable(Math.min(1, best.score), second ? Math.min(1, second.score) : undefined)) {
+		attempts.push(targetResolutionAttempt("runtime_product_repair_submit", candidates.length, candidates.length === 1, Boolean(best), false, candidates.length === 0 ? "no_candidates" : "ambiguous"));
+		return undefined;
+	}
+	attempts.push(targetResolutionAttempt("runtime_product_repair_submit", candidates.length, true, true, false, "resolved", true, true));
+	return { locator: best.locator, strategy: "runtime_product_repair_submit" };
 }
 
 function structuralModalSubmitLocator(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction): { strategy: string; locator: any } | undefined {
@@ -2106,7 +2209,7 @@ export function browserVisualRefreshDue(startedAtMS: number, nowMS: number, refr
 	return !refreshed && refreshAfterMS > 0 && nowMS - startedAtMS >= refreshAfterMS;
 }
 
-export function browserVisualTerminalPolicy(stage: BrowserAgentWorkerStage): { requireVisualTerminal: boolean; refreshAfterMS: number } {
+export function browserVisualTerminalPolicy(stage: BrowserAgentWorkerStage): { requireVisualTerminal: boolean; refreshAfterMS: number; postRefreshObserveMS: number } {
 	// Compatible RPC/package paths may carry the approved parameters on the
 	// immutable interaction even when the duplicated stage contract is omitted.
 	// Both representations express the same approved policy.
@@ -2115,6 +2218,7 @@ export function browserVisualTerminalPolicy(stage: BrowserAgentWorkerStage): { r
 	return {
 		requireVisualTerminal: parameters?.require_visual_terminal_confirmation === true,
 		refreshAfterMS: Math.max(0, Math.trunc(Number(parameters?.refresh_after_ms) || 0)),
+		postRefreshObserveMS: Math.max(0, Math.min(3 * 60_000, Math.trunc(Number(parameters?.post_refresh_observe_ms) || 60_000))),
 	};
 }
 
@@ -2144,10 +2248,11 @@ export function browserVisualUnchangedSurfaceObservationDue(existingCount: numbe
 	return existingCount < maxCalls && deadlineMS-nowMS <= 30_000;
 }
 
-export function adaptiveObservationDeadline(startedAtMS: number, lastProgressAtMS: number, idleTimeoutMS: number): number {
+export function adaptiveObservationDeadline(startedAtMS: number, lastProgressAtMS: number, idleTimeoutMS: number, postRefreshObserveMS = 0): number {
 	const boundedIdle = interactiveSurfacePollTimeout(idleTimeoutMS);
-	const absoluteDeadline = startedAtMS + Math.min(adaptiveObservationAbsoluteMaxMS, boundedIdle * 3);
-	return Math.min(absoluteDeadline, lastProgressAtMS + boundedIdle);
+	const boundedPostRefresh = Math.max(0, Math.min(3 * 60_000, postRefreshObserveMS));
+	const absoluteDeadline = startedAtMS + Math.min(adaptiveObservationAbsoluteMaxMS, boundedIdle * 3) + boundedPostRefresh;
+	return Math.min(absoluteDeadline, lastProgressAtMS + boundedIdle + boundedPostRefresh);
 }
 
 export function browserVisualHardRefreshDue(startedAtMS: number, nowMS: number, observationBudgetMS: number, refreshed: boolean): boolean {
@@ -2191,11 +2296,11 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	if (!baseConfig) return waitForPlayableSurface(session.page, timeout);
 	const config = { ...baseConfig, maxCalls: Math.min(baseConfig.maxCalls, session.visualMaxCalls) };
 	const idleTimeoutMS = interactiveSurfacePollTimeout(timeout);
-	const { requireVisualTerminal, refreshAfterMS } = browserVisualTerminalPolicy(stage);
+	const { requireVisualTerminal, refreshAfterMS, postRefreshObserveMS } = browserVisualTerminalPolicy(stage);
 	const { heartbeatLimit } = browserVisualObservationAllocation(config.maxCalls, requireVisualTerminal);
 	const startedAtMS = Date.now();
 	let lastProgressAtMS = startedAtMS;
-	let deadline = adaptiveObservationDeadline(startedAtMS, lastProgressAtMS, idleTimeoutMS);
+	let deadline = adaptiveObservationDeadline(startedAtMS, lastProgressAtMS, idleTimeoutMS, postRefreshObserveMS);
 	let progressDigest = await businessProgressDigest(session.page);
 	let nextProgressProbeAtMS = startedAtMS + 5_000;
 	let refreshed = false;
@@ -2208,7 +2313,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			const nextDigest = await businessProgressDigest(session.page);
 			if (nextDigest && progressDigest && nextDigest !== progressDigest) {
 				lastProgressAtMS = Date.now();
-				deadline = adaptiveObservationDeadline(startedAtMS, lastProgressAtMS, idleTimeoutMS);
+				deadline = adaptiveObservationDeadline(startedAtMS, lastProgressAtMS, idleTimeoutMS, postRefreshObserveMS);
 				refreshed = false;
 			}
 			if (nextDigest) progressDigest = nextDigest;
@@ -2232,7 +2337,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			if (!await refreshAndRestoreObservedEntry(session)) {
 				return { surface: false, score: false, controls: false };
 			}
-			deadline = Math.min(deadline, Date.now() + 60_000);
+			deadline = Math.min(deadline, Date.now() + postRefreshObserveMS);
 			nextCaptureAt = Date.now();
 		}
 		const target = await interactiveSurfaceTargetOnce(session.page);
@@ -3312,7 +3417,7 @@ export function approvedKeyboardKeys(parameters: Record<string, unknown> | undef
     ? raw.map((value) => typeof value === "string" ? value.trim() : "")
     : typeof raw === "string" ? raw.split(/[;,\s]+/).map((value) => value.trim()) : [];
   const keys = values.filter(Boolean);
-  const allowed = new Set(["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp"]);
+  const allowed = new Set(["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp", "w", "a", "s", "d", "W", "A", "S", "D"]);
   if (keys.length === 0 || keys.length > 8 || keys.some((key) => !allowed.has(key))) return [];
   return keys;
 }
@@ -3341,6 +3446,12 @@ async function captureOutcomeSnapshot(page: any): Promise<OutcomeSnapshot> {
         String(element.getAttribute?.("data-testid") || ""),
         String(element.id || ""),
         element.hidden ? "hidden" : "visible",
+		// Text-only lifecycle changes are meaningful DOM evidence even when
+		// markup stays stable. Hash only a bounded semantic surface; the text
+		// itself never leaves this process or enters an audit event.
+		(element.children?.length === 0 || element.getAttribute?.("role"))
+			? String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 160)
+			: "",
       ].join(":" )).join("|");
       const aria = elements.map((element) => Array.from(element.attributes || [])
         .filter((attribute: any) => String(attribute.name || "").startsWith("aria-"))

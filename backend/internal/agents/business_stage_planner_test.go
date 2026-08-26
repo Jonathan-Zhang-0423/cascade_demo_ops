@@ -365,6 +365,42 @@ func TestBusinessStagePlannerUsesTaskPackOperationShapeWithoutKeywordRouting(t *
 	}
 }
 
+func TestBusinessStagePlannerRepairsBoundEntityWithoutCreationStages(t *testing.T) {
+	project := graphQualityProject()
+	project.ProductURL = "https://example.test/entities/current"
+	project.ProductDescription = "请让撤销和触控操作正常工作，并保留当前视觉风格。"
+	if project.Inputs == nil {
+		project.Inputs = &model.ProjectInputBundle{}
+	}
+	project.Inputs.WorkflowExecution = &model.WorkflowExecutionHints{
+		TaskPackID: "async-product-build-demo-v1", SameEntityRepair: true,
+		ExistingEntityURL: project.ProductURL, RepairInputSemantic: "product_repair",
+		DirectExecution: true, RequiresSubmission: true, ObserveAsyncResult: true,
+	}
+	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, nil, nil, graphQualityIntelligence(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]model.BusinessStage{}
+	for _, stage := range plan.Stages {
+		seen[strings.TrimPrefix(stage.ID, "business_stage_")] = stage
+	}
+	if _, ok := seen["new_project_entry"]; ok {
+		t.Fatal("same-entity repair must not reopen project creation")
+	}
+	if _, ok := seen["project_name_input"]; ok {
+		t.Fatal("same-entity repair must not write a project name")
+	}
+	input, inputOK := seen["product_repair_input"]
+	submit, submitOK := seen["submit_product_repair"]
+	if !inputOK || !submitOK || input.Action.InputValue != project.ProductDescription || input.EntryRoute != project.ProductURL || submit.EntryRoute != project.ProductURL {
+		t.Fatalf("same-entity repair stages are incomplete: input=%+v submit=%+v", input, submit)
+	}
+	if input.Action.Parameters["action_recipe"] != "product_repair" || submit.Action.Parameters["action_recipe"] != "product_repair_submit" {
+		t.Fatalf("repair recipes were not preserved: input=%+v submit=%+v", input.Action.Parameters, submit.Action.Parameters)
+	}
+}
+
 func TestBusinessStagePlannerCreatesRequirementDrivenProjectStages(t *testing.T) {
 	project := graphQualityProject()
 	project.ProductDescription = "演示登录 7 秒，新建项目 13 秒，项目名称2048，选择构建模式，启动 agent 实际构建，并等待 45 秒观察。"

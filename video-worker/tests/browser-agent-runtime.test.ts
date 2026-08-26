@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairTargetScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -31,7 +31,7 @@ describe("browser visual polling terminal evidence", () => {
 		expect(browserVisualTerminalPolicy({
 			id: "surface", order: 1, node_id: "surface", target_contract: { semantic_id: "surface", destructive: false },
 			interactions: [{ kind: "inspect", parameters: { require_visual_terminal_confirmation: true, refresh_after_ms: 300_000 } }],
-		})).toEqual({ requireVisualTerminal: true, refreshAfterMS: 300_000 });
+		})).toEqual({ requireVisualTerminal: true, refreshAfterMS: 300_000, postRefreshObserveMS: 60_000 });
 	});
 
 	it("hands a visible product surface to deterministic interaction proof", () => {
@@ -59,6 +59,7 @@ describe("browser visual polling terminal evidence", () => {
 		expect(adaptiveObservationDeadline(startedAt, startedAt, idleTimeout)).toBe(startedAt + idleTimeout);
 		expect(adaptiveObservationDeadline(startedAt, startedAt + 20 * 60_000, idleTimeout)).toBe(startedAt + 50 * 60_000);
 		expect(adaptiveObservationDeadline(startedAt, startedAt + 80 * 60_000, idleTimeout)).toBe(startedAt + 90 * 60_000);
+		expect(adaptiveObservationDeadline(startedAt, startedAt, idleTimeout, 3 * 60_000)).toBe(startedAt + 33 * 60_000);
 	});
 
 	it("refreshes a stale busy entity once at the wall-clock observation budget", () => {
@@ -67,6 +68,16 @@ describe("browser visual polling terminal evidence", () => {
 		expect(browserVisualHardRefreshDue(startedAt, startedAt + budget - 1, budget, false)).toBe(false);
 		expect(browserVisualHardRefreshDue(startedAt, startedAt + budget, budget, false)).toBe(true);
 		expect(browserVisualHardRefreshDue(startedAt, startedAt + budget + 60_000, budget, true)).toBe(false);
+	});
+});
+
+describe("same-entity product repair target confidence", () => {
+	it("requires a role-compatible unique control in the current primary container", () => {
+		const unique = runtimeProductRepairTargetScore({ roleState: 1, semantic: 1, containerContext: 1, uniqueness: 1, transitionFeasibility: 1 });
+		const ambiguous = runtimeProductRepairTargetScore({ roleState: 1, semantic: .8, containerContext: 1, uniqueness: 0, transitionFeasibility: 1 });
+		expect(unique).toBe(1);
+		expect(ambiguous).toBeLessThan(.85);
+		expect(adaptiveTargetCandidateExecutable(unique, ambiguous)).toBe(true);
 	});
 });
 
@@ -240,6 +251,7 @@ describe("browser agent credential broker boundary", () => {
 
 	it("accepts only the four approved gameplay keys", () => {
 		expect(approvedKeyboardKeys({ keys: "ArrowLeft,ArrowRight,ArrowDown,ArrowUp" })).toEqual(["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp"]);
+		expect(approvedKeyboardKeys({ keys: ["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp", "a", "d", "s", "w"] })).toEqual(["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp", "a", "d", "s", "w"]);
 		expect(approvedKeyboardKeys({ keys: "Control+L" })).toEqual([]);
 		expect(approvedKeyboardKeys({ keys: ["ArrowLeft", "Delete"] })).toEqual([]);
 	});

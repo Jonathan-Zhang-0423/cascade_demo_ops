@@ -107,6 +107,9 @@ type WorkflowExecutionHints struct {
 	RequiresSubmission              bool   `json:"requires_submission,omitempty"`
 	MayRequireExecutionConfirmation bool   `json:"may_require_execution_confirmation,omitempty"`
 	ObserveAsyncResult              bool   `json:"observe_async_result,omitempty"`
+	SameEntityRepair                bool   `json:"same_entity_repair,omitempty"`
+	ExistingEntityURL               string `json:"existing_entity_url,omitempty"`
+	RepairInputSemantic             string `json:"repair_input_semantic,omitempty"`
 }
 
 type PresentationGenerationIntent struct {

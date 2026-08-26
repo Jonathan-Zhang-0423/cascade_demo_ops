@@ -395,7 +395,10 @@ func adaptiveFailureHasObservedState(observation *model.RuntimeObservation) bool
 }
 
 func (s *Service) adaptiveObservedSuccessorEvidence(ctx context.Context, projectID string, state *orchestrator.CascadeState, result model.RecordingResultPackage) adaptiveObservedSuccessorEvidence {
-	current := strings.TrimSpace(result.FailureDiagnostic.CurrentURL)
+	current := ""
+	if result.FailureDiagnostic != nil {
+		current = strings.TrimSpace(result.FailureDiagnostic.CurrentURL)
+	}
 	if state == nil || state.ProjectContext == nil || state.DesktopCloudRun == nil || result.StageEventLogRef == nil {
 		return adaptiveObservedSuccessorEvidence{URL: current}
 	}

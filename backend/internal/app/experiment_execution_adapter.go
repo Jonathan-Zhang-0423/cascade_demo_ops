@@ -69,6 +69,9 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 			}
 			status, err = a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
 		}
+		if err == nil && status.Status != "completed" {
+			status, err = a.waitForDirectResult(ctx, projectID, jobID, request, emit)
+		}
 		if err != nil || status.Status != "completed" {
 			return &experiment.AdapterError{Code: "confirmed_result_revalidation_failed", Phase: "resume_observe_only", State: experiment.RunStateWaitingInput, Retryable: false, EvidenceRefs: []string{jobID}, Cause: err}
 		}
@@ -358,6 +361,10 @@ func compileExperimentInteractionContracts(plan experiment.InteractionPlan, obse
 			// requested product is complete and generation is no longer active.
 			parameters["require_visual_terminal_confirmation"] = true
 			parameters["refresh_after_ms"] = observationPlan.WarnAfterMS
+			if observationPlan.DeferAfterMS >= 30*60*1000 {
+				parameters["refresh_after_ms"] = observationPlan.DeferAfterMS
+				parameters["post_refresh_observe_ms"] = 180_000
+			}
 		}
 		if step.Action.Kind == "observe" && !hasSpecializedProof {
 			appendPredicate("interactive_surface_visible", true)
@@ -413,6 +420,13 @@ func compileExperimentInteractionContracts(plan experiment.InteractionPlan, obse
 }
 
 func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, request experiment.LegExecutionRequest, projectID, jobID string, status model.DirectJobStatus, commitEffect bool, emit func(experiment.LegExecutionUpdate) error) error {
+	return a.completeDirectLegWithHistory(ctx, request, projectID, jobID, status, commitEffect, nil, emit)
+}
+
+func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context.Context, request experiment.LegExecutionRequest, projectID, jobID string, status model.DirectJobStatus, commitEffect bool, history []closedLoopCaptureBatch, emit func(experiment.LegExecutionUpdate) error) error {
+	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 && len(history) == 0 {
+		history = a.restoreClosedLoopCaptureHistory(ctx, projectID, jobID)
+	}
 	result, err := a.service.GetDirectResult(ctx, projectID, jobID)
 	if err != nil {
 		return &experiment.AdapterError{Code: "direct_result_unavailable", Phase: "result_materialization", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
@@ -428,6 +442,7 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 		return &experiment.AdapterError{Code: "artifact_materialization_failed", Phase: "result_materialization", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
 	}
 	evidenceRefs := resultEvidenceRefs(result)
+	history = append(append([]closedLoopCaptureBatch{}, history...), closedLoopCaptureBatch{Result: result, Downloads: downloads})
 	segmentRefs := experimentSegmentRefs(downloads)
 	if commitEffect {
 		entityCreatedAt := result.CreatedAt
@@ -456,7 +471,17 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 			return err
 		}
 		if !score.CorePassed || !score.EligibleForFilm {
-			return &experiment.AdapterError{Code: "core_capability_gate_failed", Phase: "interaction_verification", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: []string{scoreEvidence}}
+			if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 && request.ProductRepairRounds < 3 {
+				directive := model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "surface-validation", FailureClass: "required_product_criteria_failed", TargetModule: "execution-capture", Action: "submit_product_repair", ArtifactRefs: []string{scoreEvidence}, Attempt: request.ProductRepairRounds + 1, MaxAttempts: 3, ResumePhase: "product_verification"}
+				if err := emit(experiment.LegExecutionUpdate{Kind: "repair_directive", Summary: "必需产品能力未通过；只允许在本次绑定实体内提交简短修复要求", EvidenceRefs: []string{scoreEvidence}, RepairDirective: &directive}); err != nil {
+					return err
+				}
+				if err := emit(experiment.LegExecutionUpdate{Kind: "artifacts", Artifacts: experimentArtifactRefs(downloads), Summary: "本轮事实录制已保留，后续修复不会丢失此前链路"}); err != nil {
+					return err
+				}
+				return a.executeSameEntityProductRepair(ctx, request, projectID, jobID, *score, history, emit)
+			}
+			return &experiment.AdapterError{Code: "product_repair_budget_exhausted", Phase: "product_verification", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: []string{scoreEvidence}}
 		}
 		// The adaptive profile's authoritative terminal is the layered business
 		// score. It already combines real interaction, structural, and bounded
@@ -484,21 +509,111 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 			return err
 		}
 	}
-	materialized, err := a.service.GetDirectEditorMaterialization(ctx, projectID)
-	if err != nil || !materialized.Ready {
-		if err == nil {
-			err = errors.New(materialized.Message)
+	allDownloads := downloads
+	materializedSessionID := ""
+	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
+		closedLoop, buildErr := a.buildClosedLoopEditorSession(ctx, request, history)
+		if buildErr != nil {
+			return &experiment.AdapterError{Code: "closed_loop_fact_track_invalid", Phase: "capture_ready", State: experiment.RunStateWaitingInput, Retryable: false, Cause: buildErr}
 		}
-		return &experiment.AdapterError{Code: "fact_track_materialization_deferred", Phase: "fact_track_materialization", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
+		materializedSessionID, allDownloads = closedLoop.Session.SessionID, closedLoop.Downloads
+	} else {
+		materialized, materializeErr := a.service.GetDirectEditorMaterialization(ctx, projectID)
+		if materializeErr != nil || !materialized.Ready {
+			if materializeErr == nil {
+				materializeErr = errors.New(materialized.Message)
+			}
+			return &experiment.AdapterError{Code: "fact_track_materialization_deferred", Phase: "fact_track_materialization", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: materializeErr}
+		}
+		materializedSessionID = materialized.SessionID
 	}
-	artifacts := append(experimentArtifactRefs(downloads), visualArtifacts...)
+	artifacts := append(experimentArtifactRefs(allDownloads), visualArtifacts...)
 	if err := emit(experiment.LegExecutionUpdate{Kind: "artifacts", Artifacts: artifacts, Summary: "事实轨、阶段证据和时序观察已物化"}); err != nil {
 		return err
 	}
 	if request.Kind == "main" {
-		return a.runFinalFilm(ctx, request, projectID, result, materialized.SessionID, downloads, emit)
+		return a.runFinalFilm(ctx, request, projectID, result, materializedSessionID, allDownloads, emit)
 	}
 	return nil
+}
+
+func (a *appExperimentExecutionAdapter) restoreClosedLoopCaptureHistory(ctx context.Context, projectID, currentJobID string) []closedLoopCaptureBatch {
+	state, err := a.service.states.Load(ctx, projectID)
+	if err != nil || state.DesktopCloudRun == nil {
+		return nil
+	}
+	result := []closedLoopCaptureBatch{}
+	seen := map[string]bool{}
+	for _, audit := range state.DesktopCloudRun.RepairHistory {
+		jobID := strings.TrimSpace(audit.SourceJobID)
+		if jobID == "" || jobID == currentJobID || seen[jobID] || audit.ResultPackage == nil {
+			continue
+		}
+		status, statusErr := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
+		if statusErr != nil || status.Status != "completed" {
+			continue
+		}
+		downloads, downloadErr := a.downloadDirectArtifacts(ctx, projectID, jobID, status.Artifacts)
+		if downloadErr != nil {
+			continue
+		}
+		seen[jobID] = true
+		result = append(result, closedLoopCaptureBatch{Result: *audit.ResultPackage, Downloads: downloads})
+	}
+	return result
+}
+
+func (a *appExperimentExecutionAdapter) executeSameEntityProductRepair(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, score model.CapabilityScore, history []closedLoopCaptureBatch, emit func(experiment.LegExecutionUpdate) error) error {
+	prepared, err := a.service.prepareAdaptiveSameEntityProductRepair(ctx, projectID, sourceJobID, request, score)
+	if err != nil || prepared.State == nil || prepared.Build == nil || prepared.Build.Package.ConfidenceSummary == nil {
+		return &experiment.AdapterError{Code: "same_entity_product_repair_package_failed", Phase: "product_repair", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: closedLoopHistoryArtifactIDs(history), Cause: err}
+	}
+	round := request.ProductRepairRounds + 1
+	key := fmt.Sprintf("product-repair-%s-%s-%d", safePathSegment(request.RunID), safePathSegment(request.LegID), round)
+	upload, err := a.service.UploadDirectExecutionPackage(ctx, projectID, DirectTransportUploadRequest{
+		OrgID: defaultDesktopOrgID, PackageDigestSHA256: prepared.Build.PackageDigestSHA256,
+		ApprovalSubjectDigestSHA256: prepared.Build.ApprovalSubjectDigestSHA256,
+		ConfidenceAssessmentHash:    prepared.Build.Package.ConfidenceSummary.AssessmentHash,
+		RiskConfirmed:               true, IdempotencyKey: key,
+		RuntimeMetadata: map[string]any{
+			"experiment_run_id": request.RunID, "experiment_leg_id": request.LegID, "harness_profile": request.HarnessProfile,
+			"same_entity_product_repair": true, "product_repair_round": round,
+			"observation_plan": request.ObservationPlan, "interaction_plan": request.InteractionPlan,
+			"visual_call_budget": request.VisualCallBudget, "expected_product_summary": experimentProductEvidenceSummary(request.ProductSpec),
+		},
+	})
+	if err != nil {
+		return &experiment.AdapterError{Code: "same_entity_product_repair_upload_failed", Phase: "product_repair", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{sourceJobID}, Cause: err}
+	}
+	jobID := upload.Receipt.JobID
+	if err := emit(experiment.LegExecutionUpdate{Kind: "checkpoint_result_entry", ResultEntryRef: "direct:" + projectID + ":" + jobID, EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
+		return err
+	}
+	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "product_repair", Summary: fmt.Sprintf("正在同一项目中执行第 %d 轮自动修复；不会创建第二个项目", round), EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
+		return err
+	}
+	status, err := a.waitForDirectResult(ctx, projectID, jobID, request, emit)
+	if err != nil {
+		return err
+	}
+	nextRequest := request
+	nextRequest.ProductRepairRounds = round
+	for _, batch := range history {
+		nextRequest.ExistingArtifacts = append(nextRequest.ExistingArtifacts, experimentArtifactRefs(batch.Downloads)...)
+	}
+	return a.completeDirectLegWithHistory(ctx, nextRequest, projectID, jobID, status, false, history, emit)
+}
+
+func closedLoopHistoryArtifactIDs(history []closedLoopCaptureBatch) []string {
+	result := []string{}
+	for _, batch := range history {
+		for _, download := range batch.Downloads {
+			if strings.TrimSpace(download.ArtifactID) != "" {
+				result = append(result, download.ArtifactID)
+			}
+		}
+	}
+	return result
 }
 
 func adaptiveObservationFailureShouldDefer(request experiment.LegExecutionRequest, result model.RecordingResultPackage) bool {
@@ -675,6 +790,9 @@ func directObservationTransportTimeout(request experiment.LegExecutionRequest) t
 	if !isAdaptiveExperimentHarness(request.HarnessProfile) {
 		return idleTimeout + 30*time.Second
 	}
+	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
+		return idleTimeout + 4*time.Minute
+	}
 	absolute := idleTimeout * 3
 	if absolute > 90*time.Minute {
 		absolute = 90 * time.Minute
@@ -761,12 +879,12 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 	}
 	for _, download := range downloads {
 		if download.Kind == "browser_agent_stage_event_log" || download.Kind == "recording_segment_manifest" {
-			supplements = append(supplements, model.FinalFilmReviewSupplement{Role: "experiment_" + safePathSegment(download.Kind), SourcePath: download.LocalPath, RelativePath: "experiment/" + filepath.Base(download.LocalPath), Required: false})
+			supplements = append(supplements, model.FinalFilmReviewSupplement{Role: "experiment_" + safePathSegment(download.Kind), SourcePath: download.LocalPath, RelativePath: "experiment/capture-" + safePathSegment(download.ArtifactID) + "-" + filepath.Base(download.LocalPath), Required: false})
 		}
 	}
 	var job model.FinalFilmJob
 	if request.FinalFilm == nil {
-		coverage, facts, coverageErr := closedLoopNarrativeBoundary(request, downloads)
+		coverage, facts, coverageErr := closedLoopNarrativeBoundary(request, downloads, &session)
 		if coverageErr != nil {
 			return &experiment.AdapterError{Code: "media_coverage_incomplete", Phase: "capture_ready", State: experiment.RunStateWaitingInput, Retryable: true, Cause: coverageErr}
 		}
@@ -806,7 +924,7 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 		if job.RunAuthorization != nil {
 			used = job.RunAuthorization.ProviderCallsUsed
 		}
-		if used > 8 {
+		if used > 6 {
 			return &experiment.AdapterError{Code: "provider_budget_exceeded", Phase: "director_media", State: experiment.RunStateFailed}
 		}
 		switch job.State {
@@ -820,6 +938,8 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 			return &experiment.AdapterError{Code: "final_review_required", Phase: "final_review", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: []string{job.ReviewPackage.PackageID}}
 		case model.FinalFilmJobFailed, model.FinalFilmJobCancelled:
 			return &experiment.AdapterError{Code: "final_film_failed", Phase: string(job.State), State: experiment.RunStateFailed, Retryable: job.LastError != nil && job.LastError.Retryable}
+		case model.FinalFilmJobRevisionRequested:
+			return &experiment.AdapterError{Code: "final_film_revision_required", Phase: job.Phase, State: experiment.RunStateWaitingInput, Retryable: false, EvidenceRefs: finalFilmRepairEvidence(job)}
 		}
 		select {
 		case <-ctx.Done():
@@ -829,16 +949,18 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 	}
 }
 
-func closedLoopNarrativeBoundary(request experiment.LegExecutionRequest, downloads []CloudDeliverableDownloadResult) (*model.MediaCoverageReport, []model.PublicNarrativeFact, error) {
+func finalFilmRepairEvidence(job model.FinalFilmJob) []string {
+	if len(job.RepairDirectives) == 0 {
+		return nil
+	}
+	return append([]string{}, job.RepairDirectives[len(job.RepairDirectives)-1].ArtifactRefs...)
+}
+
+func closedLoopNarrativeBoundary(request experiment.LegExecutionRequest, downloads []CloudDeliverableDownloadResult, session *model.EditorSession) (*model.MediaCoverageReport, []model.PublicNarrativeFact, error) {
 	if request.HarnessProfile != experiment.HarnessProfileAdaptiveBusinessV2 {
 		return nil, nil, nil
 	}
-	type chapterSpan struct {
-		Chapter string `json:"chapter"`
-		StartMS int    `json:"start_ms"`
-		EndMS   int    `json:"end_ms"`
-	}
-	var spans []chapterSpan
+	var spans []closedLoopChapterSpan
 	manifestRef := ""
 	segmentRefs := []string{}
 	for _, download := range downloads {
@@ -853,9 +975,9 @@ func closedLoopNarrativeBoundary(request experiment.LegExecutionRequest, downloa
 			return nil, nil, err
 		}
 		var manifest struct {
-			SchemaVersion string        `json:"schema_version"`
-			RolloverMS    int           `json:"rollover_ms"`
-			ChapterSpans  []chapterSpan `json:"chapter_spans"`
+			SchemaVersion string                  `json:"schema_version"`
+			RolloverMS    int                     `json:"rollover_ms"`
+			ChapterSpans  []closedLoopChapterSpan `json:"chapter_spans"`
 		}
 		if err := json.Unmarshal(raw, &manifest); err != nil || manifest.SchemaVersion != "demoops.browser_recording_segments.v1" || manifest.RolloverMS != 120_000 {
 			return nil, nil, errors.New("closed-loop recording segment manifest is missing its two-minute timeline")
@@ -881,6 +1003,9 @@ func closedLoopNarrativeBoundary(request experiment.LegExecutionRequest, downloa
 	}
 	for index, chapter := range model.RequiredDemoChapters() {
 		refs := append([]string{manifestRef}, segmentRefs...)
+		if session != nil && index < len(session.AssetCatalog.Steps) && session.AssetCatalog.Steps[index].StepID == "closed_loop_"+chapter {
+			refs = append(append([]string{}, session.AssetCatalog.Steps[index].Artifacts...), refs...)
+		}
 		entry := model.MediaChapterCoverage{Chapter: chapter, Covered: covered[chapter], ArtifactRefs: refs, Rerecordable: chapter == "build_wait" || chapter == "result_reveal" || chapter == "interaction"}
 		if !entry.Covered {
 			entry.QualityIssues = []string{"chapter_evidence_missing"}

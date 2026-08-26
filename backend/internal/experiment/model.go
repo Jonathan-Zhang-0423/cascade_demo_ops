@@ -1,6 +1,10 @@
 package experiment
 
-import "time"
+import (
+	"time"
+
+	"cascade-demoops/backend/internal/model"
+)
 
 const (
 	DefinitionSchemaVersion          = "demoops.experiment_definition.v1"
@@ -181,33 +185,34 @@ type CreateRunRequest struct {
 }
 
 type Run struct {
-	SchemaVersion     string              `json:"schema_version"`
-	RunID             string              `json:"run_id"`
-	DefinitionRef     string              `json:"definition_ref"`
-	DefinitionID      string              `json:"definition_id"`
-	WorkflowTemplate  string              `json:"workflow_template_id"`
-	UserGoal          string              `json:"user_goal"`
-	TargetURL         string              `json:"target_url"`
-	CredentialRef     string              `json:"credential_ref"`
-	AuthorizationRef  string              `json:"authorization_ref"`
-	IdempotencyKey    string              `json:"idempotency_key"`
-	HarnessProfile    string              `json:"harness_profile,omitempty"`
-	State             RunState            `json:"state"`
-	Phase             string              `json:"phase"`
-	Revision          int                 `json:"revision"`
-	Budget            AuthorizationBudget `json:"budget"`
-	ProductSpec       ProductSpec         `json:"product_spec"`
-	ObservationPlan   ObservationPlan     `json:"observation_plan"`
-	InteractionPlan   InteractionPlan     `json:"interaction_plan"`
-	Legs              []RunLeg            `json:"legs"`
-	ProviderCallsUsed int                 `json:"provider_calls_used"`
-	FinalFilm         *FinalFilmBinding   `json:"final_film,omitempty"`
-	Report            *RunReport          `json:"report,omitempty"`
-	Waiting           *WaitingState       `json:"waiting,omitempty"`
-	LastError         *RunError           `json:"last_error,omitempty"`
-	CreatedAt         time.Time           `json:"created_at"`
-	UpdatedAt         time.Time           `json:"updated_at"`
-	TerminalAt        time.Time           `json:"terminal_at,omitempty"`
+	SchemaVersion     string                  `json:"schema_version"`
+	RunID             string                  `json:"run_id"`
+	DefinitionRef     string                  `json:"definition_ref"`
+	DefinitionID      string                  `json:"definition_id"`
+	WorkflowTemplate  string                  `json:"workflow_template_id"`
+	UserGoal          string                  `json:"user_goal"`
+	TargetURL         string                  `json:"target_url"`
+	CredentialRef     string                  `json:"credential_ref"`
+	AuthorizationRef  string                  `json:"authorization_ref"`
+	IdempotencyKey    string                  `json:"idempotency_key"`
+	HarnessProfile    string                  `json:"harness_profile,omitempty"`
+	State             RunState                `json:"state"`
+	Phase             string                  `json:"phase"`
+	Revision          int                     `json:"revision"`
+	Budget            AuthorizationBudget     `json:"budget"`
+	ProductSpec       ProductSpec             `json:"product_spec"`
+	ObservationPlan   ObservationPlan         `json:"observation_plan"`
+	InteractionPlan   InteractionPlan         `json:"interaction_plan"`
+	Legs              []RunLeg                `json:"legs"`
+	ProviderCallsUsed int                     `json:"provider_calls_used"`
+	FinalFilm         *FinalFilmBinding       `json:"final_film,omitempty"`
+	Report            *RunReport              `json:"report,omitempty"`
+	Waiting           *WaitingState           `json:"waiting,omitempty"`
+	LastError         *RunError               `json:"last_error,omitempty"`
+	RepairDirectives  []model.RepairDirective `json:"repair_directives,omitempty"`
+	CreatedAt         time.Time               `json:"created_at"`
+	UpdatedAt         time.Time               `json:"updated_at"`
+	TerminalAt        time.Time               `json:"terminal_at,omitempty"`
 }
 
 type RunLeg struct {

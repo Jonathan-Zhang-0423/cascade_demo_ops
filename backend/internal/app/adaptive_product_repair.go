@@ -1,0 +1,149 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"cascade-demoops/backend/internal/agents"
+	"cascade-demoops/backend/internal/experiment"
+	"cascade-demoops/backend/internal/model"
+	"cascade-demoops/backend/internal/orchestrator"
+)
+
+func (s *Service) prepareAdaptiveSameEntityProductRepair(ctx context.Context, projectID, sourceJobID string, request experiment.LegExecutionRequest, score model.CapabilityScore) (ProductRunPrepareResult, error) {
+	state, err := s.states.Load(ctx, strings.TrimSpace(projectID))
+	if err != nil {
+		return ProductRunPrepareResult{}, err
+	}
+	if state.ProjectContext == nil || state.ProjectIntelligence == nil || state.DesktopCloudRun == nil {
+		return ProductRunPrepareResult{}, errors.New("same-entity repair requires the persisted project, intelligence pack, and Direct run")
+	}
+	result, err := s.getDirectHistoricalResult(ctx, projectID, sourceJobID)
+	if err != nil && state.DesktopCloudRun.ResultPackage != nil && state.DesktopCloudRun.ResultPackage.CloudJobID == sourceJobID {
+		result = *state.DesktopCloudRun.ResultPackage
+		err = nil
+	}
+	if err != nil || result.Status == model.RecordingResultStatusFailed {
+		return ProductRunPrepareResult{}, errors.New("same-entity repair requires a completed source result")
+	}
+	observed := s.adaptiveObservedSuccessorEvidence(ctx, projectID, state, result)
+	entityURL := strings.TrimSpace(observed.URL)
+	if entityURL == "" {
+		return ProductRunPrepareResult{}, errors.New("same-entity repair has no observed entity entry URL")
+	}
+	repairPrompt := adaptiveProductRepairPrompt(request.ProductSpec, score.Missing)
+	if repairPrompt == "" {
+		return ProductRunPrepareResult{}, errors.New("same-entity repair could not derive a public product request")
+	}
+	next, err := cloneCascadeStateForRevision(state)
+	if err != nil {
+		return ProductRunPrepareResult{}, err
+	}
+	next.ProjectContext.ProductURL = entityURL
+	next.ProjectContext.ProductDescription = repairPrompt
+	next.ProjectContext.UpdatedAt = time.Now().UTC()
+	if next.ProjectContext.Inputs == nil {
+		next.ProjectContext.Inputs = &model.ProjectInputBundle{}
+	}
+	next.ProjectContext.Inputs.RawUserPrompt = repairPrompt
+	next.ProjectContext.Inputs.WorkflowExecution = &model.WorkflowExecutionHints{
+		TaskPackID: request.WorkflowTemplateID, SameEntityRepair: true, ExistingEntityURL: entityURL,
+		RepairInputSemantic: "product_repair", DirectExecution: true, RequiresSubmission: true, ObserveAsyncResult: true,
+	}
+	next.ProjectContext.Inputs.InteractionContracts, err = compileExperimentInteractionContracts(request.InteractionPlan, request.ObservationPlan)
+	if err != nil {
+		return ProductRunPrepareResult{}, err
+	}
+	if next.ProjectIntelligence.RunIntentScope == nil {
+		next.ProjectIntelligence.RunIntentScope = &model.RunIntentScope{ID: "same_entity_repair_scope_" + projectID, ProjectID: projectID, SchemaVersion: model.ProjectIntelligencePackSchemaVersion}
+	}
+	next.ProjectIntelligence.RunIntentScope.ProductURL = entityURL
+	next.ProjectContext.ProjectIntelligence = next.ProjectIntelligence
+	stagePlan, err := agents.NewBusinessStagePlannerAgent().PlanBusinessStages(ctx, next.ProjectContext, next.RequirementBrief, next.UnderstandingReport, next.ProductMap, next.ProjectIntelligence, next.VerifiedInteractionPlan)
+	if err != nil {
+		return ProductRunPrepareResult{}, fmt.Errorf("plan same-entity repair stages: %w", err)
+	}
+	next.ProjectIntelligence.BusinessStagePlan = stagePlan
+	graph, err := agents.NewGraphBuilderAgent().GenerateGraph(ctx, next.ProjectContext, next.ProductMap, next.UnderstandingReport, next.ProjectIntelligence)
+	if err != nil {
+		return ProductRunPrepareResult{}, fmt.Errorf("build same-entity repair graph: %w", err)
+	}
+	previousRun := state.DesktopCloudRun
+	repairHistory := append([]orchestrator.DesktopDirectRepairAuditState(nil), previousRun.RepairHistory...)
+	if len(repairHistory) == 0 || repairHistory[len(repairHistory)-1].SourceJobID != sourceJobID {
+		resultCopy := result
+		repairHistory = append(repairHistory, orchestrator.DesktopDirectRepairAuditState{
+			SourceResultID: result.ResultID, SourcePackageID: result.SourcePackageID, SourceJobID: sourceJobID,
+			ResultPackage: &resultCopy, DownloadedAssets: append([]orchestrator.DesktopDownloadedAssetState(nil), previousRun.DownloadedAssets...), CreatedAt: time.Now().UTC(),
+		})
+	}
+	next, err = s.flow.RepackageReviewedGraph(ctx, next, graph)
+	if err != nil {
+		return ProductRunPrepareResult{}, fmt.Errorf("package same-entity repair graph: %w", err)
+	}
+	if next.ExecutableScriptBundle == nil {
+		return ProductRunPrepareResult{}, errors.New("same-entity repair executable bundle is missing")
+	}
+	baseBundleID, baseBundleHash := "", ""
+	if state.ExecutableScriptBundle != nil {
+		baseBundleID = state.ExecutableScriptBundle.ID
+		baseBundleHash = state.ExecutableScriptBundle.Reproducibility.BundleHashSHA256
+	}
+	next.ExecutableScriptBundle.RepairLineage = &model.ScriptRepairLineage{
+		BaseBundleID: baseBundleID, BaseBundleHashSHA256: baseBundleHash, SourceResultID: result.ResultID, SourceCloudJobID: sourceJobID,
+		RepairAttempt: request.ProductRepairRounds + 1, ChangeSummary: "Submit one bounded product repair to the already-bound entity, then re-run required product verification.", CreatedAt: time.Now().UTC(),
+	}
+	next.ExecutionPackageGeneration = state.ExecutionPackageGeneration + 1
+	next.DesktopCloudRun = &orchestrator.DesktopCloudRunState{
+		SchemaVersion: desktopCloudRunSchemaVersion, Transport: directTransportStateName,
+		OrgID: firstNonEmptyString(previousRun.OrgID, defaultDesktopOrgID), Status: "not_uploaded", Stage: "same_entity_product_repair_ready",
+		Message: "已为本次绑定实体生成自动产品修复执行包。", LastRepairSourceID: result.ResultID,
+		RepairHistory: repairHistory,
+	}
+	if err := s.states.Save(ctx, next); err != nil {
+		return ProductRunPrepareResult{}, err
+	}
+	s.invalidateApprovedBuildsForProject(projectID)
+	build, err := s.BuildClientExecutionPackage(ctx, projectID, firstNonEmptyString(previousRun.OrgID, defaultDesktopOrgID))
+	if err != nil {
+		return ProductRunPrepareResult{}, err
+	}
+	return ProductRunPrepareResult{State: compactStateForPrepareResponse(next, &build), Build: &build}, nil
+}
+
+func adaptiveProductRepairPrompt(spec experiment.ProductSpec, missing []string) string {
+	statements := map[string]string{}
+	for _, criterion := range spec.ObservableAcceptance {
+		if criterion.Required {
+			statements[criterion.ID] = strings.TrimSpace(criterion.Statement)
+		}
+	}
+	for _, requirement := range spec.Requirements {
+		statements[requirement.ID] = strings.TrimSpace(requirement.Statement)
+	}
+	selected := []string{}
+	seen := map[string]bool{}
+	for _, id := range missing {
+		if value := statements[strings.TrimSpace(id)]; value != "" && !seen[value] {
+			selected, seen[value] = append(selected, value), true
+		}
+	}
+	if len(selected) == 0 {
+		for _, criterion := range spec.ObservableAcceptance {
+			if criterion.Required && strings.TrimSpace(criterion.Statement) != "" && !seen[criterion.Statement] {
+				selected, seen[criterion.Statement] = append(selected, strings.TrimSpace(criterion.Statement)), true
+			}
+		}
+	}
+	if len(selected) == 0 {
+		return ""
+	}
+	value := "请修复当前项目，使以下要求能够实际使用：" + strings.Join(selected, "；") + "。保留现有功能和视觉风格，直接更新当前项目。"
+	if len([]rune(value)) > 600 {
+		value = string([]rune(value)[:600])
+	}
+	return value
+}

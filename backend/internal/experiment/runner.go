@@ -6,29 +6,32 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"cascade-demoops/backend/internal/model"
 )
 
 type LegExecutionRequest struct {
-	RunID              string
-	LegID              string
-	Kind               string
-	ProjectName        string
-	BuildPrompt        string
-	TargetURL          string
-	CredentialRef      string
-	AuthorizationRef   string
-	BrowserAttempt     int
-	Checkpoint         *Checkpoint
-	ExistingArtifacts  []ArtifactRef
-	FinalFilm          *FinalFilmBinding
-	RunReport          RunReport
-	ProductSpec        ProductSpec
-	ObservationPlan    ObservationPlan
-	InteractionPlan    InteractionPlan
-	VisualCallBudget   int
-	WorkflowTemplateID string
-	HarnessProfile     string
-	RunStartedAt       time.Time
+	RunID               string
+	LegID               string
+	Kind                string
+	ProjectName         string
+	BuildPrompt         string
+	TargetURL           string
+	CredentialRef       string
+	AuthorizationRef    string
+	BrowserAttempt      int
+	Checkpoint          *Checkpoint
+	ExistingArtifacts   []ArtifactRef
+	FinalFilm           *FinalFilmBinding
+	RunReport           RunReport
+	ProductSpec         ProductSpec
+	ObservationPlan     ObservationPlan
+	InteractionPlan     InteractionPlan
+	VisualCallBudget    int
+	WorkflowTemplateID  string
+	HarnessProfile      string
+	RunStartedAt        time.Time
+	ProductRepairRounds int
 }
 
 type LegExecutionUpdate struct {
@@ -52,6 +55,7 @@ type LegExecutionUpdate struct {
 	EntityName          string
 	EntityCreatedAt     time.Time
 	EntityTaskRef       string
+	RepairDirective     *model.RepairDirective
 }
 
 type LegExecutionAdapter interface {
@@ -131,9 +135,10 @@ func (r *Runner) RunLeg(ctx context.Context, runID, legID string, adapter LegExe
 		BrowserAttempt: leg.BrowserAttempt, Checkpoint: leg.Checkpoint, ExistingArtifacts: append([]ArtifactRef{}, leg.ArtifactRefs...), FinalFilm: run.FinalFilm,
 		RunReport: *buildReport(run), ProductSpec: run.ProductSpec, ObservationPlan: run.ObservationPlan,
 		InteractionPlan: run.InteractionPlan, VisualCallBudget: run.Budget.VisualCallsPerRun - leg.VisualCallsUsed,
-		WorkflowTemplateID: run.WorkflowTemplate,
-		HarnessProfile:     run.HarnessProfile,
-		RunStartedAt:       run.CreatedAt,
+		WorkflowTemplateID:  run.WorkflowTemplate,
+		HarnessProfile:      run.HarnessProfile,
+		RunStartedAt:        run.CreatedAt,
+		ProductRepairRounds: leg.ProductRepairRounds,
 	}
 	emit := func(update LegExecutionUpdate) error {
 		current, getErr := r.service.GetRun(ctx, runID)
@@ -168,6 +173,11 @@ func (r *Runner) RunLeg(ctx context.Context, runID, legID string, adapter LegExe
 				return errors.New("capability_scored update requires a score")
 			}
 			_, getErr = r.service.RecordCapabilityScore(ctx, runID, current.Revision, legID, *update.CapabilityScore, update.EvidenceRefs)
+		case "repair_directive":
+			if update.RepairDirective == nil {
+				return errors.New("repair_directive update requires a directive")
+			}
+			_, getErr = r.service.RecordRepairDirective(ctx, runID, current.Revision, legID, *update.RepairDirective)
 		case "final_film_bound":
 			_, getErr = r.service.BindFinalFilm(ctx, runID, current.Revision, update.FinalFilmJobID, update.FinalFilmRevision, update.ProviderCallsUsed, update.FinalFilmPackageID)
 		default:

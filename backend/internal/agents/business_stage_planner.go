@@ -79,11 +79,12 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 	// selector aliases, and other generated metadata that may follow a phrase
 	// such as "new project".
 	workflowHints := workflowExecutionHints(project)
+	sameEntityRepair := workflowHints != nil && workflowHints.SameEntityRepair
 	projectName := intentProjectName(businessStageExplicitRequirementText(project, brief, report))
 	if projectName == "" && workflowHints != nil && workflowHints.RequiresFreshEntity {
 		projectName = strings.TrimSpace(workflowHints.EntityName)
 	}
-	wantsNewProject := containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") || projectName != "" || (workflowHints != nil && workflowHints.RequiresFreshEntity)
+	wantsNewProject := !sameEntityRepair && (containsAnyNormalized(intentText, "新建项目", "创建项目", "新增项目", "new project", "create project") || projectName != "" || (workflowHints != nil && workflowHints.RequiresFreshEntity))
 	if wantsNewProject {
 		builder.addStage(stageSpec{
 			id:            "new_project_entry",
@@ -136,9 +137,22 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			})
 		}
 	}
+	if sameEntityRepair {
+		entityRoute := firstNonEmpty(workflowHints.ExistingEntityURL, project.ProductURL, routeHints.projectDetail, routeHints.workspace)
+		builder.addStage(stageSpec{
+			id: "product_repair_input", kind: model.BusinessStageKindBusinessInput,
+			title: "填写当前项目的修复要求", objective: "在当前已绑定项目中填写简短修复要求，不创建新的项目。",
+			actionType: string(model.GraphActionFill), actionLabel: "填写修复要求",
+			inputSemantic: firstNonEmpty(workflowHints.RepairInputSemantic, "product_repair"), inputValue: project.ProductDescription,
+			successState: "修复要求已原样填写，等待提交。", routeState: model.BusinessRouteStateProjectDetail,
+			entryRoute: entityRoute, expectedRoute: entityRoute, durationMS: 5000,
+			keywords: []string{"修改要求", "修复要求", "补充要求", "message", "request", "prompt", "instruction"},
+			capture:  []string{"当前项目", "已填写的修复要求"}, parameters: map[string]string{"action_recipe": "product_repair"}, nonDestructive: true,
+		})
+	}
 
 	wantsDirectBuildMode := containsAnyNormalized(intentText, "实际构建", "直接构建", "直接生成", "direct build", "build directly") || (workflowHints != nil && workflowHints.DirectExecution)
-	if containsAnyNormalized(intentText, "构建模式", "build mode", "builder mode") || wantsDirectBuildMode {
+	if !sameEntityRepair && (containsAnyNormalized(intentText, "构建模式", "build mode", "builder mode") || wantsDirectBuildMode) {
 		modeTitle := "选择构建模式"
 		modeObjective := "在项目创建流程中选择构建模式。"
 		modeSuccess := "构建模式已被选中，后续可以启动 agent 构建。"
@@ -169,7 +183,7 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 
 	wantsBuild := containsAnyNormalized(intentText, "agent", "智能体", "实际构建", "开始构建", "启动构建", "run build", "start build", "生成", "构建") || (workflowHints != nil && workflowHints.RequiresSubmission)
 	if wantsBuild {
-		builder.addStage(stageSpec{
+		submitStage := stageSpec{
 			id:            "start_agent_build",
 			kind:          model.BusinessStageKindBusinessSubmit,
 			title:         "启动 agent 实际构建",
@@ -183,7 +197,20 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			durationMS:    durationMSForIntentKeywords(intentText, "启动", "开始", "提交", "启动构建", "开始构建", "run build", "start build", "submit", "run", "start"),
 			keywords:      []string{"agent", "智能体", "开始构建", "启动构建", "实际构建", "生成", "构建", "build", "run", "start", "generate"},
 			capture:       []string{"启动构建按钮", "构建开始状态"},
-		})
+		}
+		if sameEntityRepair {
+			entityRoute := firstNonEmpty(workflowHints.ExistingEntityURL, project.ProductURL, routeHints.projectDetail, routeHints.workspace)
+			submitStage.id = "submit_product_repair"
+			submitStage.title = "提交当前项目修复"
+			submitStage.objective = "只向当前已绑定项目提交本轮修复要求，不创建新项目。"
+			submitStage.actionLabel = "提交修复要求"
+			submitStage.successState = "当前项目开始执行修复，页面出现新的进度或结果状态。"
+			submitStage.entryRoute, submitStage.expectedRoute = entityRoute, entityRoute
+			submitStage.keywords = []string{"发送", "提交", "更新", "修改", "执行", "send", "submit", "update", "apply"}
+			submitStage.capture = []string{"修复提交动作", "同一项目更新状态"}
+			submitStage.parameters = map[string]string{"action_recipe": "product_repair_submit"}
+		}
+		builder.addStage(submitStage)
 		if workflowHints != nil && workflowHints.MayRequireExecutionConfirmation {
 			// Async products may reveal more than one semantically distinct
 			// execution confirmation (for example, prepare -> execute). Keep the
@@ -812,6 +839,8 @@ func businessStageIsApprovedNonDestructive(spec stageSpec) bool {
 		"start_agent_build":                    model.GraphActionClick,
 		"continue_prepared_execution":          model.GraphActionClick,
 		"continue_prepared_execution_followup": model.GraphActionClick,
+		"product_repair_input":                 model.GraphActionFill,
+		"submit_product_repair":                model.GraphActionClick,
 	}
 	want, ok := allowedAction[spec.id]
 	if !ok || model.GraphActionType(spec.actionType) != want {

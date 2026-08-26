@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"cascade-demoops/backend/internal/model"
 )
 
 func TestCreateRunFreezesTwoLegsAndIsIdempotent(t *testing.T) {
@@ -74,6 +76,13 @@ func TestCreateV2RunUsesOneFreshLegAndOriginalSentence(t *testing.T) {
 	if run.Legs[0].ProjectName == loaded.Definition.MainProjectName || !strings.Contains(run.Legs[0].ProjectName, "·") {
 		t.Fatalf("v2 project identity is not unique: %q", run.Legs[0].ProjectName)
 	}
+	wasdRequired := false
+	for _, step := range run.InteractionPlan.Steps {
+		wasdRequired = wasdRequired || step.StepID == "wasd_moves" && step.CapabilityLayer == "core" && len(step.Action.Keys) == 4
+	}
+	if !wasdRequired {
+		t.Fatal("v2 acceptance did not retain an independent required WASD proof")
+	}
 }
 
 func TestV2CommitRejectsOldOrMismatchedEntity(t *testing.T) {
@@ -105,6 +114,45 @@ func TestV2CommitRejectsOldOrMismatchedEntity(t *testing.T) {
 	base.EntityCreatedAt = started.CreatedAt.Add(-time.Second)
 	if _, err := service.CommitOnceEffect(t.Context(), run.RunID, base); err == nil {
 		t.Fatal("v2 accepted an entity created before the run")
+	}
+}
+
+func TestV2ProductRepairIsBoundedAndKeepsFreshEntityIdentity(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "experiments")
+	loaded, err := LoadDefinition(root, "2048-v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	service, err := NewService(ServiceOptions{Store: NewFileStore(t.TempDir()), DefinitionRoot: root, ProductSpecPlanner: staticProductSpecPlanner{spec: loaded.ProductSpec}, Now: func() time.Time { now = now.Add(time.Second); return now }, NewID: func(prefix string) (string, error) { return prefix + "_repair", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := service.CreateRun(t.Context(), CreateRunRequest{DefinitionRef: "2048-v3", UserGoal: loaded.Definition.ShortGoal, TargetURL: "https://target.example.test/app", CredentialRef: "secret://demo/account", AuthorizationRef: "approval://experiment/start", IdempotencyKey: "repair-bound-idem", HarnessProfile: HarnessProfileAdaptiveBusinessV2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run = mustTransitionLeg(t, service, run, run.Legs[0].LegID, RunStateRunning, "submit_committed")
+	started, err := service.BeginOnceEffect(t.Context(), run.RunID, run.Revision, run.Legs[0].LegID, "target_submit", "target_submission", "fresh-submit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err = service.CommitOnceEffect(t.Context(), run.RunID, CommitOnceEffectRequest{ExpectedRevision: started.Revision, LegID: run.Legs[0].LegID, EffectID: "target_submit", StateFingerprintRef: "state:fresh", ResultEntryRef: "direct:project:job", EvidenceRefs: []string{"entity"}, EntityName: started.Legs[0].ProjectName, EntityCreatedAt: started.CreatedAt.Add(time.Second), EntityTaskRef: "job"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entity := run.Legs[0].BoundEntityName
+	for attempt := 1; attempt <= 3; attempt++ {
+		run, err = service.RecordRepairDirective(t.Context(), run.RunID, run.Revision, run.Legs[0].LegID, model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "surface-validation", FailureClass: "required_product_criteria_failed", TargetModule: "execution-capture", Action: "submit_product_repair", ArtifactRefs: []string{"score"}, Attempt: attempt, MaxAttempts: 3, ResumePhase: "product_verification"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.Legs[0].BoundEntityName != entity || run.Legs[0].CreateCount != 1 || run.Legs[0].BuildSubmitCount != 1 {
+			t.Fatalf("repair changed the fresh entity identity: %+v", run.Legs[0])
+		}
+	}
+	if _, err := service.RecordRepairDirective(t.Context(), run.RunID, run.Revision, run.Legs[0].LegID, model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "surface-validation", FailureClass: "required_product_criteria_failed", TargetModule: "execution-capture", Action: "submit_product_repair", Attempt: 4, MaxAttempts: 4, ResumePhase: "product_verification"}); err == nil {
+		t.Fatal("fourth product repair was accepted")
 	}
 }
 
