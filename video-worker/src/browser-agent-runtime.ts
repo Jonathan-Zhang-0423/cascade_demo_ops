@@ -406,7 +406,7 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
     acceptDownloads: false,
   };
   if (request.browser?.record_video) {
-    contextOptions.recordVideo = { dir: outputDir, size: request.browser?.viewport || defaultViewport };
+    contextOptions.recordVideo = { dir: outputDir, size: browserRecordingSize(request.browser?.viewport || defaultViewport) };
   }
   const context = await browser.newContext(contextOptions);
   const maskSelectors = [...new Set([...(request.mask_selectors || []), secretInputMaskSelector])];
@@ -486,6 +486,19 @@ export async function browserAgentSessionStatus(request: { session_id: string })
   // Keep this endpoint intentionally metadata-only: it is used to hand a
   // manually authenticated, isolated browser back to the local test harness.
   return { url: safeURL(session.page.url()), title: redactText(await session.page.title().catch(() => "")) };
+}
+
+export function browserRecordingSize(viewport: { width: number; height: number }): { width: number; height: number } {
+  const width = Math.max(320, Math.trunc(Number(viewport?.width) || defaultViewport.width));
+  const height = Math.max(240, Math.trunc(Number(viewport?.height) || defaultViewport.height));
+  const scale = Math.min(1, 1920 / width, 1080 / height);
+  // VP8 requires even dimensions on some Worker builds. Keeping the capture at
+  // or below the final delivery raster prevents a long 1440p session from
+  // leaving minutes of image2pipe backlog after the browser work has ended.
+  return {
+    width: Math.max(2, Math.floor(width * scale / 2) * 2),
+    height: Math.max(2, Math.floor(height * scale / 2) * 2),
+  };
 }
 
 // Captures a bounded, redacted keyframe for the temporal visual harness. The
