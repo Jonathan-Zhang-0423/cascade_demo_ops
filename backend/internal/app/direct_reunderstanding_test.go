@@ -245,6 +245,16 @@ func TestSynthesizeMissingAdaptiveContinuationForSubmittedPassiveStall(t *testin
 	if err := model.ValidateInteractionContract(*pending.InteractionContract); err != nil {
 		t.Fatalf("synthesized continuation contract is invalid: %v", err)
 	}
+	state := &orchestrator.CascadeState{ProjectIntelligence: &model.ProjectIntelligencePack{BusinessStagePlan: &model.BusinessStagePlan{}}}
+	if err := syncAdaptiveBusinessStagePlan(state, repair); err != nil {
+		t.Fatalf("synthesized continuation business plan did not synchronize: %v", err)
+	}
+	if got := pending.Metadata["business_route_state"]; got != string(model.BusinessRouteStateBuildRunning) {
+		t.Fatalf("synthesized continuation route state was not canonicalized: %v", got)
+	}
+	if got := pending.Metadata["business_stage_kind"]; got != string(model.BusinessStageKindBusinessSubmit) {
+		t.Fatalf("synthesized continuation stage kind changed: %v", got)
+	}
 }
 
 func TestSynthesizeMissingAdaptiveContinuationRequiresAuditedSubmitEvidence(t *testing.T) {

@@ -959,6 +959,12 @@ func syncAdaptiveBusinessStagePlan(state *orchestrator.CascadeState, graph *mode
 		if value, ok := node.Metadata["business_route_state"].(string); ok && strings.TrimSpace(value) != "" {
 			routeState = model.BusinessRouteState(value)
 		}
+		// Keep the graph projection and the regenerated business-stage plan on
+		// one canonical value. Newly synthesized runtime nodes legitimately have
+		// no legacy route-state metadata; leaving it absent makes the script
+		// packager default each projection differently and rejects the repair.
+		node.Metadata["business_stage_kind"] = string(kind)
+		node.Metadata["business_route_state"] = string(routeState)
 		expectedRoute := node.PageRef
 		if kind == model.BusinessStageKindSessionSetup {
 			for _, validation := range node.Validations {
