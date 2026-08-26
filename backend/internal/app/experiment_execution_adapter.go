@@ -72,6 +72,9 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		if err == nil && status.Status != "completed" {
 			status, err = a.waitForDirectResult(ctx, projectID, jobID, request, emit)
 		}
+		if adaptiveWaitResultNeedsReconciliation(request, status, err) {
+			return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
+		}
 		if err != nil || status.Status != "completed" {
 			return &experiment.AdapterError{Code: "confirmed_result_revalidation_failed", Phase: "resume_observe_only", State: experiment.RunStateWaitingInput, Retryable: false, EvidenceRefs: []string{jobID}, Cause: err}
 		}
@@ -100,6 +103,9 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 				}
 			}
 			status, err := a.waitForDirectResult(ctx, projectID, jobID, request, emit)
+			if adaptiveWaitResultNeedsReconciliation(request, status, err) {
+				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
+			}
 			if err != nil {
 				return err
 			}
@@ -192,10 +198,24 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		return err
 	}
 	status, err := a.waitForDirectResult(ctx, prepared.State.ProjectID, jobID, request, emit)
+	if adaptiveWaitResultNeedsReconciliation(request, status, err) {
+		return a.reconcileFailedDirectLeg(ctx, request, prepared.State.ProjectID, jobID, emit)
+	}
 	if err != nil {
 		return err
 	}
 	return a.completeDirectLeg(ctx, request, prepared.State.ProjectID, jobID, status, true, emit)
+}
+
+// A Direct task can cross from running to failed between the preflight status
+// read and waitForDirectResult. Preserve the same observed-state repair route
+// in that race window instead of surfacing a confidence prompt to the user.
+func adaptiveWaitResultNeedsReconciliation(request experiment.LegExecutionRequest, status model.DirectJobStatus, err error) bool {
+	if !isAdaptiveExperimentHarness(request.HarnessProfile) || status.Status != "failed" || err == nil {
+		return false
+	}
+	var adapterErr *experiment.AdapterError
+	return errors.As(err, &adapterErr) && adapterErr.Code == "confidence_deferred"
 }
 
 func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, emit func(experiment.LegExecutionUpdate) error) error {

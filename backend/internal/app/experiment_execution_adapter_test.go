@@ -278,6 +278,22 @@ func TestAdaptiveV2ObservationDeadlineWaitsForBoundExternalTask(t *testing.T) {
 	}
 }
 
+func TestAdaptiveWaitFailureKeepsObservedStateReconciliationRaceClosed(t *testing.T) {
+	request := experiment.LegExecutionRequest{HarnessProfile: experiment.HarnessProfileAdaptiveBusinessV2}
+	status := model.DirectJobStatus{Status: "failed"}
+	deferred := &experiment.AdapterError{Code: "confidence_deferred", State: experiment.RunStateWaitingInput, Retryable: true}
+	if !adaptiveWaitResultNeedsReconciliation(request, status, deferred) {
+		t.Fatal("a passive observation failure that completed during polling bypassed reconciliation")
+	}
+	if adaptiveWaitResultNeedsReconciliation(request, status, &experiment.AdapterError{Code: "explicit_terminal_build_failure"}) {
+		t.Fatal("an explicit terminal failure was incorrectly routed into observed-state reconciliation")
+	}
+	request.HarnessProfile = "legacy"
+	if adaptiveWaitResultNeedsReconciliation(request, status, deferred) {
+		t.Fatal("legacy execution semantics changed")
+	}
+}
+
 func TestAdaptiveResumePrefersLatestReconciliationJobWithoutReplayingEffect(t *testing.T) {
 	states := store.NewMemoryStateStore()
 	state := &orchestrator.CascadeState{
