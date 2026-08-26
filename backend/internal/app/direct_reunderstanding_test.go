@@ -215,11 +215,37 @@ func TestInterruptedStageSelectionFallsBackToUnfinishedAction(t *testing.T) {
 	events := []model.StageExecutionEvent{
 		{Sequence: 1, NodeID: "completed", EventType: model.StageExecutionEventActionStarted},
 		{Sequence: 2, NodeID: "completed", EventType: model.StageExecutionEventActionCompleted},
-		{Sequence: 3, NodeID: "interrupted", EventType: model.StageExecutionEventActionStarted},
+		{Sequence: 3, NodeID: "completed", EventType: model.StageExecutionEventStageCompleted},
+		{Sequence: 4, NodeID: "interrupted", EventType: model.StageExecutionEventActionStarted},
+		{Sequence: 5, NodeID: "completed", EventType: model.StageExecutionEventStageFailed, Observation: &model.RuntimeObservation{Source: model.RuntimeObservationInsufficient}},
 	}
 	failed := selectAdaptiveInterruptedStage(events)
 	if failed.NodeID != "interrupted" {
 		t.Fatalf("unfinished action was not selected: %+v", failed)
+	}
+}
+
+func TestAdaptiveFailureDiagnosticAdvancesPastCompletedStaleStage(t *testing.T) {
+	diagnostic := &model.ScriptFailureDiagnostic{FailedNodeID: "resume_route", FailedStepOrder: 2}
+	events := []model.StageExecutionEvent{
+		{Sequence: 10, NodeID: "resume_route", EventType: model.StageExecutionEventActionStarted},
+		{Sequence: 11, NodeID: "resume_route", EventType: model.StageExecutionEventActionCompleted},
+		{Sequence: 12, NodeID: "resume_route", EventType: model.StageExecutionEventStageCompleted},
+		{Sequence: 13, NodeID: "surface_ready", EventType: model.StageExecutionEventActionStarted},
+	}
+	source := &model.ClientExecutionPackage{ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{PlanJSON: &model.ExecutionScriptDocument{Steps: []model.ScriptStep{
+		{NodeID: "resume_route", Order: 2},
+		{NodeID: "surface_ready", Order: 3},
+	}}}}
+	reconcileAdaptiveFailureDiagnosticFromEvents(diagnostic, events, source)
+	if diagnostic.FailedNodeID != "surface_ready" || diagnostic.FailedStepOrder != 3 {
+		t.Fatalf("stale completed diagnostic was not advanced: %+v", diagnostic)
+	}
+
+	actualFailure := &model.ScriptFailureDiagnostic{FailedNodeID: "resume_route", FailedStepOrder: 2}
+	reconcileAdaptiveFailureDiagnosticFromEvents(actualFailure, events[:1], source)
+	if actualFailure.FailedNodeID != "resume_route" || actualFailure.FailedStepOrder != 2 {
+		t.Fatalf("an unfinished diagnostic was incorrectly replaced: %+v", actualFailure)
 	}
 }
 
@@ -421,6 +447,52 @@ func TestNormalizeAdaptiveReconciliationResumeAcceptsTerminalInteractionFailure(
 	}
 	if adaptive, _ := resume.Metadata["runtime_adaptive"].(bool); !adaptive {
 		t.Fatalf("normalized resume lost runtime page discovery authority: %+v", resume.Metadata)
+	}
+}
+
+func TestTerminalInteractionRepairAcceptsOptionalEnhancementClick(t *testing.T) {
+	now := timeNowUTC()
+	resume := &model.GraphNode{
+		ID: "resume", Type: model.GraphNodeTypeStart,
+		ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: "https://app.example.com/entity/1"}},
+	}
+	enhancement := &model.GraphNode{
+		ID: "optional-control", Type: model.GraphNodeTypeEnd,
+		ActionSpec:          &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"capability_layer": "enhancement", "capability_score": 10}},
+		InteractionContract: &model.InteractionContract{Parameters: map[string]any{"capability_layer": "enhancement", "capability_score": 10}},
+	}
+	state := &orchestrator.CascadeState{
+		ProjectContext: &model.ProjectContext{ID: "project", ProductURL: "https://app.example.com/entity/1"},
+		WorkflowGraph:  &model.DemoWorkflowGraph{ID: "graph", Nodes: []*model.GraphNode{resume, enhancement}},
+	}
+	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{FailedNodeID: enhancement.ID, CurrentURL: "https://app.example.com/entity/1"}}
+	graph, eligible, err := terminalInteractionVerificationRepairGraph(state, result, now)
+	if err != nil || !eligible || graph == nil {
+		t.Fatalf("optional enhancement click should reconcile as an observed terminal capability: eligible=%v err=%v graph=%+v", eligible, err, graph)
+	}
+	if len(graph.Nodes) < 2 || graph.Nodes[len(graph.Nodes)-1].ActionSpec.Type != model.GraphActionNavigate {
+		t.Fatalf("enhancement click must be converted to an observed route restore, not replayed: %+v", graph.Nodes)
+	}
+}
+
+func TestReconcileAdaptiveCapabilityScoreUsesLatestCompletedCoreStage(t *testing.T) {
+	core := &model.GraphNode{
+		ID: "core-stability", ActionSpec: &model.GraphAction{Type: model.GraphActionInspect, Parameters: map[string]any{"capability_layer": "core", "capability_score": 15}},
+		InteractionContract: &model.InteractionContract{Parameters: map[string]any{"capability_layer": "core", "capability_score": 15}},
+	}
+	enhancement := &model.GraphNode{
+		ID: "optional-undo", ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"capability_layer": "enhancement", "capability_score": 10}},
+	}
+	diagnostic := &model.ScriptFailureDiagnostic{FailedNodeID: enhancement.ID, FailedStepOrder: 7}
+	events := []model.StageExecutionEvent{
+		{Sequence: 10, NodeID: core.ID, EventType: model.StageExecutionEventStageCompleted, Observation: &model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser}},
+		{Sequence: 20, NodeID: enhancement.ID, EventType: model.StageExecutionEventStageCompleted, Observation: &model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser}},
+		{Sequence: 21, EventType: model.StageExecutionEventCapabilityScored, CapabilityScore: &model.CapabilityScore{CorePassed: true, EligibleForFilm: true}},
+	}
+	source := &model.ClientExecutionPackage{ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{PlanJSON: &model.ExecutionScriptDocument{Steps: []model.ScriptStep{{NodeID: core.ID, Order: 6}}}}}
+	reconcileAdaptiveCapabilityScoreFromEvents(diagnostic, events, &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{core, enhancement}}, source)
+	if diagnostic.FailedNodeID != core.ID || diagnostic.FailedStepOrder != 6 {
+		t.Fatalf("completed core score did not move recovery to the safe core boundary: %+v", diagnostic)
 	}
 }
 

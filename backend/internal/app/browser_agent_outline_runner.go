@@ -824,7 +824,7 @@ func browserAgentStepResults(plan BrowserAgentRuntimePlan, events []model.StageE
 			if event.EventType == model.StageExecutionEventStageCompleted || event.EventType == model.StageExecutionEventStageResumed {
 				result.CompletedAt = event.OccurredAt
 			}
-			if (event.EventType == model.StageExecutionEventOutcomeObserved || event.EventType == model.StageExecutionEventStageResumed) && event.Observation != nil {
+			if (event.EventType == model.StageExecutionEventOutcomeObserved || event.EventType == model.StageExecutionEventStageCompleted || event.EventType == model.StageExecutionEventStageResumed) && event.Observation != nil {
 				copy := *event.Observation
 				outcome = &copy
 			}

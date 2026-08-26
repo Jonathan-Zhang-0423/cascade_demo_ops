@@ -49,6 +49,40 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func adapterStageCapabilityLayer(vctx model.BrowserAgentValidationContext, stageID, nodeID string) string {
+	if vctx.StageApprovalPlan == nil {
+		return ""
+	}
+	for _, stage := range vctx.StageApprovalPlan.Stages {
+		if stage.ID != stageID && stage.NodeID != stageID && stage.ID != nodeID && stage.NodeID != nodeID {
+			continue
+		}
+		parameters := stage.Interaction.Parameters
+		if stage.InteractionContract != nil && len(stage.InteractionContract.Parameters) > 0 {
+			parameters = stage.InteractionContract.Parameters
+		}
+		if layer, _ := parameters["capability_layer"].(string); layer == "core" || layer == "enhancement" {
+			return layer
+		}
+	}
+	return ""
+}
+
+func adapterOptionalEnhancementCompletion(vctx model.BrowserAgentValidationContext, event model.StageExecutionEvent) bool {
+	if event.EventType != model.StageExecutionEventStageCompleted ||
+		event.Observation == nil ||
+		!model.RuntimeObservationIsRealEvidence(event.Observation.Source) ||
+		adapterStageCapabilityLayer(vctx, event.StageID, event.NodeID) != "enhancement" {
+		return false
+	}
+	for _, assertion := range event.Observation.Assertions {
+		if assertion.Kind == "optional_capability_recorded" && assertion.Passed {
+			return true
+		}
+	}
+	return false
+}
+
 // urlWithinAllowedDomains reports whether value's host is within
 // allowedDomains, treating relative/fragment values as always allowed and
 // requiring an http/https scheme for absolute URLs. Host comparison is
@@ -326,6 +360,14 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 			}
 		}
 		if hasCompleted && !hasOutcomeObserved {
+			for _, event := range events {
+				if event.StageID == stageID && adapterOptionalEnhancementCompletion(vctx, event) {
+					hasOutcomeObserved = true
+					break
+				}
+			}
+		}
+		if hasCompleted && !hasOutcomeObserved {
 			runtimeChecks = append(runtimeChecks, model.ValidationCheck{
 				ID:       fmt.Sprintf("runtime_no_outcome_%s", stageID),
 				Kind:     "missing_outcome",
@@ -383,15 +425,23 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 		if event.Observation != nil {
 			for j, assertion := range event.Observation.Assertions {
 				if !assertion.Passed {
+					severity := model.FindingSeverityBlocking
+					required := true
+					code := "REQUIRED_ASSERTION_FAILED"
+					if adapterStageCapabilityLayer(vctx, event.StageID, event.NodeID) == "enhancement" {
+						severity = model.FindingSeverityWarning
+						required = false
+						code = "ENHANCEMENT_ASSERTION_FAILED"
+					}
 					runtimeChecks = append(runtimeChecks, model.ValidationCheck{
 						ID:       fmt.Sprintf("runtime_assertion_fail_%s_%d_%d", event.StageID, i, j),
 						Kind:     "assertion_failure",
-						Code:     "REQUIRED_ASSERTION_FAILED",
+						Code:     code,
 						NodeID:   event.NodeID,
 						StageID:  event.StageID,
-						Severity: model.FindingSeverityBlocking,
+						Severity: severity,
 						Passed:   false,
-						Required: true,
+						Required: required,
 						Summary:  fmt.Sprintf("阶段 %s required assertion 失败: kind=%s, actual=%s", event.StageID, assertion.Kind, assertion.Actual),
 						EvidenceRefs: []model.EvidenceRef{
 							{ID: fmt.Sprintf("event_%d_assertion_%d", i, j), Kind: "runtime_assertion"},
@@ -552,6 +602,10 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 			acc.startedAt = event.OccurredAt
 		case model.StageExecutionEventStageCompleted:
 			acc.completedAt = event.OccurredAt
+			if event.Observation != nil {
+				cp := *event.Observation
+				acc.observation = &cp
+			}
 		case model.StageExecutionEventStageFailed:
 			acc.completedAt = event.OccurredAt
 			acc.failed = true
@@ -562,8 +616,11 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidateStageEvents(
 			}
 		}
 		for _, ref := range event.EvidenceRefs {
+			if strings.TrimSpace(ref.ArtifactID) == "" {
+				continue
+			}
 			acc.artifacts = append(acc.artifacts, model.ArtifactRef{
-				ID:   ref.ID,
+				ID:   ref.ArtifactID,
 				Kind: string(ref.Kind),
 			})
 		}
@@ -930,13 +987,21 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 		if event.Observation != nil {
 			for j, assertion := range event.Observation.Assertions {
 				if !assertion.Passed {
+					severity := model.FindingSeverityBlocking
+					required := true
+					code := "REQUIRED_ASSERTION_FAILED"
+					if adapterStageCapabilityLayer(vctx, event.StageID, event.NodeID) == "enhancement" {
+						severity = model.FindingSeverityWarning
+						required = false
+						code = "ENHANCEMENT_ASSERTION_FAILED"
+					}
 					postChecks = append(postChecks, model.ValidationCheck{
 						ID:       fmt.Sprintf("post_assertion_fail_%s_%d_%d", event.StageID, i, j),
 						Kind:     "assertion_failure",
-						Code:     "REQUIRED_ASSERTION_FAILED",
-						Severity: model.FindingSeverityBlocking,
+						Code:     code,
+						Severity: severity,
 						Passed:   false,
-						Required: true,
+						Required: required,
 						Summary:  fmt.Sprintf("阶段 %s required assertion 失败: kind=%s, actual=%s", event.StageID, assertion.Kind, assertion.Actual),
 						EvidenceRefs: []model.EvidenceRef{
 							{ID: fmt.Sprintf("event_%d_assertion_%d", i, j), Kind: "runtime_assertion"},
@@ -972,7 +1037,7 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 		// observations as real would reject an otherwise fully evidenced run.
 		nodeHasOutcome := make(map[string]bool)
 		for _, event := range events {
-			if event.EventType == model.StageExecutionEventOutcomeObserved &&
+			if (event.EventType == model.StageExecutionEventOutcomeObserved || adapterOptionalEnhancementCompletion(vctx, event)) &&
 				event.Observation != nil &&
 				model.RuntimeObservationIsRealEvidence(event.Observation.Source) &&
 				len(event.EvidenceRefs) > 0 {

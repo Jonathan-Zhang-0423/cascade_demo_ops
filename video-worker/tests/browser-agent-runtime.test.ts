@@ -37,6 +37,7 @@ describe("browser visual polling terminal evidence", () => {
 	it("hands a visible product surface to deterministic interaction proof", () => {
 		const observation = { ...verdict("in_progress", .9), product_surface_visible: true, generation_covering_surface: false };
 		expect(browserVisualProductSurfaceAdmitted(observation, true, true)).toBe(true);
+		expect(browserVisualProductSurfaceAdmitted(observation, true, false)).toBe(true);
 		expect(browserVisualProductSurfaceAdmitted({ ...observation, generation_covering_surface: true }, true, true)).toBe(false);
 		expect(browserVisualProductSurfaceAdmitted(observation, false, true)).toBe(false);
 	});
@@ -919,6 +920,7 @@ describe("browser agent required validations", () => {
 		expect(classifyPlayableSurfaceFrame("Score 0 Controls ArrowLeft ArrowRight", false)).toEqual({ surface: false, score: false, controls: false });
 		expect(classifyPlayableSurfaceFrame("Build completed. Score and keyboard controls are ready.", false)).toEqual({ surface: false, score: false, controls: false });
 		expect(classifyDOMInteractiveSurface(2, 640, 480)).toEqual({ surface: true, stateful: true, focusable: true });
+		expect(classifyDOMInteractiveSurface(1, 640, 480)).toEqual({ surface: true, stateful: true, focusable: true });
 		expect(classifyDOMInteractiveSurface(0, 640, 480)).toEqual({ surface: false, stateful: false, focusable: false });
 		expect(classifyDOMInteractiveSurface(4, 80, 60)).toEqual({ surface: false, stateful: false, focusable: false });
 	});

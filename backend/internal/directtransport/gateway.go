@@ -1295,7 +1295,8 @@ func (g *Gateway) handleWorkerResult(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "job_not_found", "Job was not found.")
 		return
 	}
-	if record.Status.Status != "running" {
+	resultRecovery := r.Header.Get("X-Result-Recovery") == "finalization-result-v1"
+	if record.Status.Status != "running" && !(resultRecovery && record.Status.Status == "awaiting_credentials") {
 		writeError(w, http.StatusConflict, "job_not_claimed", "Worker may return a result only for a claimed running job.")
 		return
 	}
@@ -1415,6 +1416,7 @@ func validateResultArtifactsAgainstUploads(result model.RecordingResultPackage, 
 		if !ok || delivery.SHA256 != artifact.Artifact.SHA256 || delivery.SizeBytes != artifact.Artifact.SizeBytes {
 			return fmt.Errorf("delivery asset %s is missing or does not match its uploaded bytes", safeSegment(delivery.ID))
 		}
+		seen[delivery.ID] = true
 	}
 	for id := range uploaded {
 		if !seen[id] {

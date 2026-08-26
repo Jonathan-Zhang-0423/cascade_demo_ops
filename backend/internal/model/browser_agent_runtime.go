@@ -454,6 +454,22 @@ func validObservationSource(value RuntimeObservationSource) bool {
 	}
 }
 
+// RuntimeObservationRecordsOptionalCapability identifies the explicit
+// terminal evidence used when an enhancement is absent but the core workflow
+// remains valid. It intentionally requires an actual browser observation; a
+// plan-derived assertion cannot soft-pass an optional business capability.
+func RuntimeObservationRecordsOptionalCapability(observation *RuntimeObservation) bool {
+	if observation == nil || observation.Source != RuntimeObservationActualBrowser {
+		return false
+	}
+	for _, assertion := range observation.Assertions {
+		if assertion.Kind == "optional_capability_recorded" && assertion.Passed {
+			return true
+		}
+	}
+	return false
+}
+
 func validValidationPhase(value ValidationPhase) bool {
 	return value == ValidationPhasePreExecution || value == ValidationPhaseRuntimeStage || value == ValidationPhasePostExecution
 }

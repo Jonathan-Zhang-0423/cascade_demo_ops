@@ -218,6 +218,24 @@ func TestBrowserAgentStepResultsNeverUsePlannedSuccessStateAsEvidence(t *testing
 	}
 }
 
+func TestBrowserAgentStepResultsAcceptOptionalCapabilityCompletionEvidence(t *testing.T) {
+	plan := BrowserAgentRuntimePlan{Stages: []BrowserAgentRuntimeStage{{NodeID: "node_optional"}}}
+	now := timeNowUTC()
+	results := browserAgentStepResults(plan, []model.StageExecutionEvent{
+		{NodeID: "node_optional", EventType: model.StageExecutionEventStageStarted, OccurredAt: now},
+		{
+			NodeID: "node_optional", EventType: model.StageExecutionEventStageCompleted, OccurredAt: now.Add(time.Second),
+			Observation: &model.RuntimeObservation{
+				Source:     model.RuntimeObservationActualBrowser,
+				Assertions: []model.RuntimeAssertion{{Kind: "optional_capability_recorded", Passed: true, Actual: "optional control was not observed"}},
+			},
+		},
+	}, nil)
+	if len(results) != 1 || results[0].Status != "passed" || !strings.Contains(results[0].ObservedState, "assertion:optional_capability_recorded=passed") {
+		t.Fatalf("optional capability completion with real browser evidence must remain a passed step result: %+v", results)
+	}
+}
+
 func validationReportHasCheckCode(report model.ValidationReport, code string, passed bool) bool {
 	for _, check := range report.Checks {
 		if check.Code == code && check.Passed == passed {

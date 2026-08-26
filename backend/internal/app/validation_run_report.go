@@ -82,6 +82,7 @@ func BuildValidationRunReport(result model.RecordingResultPackage, pkg model.Cli
 			}
 			stage.StageID = manifestStage.StageID
 			stage.Order = manifestStage.Order
+			stage.Decision = manifestStage.ValidationDecision
 			stage.EvidenceArtifactIDs = append([]string{}, manifestStage.EvidenceArtifactIDs...)
 			stage.ActionDefinitionEvidenceIDs = append([]string{}, manifestStage.ActionDefinitionEvidenceIDs...)
 			stage.BeforeScreenshotArtifactIDs = append([]string{}, manifestStage.BeforeScreenshotArtifactIDs...)
@@ -105,16 +106,6 @@ func BuildValidationRunReport(result model.RecordingResultPackage, pkg model.Cli
 				if !check.Passed && check.Code != "" && !containsValidationRunString(stage.FailureCodes, check.Code) {
 					stage.FailureCodes = append(stage.FailureCodes, check.Code)
 				}
-				for _, ref := range check.EvidenceRefs {
-					if ref.ArtifactID != "" && !containsValidationRunString(stage.EvidenceArtifactIDs, ref.ArtifactID) {
-						stage.EvidenceArtifactIDs = append(stage.EvidenceArtifactIDs, ref.ArtifactID)
-					}
-				}
-			}
-		}
-		for _, artifact := range step.Artifacts {
-			if artifact.ID != "" && !containsValidationRunString(stage.EvidenceArtifactIDs, artifact.ID) {
-				stage.EvidenceArtifactIDs = append(stage.EvidenceArtifactIDs, artifact.ID)
 			}
 		}
 		if stage.NodeID != "" && stage.StageID != "" {
@@ -176,6 +167,39 @@ func BuildValidationRunReport(result model.RecordingResultPackage, pkg model.Cli
 		return model.ValidationRunReport{}, err
 	}
 	return report, nil
+}
+
+// NormalizeValidationRunReportStageIndex restores the report's stage index to
+// the authoritative ReplayManifest. Older workers could append validation
+// evidence IDs that were not artifact IDs, making an otherwise complete run
+// impossible to deliver after restart. Findings and report-level evidence are
+// preserved; only the duplicated manifest index is reconciled.
+func NormalizeValidationRunReportStageIndex(result *model.RecordingResultPackage, manifest model.ReplayManifest) {
+	if result == nil || result.ValidationRunReport == nil {
+		return
+	}
+	byNode := make(map[string]model.ReplayManifestStage, len(manifest.Stages))
+	for _, stage := range manifest.Stages {
+		byNode[stage.NodeID] = stage
+	}
+	for index := range result.ValidationRunReport.Stages {
+		stage := &result.ValidationRunReport.Stages[index]
+		authoritative, ok := byNode[stage.NodeID]
+		if !ok {
+			continue
+		}
+		stage.StageID = authoritative.StageID
+		stage.Order = authoritative.Order
+		stage.Status = authoritative.Status
+		stage.Decision = authoritative.ValidationDecision
+		stage.EvidenceArtifactIDs = append([]string(nil), authoritative.EvidenceArtifactIDs...)
+		stage.ActionDefinitionEvidenceIDs = append([]string(nil), authoritative.ActionDefinitionEvidenceIDs...)
+		stage.BeforeScreenshotArtifactIDs = append([]string(nil), authoritative.BeforeScreenshotArtifactIDs...)
+		stage.AfterScreenshotArtifactIDs = append([]string(nil), authoritative.AfterScreenshotArtifactIDs...)
+		stage.StageEventIDs = append([]string(nil), authoritative.StageEventIDs...)
+		stage.TraceArtifactIDs = append([]string(nil), authoritative.TraceArtifactIDs...)
+		stage.SelectorRepairs = append([]model.ReplayManifestSelectorRepair(nil), authoritative.SelectorRepairs...)
+	}
 }
 
 func containsValidationRunEvidence(values []model.EvidenceRef, target model.EvidenceRef) bool {

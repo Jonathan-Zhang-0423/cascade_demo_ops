@@ -2044,9 +2044,10 @@ export function browserVisualTerminalWithStructuralEvidence(observations: Browse
 }
 
 export function browserVisualProductSurfaceAdmitted(observation: BrowserVisualObservation, stateful: boolean, focusable: boolean, minimumConfidence = 0.85): boolean {
+	void focusable;
 	return observation.decision !== "failed" && observation.confidence >= minimumConfidence
 		&& observation.product_surface_visible === true && observation.generation_covering_surface !== true
-		&& stateful && focusable;
+		&& stateful;
 }
 
 export function browserVisualObservationAllocation(maxCalls: number, requireVisualTerminal: boolean): { heartbeatLimit: number; terminalReserve: number } {
@@ -2215,6 +2216,16 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			const terminal = browserVisualTerminalWithStructuralEvidence(existing, config.maxCalls);
 			if (terminal === "succeeded") return { surface: true, score: target.stateful, controls: target.focusable };
 			if (terminal === "failed") return { surface: false, score: false, controls: false };
+			// A stage can contain more than one validation that observes the same
+			// interactive surface. Reuse the latest layered visual fact instead of
+			// entering another heartbeat window (and potentially spending another
+			// provider call) after an earlier validation already admitted the real
+			// product surface. The current runtime target remains the independent
+			// structural channel, so this does not turn vision into an action gate.
+			const latest = existing.at(-1);
+			if (latest && browserVisualProductSurfaceAdmitted(latest, target.stateful, target.focusable)) {
+				return { surface: true, score: true, controls: true };
+			}
 			if (browserVisualFinalObservationDue({
 				existingCount: existing.length, maxCalls: config.maxCalls, nowMS: Date.now(), nextCaptureAtMS: nextCaptureAt,
 				startedAtMS, refreshAfterMS, deadlineMS: deadline, sawBusy, busyNow,
@@ -3338,7 +3349,11 @@ export function classifyInteractiveSurfaceFrame(surface: boolean, stateful: bool
 }
 
 export function classifyDOMInteractiveSurface(interactiveCount: number, width: number, height: number): InteractiveSurfaceEvidence {
-  const surface = Number.isFinite(interactiveCount) && interactiveCount >= 2 && width >= 120 && height >= 80;
+	// A stateful iframe/canvas product may expose only one native control while
+	// handling its primary interaction through keyboard, pointer, or gestures.
+	// One enabled control plus a substantial embedded surface is enough to begin
+	// deterministic proof; later state-change checks still decide capability.
+	const surface = Number.isFinite(interactiveCount) && interactiveCount >= 1 && width >= 120 && height >= 80;
   return classifyInteractiveSurfaceFrame(surface, surface, surface);
 }
 

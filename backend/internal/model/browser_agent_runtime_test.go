@@ -7,6 +7,17 @@ import (
 	"time"
 )
 
+func TestRuntimeObservationRecordsOptionalCapabilityRequiresActualBrowserEvidence(t *testing.T) {
+	observation := &RuntimeObservation{Source: RuntimeObservationActualBrowser, Assertions: []RuntimeAssertion{{Kind: "optional_capability_recorded", Passed: true}}}
+	if !RuntimeObservationRecordsOptionalCapability(observation) {
+		t.Fatal("actual-browser optional capability terminal evidence was not recognized")
+	}
+	observation.Source = RuntimeObservationDerivedPlan
+	if RuntimeObservationRecordsOptionalCapability(observation) {
+		t.Fatal("plan-derived optional capability assertion was accepted as terminal evidence")
+	}
+}
+
 func TestStageExecutionEventJSONRoundTrip(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	want := StageExecutionEvent{

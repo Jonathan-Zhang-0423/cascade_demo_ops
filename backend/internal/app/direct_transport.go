@@ -183,7 +183,19 @@ func (s *Service) GetDirectEditorMaterialization(ctx context.Context, projectID 
 			optionalMissing++
 			continue
 		}
-		path := filepath.Join(s.runtime.ArtifactRoot, "desktop", "direct-downloads", safePathSegment(projectID), safePathSegment(run.CloudJobID), safePathSegment(asset.FileName))
+		// DownloadDirectArtifact already persists a generated, root-local file name.
+		// Sanitizing that value a second time changes the media extension separator
+		// (for example recording.webm -> recording_webm), so materialization probes a
+		// path that was never downloaded. Keep only the base name here and rely on
+		// the root-boundary check below for containment.
+		path, validName := directDownloadedAssetPath(s.runtime.ArtifactRoot, projectID, run.CloudJobID, asset.FileName)
+		if !validName {
+			if required {
+				return EditorSessionMaterialization{Message: "直连录屏素材文件名无效：" + ref.ID}, nil
+			}
+			optionalMissing++
+			continue
+		}
 		if !pathWithinRoot(path, filepath.Join(s.runtime.ArtifactRoot, "desktop", "direct-downloads")) {
 			return EditorSessionMaterialization{Message: "直连素材路径不在 App 管理目录内。"}, nil
 		}
@@ -939,10 +951,7 @@ func (s *Service) DownloadDirectArtifact(ctx context.Context, projectID string, 
 	if !pathWithinRoot(absoluteRoot, managedRoot) {
 		return CloudDeliverableDownloadResult{}, errors.New("direct artifact output directory is outside the App-managed artifact root")
 	}
-	fileName := safePathSegment(request.Artifact.FileName)
-	if fileName == "" {
-		fileName = safePathSegment(request.Artifact.ArtifactID)
-	}
+	fileName := safePathSegment(request.Artifact.ArtifactID) + directArtifactDownloadExtension(request.Artifact)
 	if err := os.MkdirAll(absoluteRoot, 0o700); err != nil {
 		return CloudDeliverableDownloadResult{}, err
 	}
@@ -1014,6 +1023,52 @@ func (s *Service) DownloadDirectArtifact(ctx context.Context, projectID string, 
 	result := CloudDeliverableDownloadResult{ArtifactID: request.Artifact.ArtifactID, Kind: request.Artifact.Kind, Role: request.Artifact.Role, LocalPath: path, SHA256: digest, ExpectedSHA256: expected, MimeType: request.Artifact.MimeType, SizeBytes: written, ChecksumVerified: true}
 	_ = s.persistCloudDownload(ctx, projectID, "", result)
 	return result, nil
+}
+
+func directArtifactDownloadExtension(artifact model.DirectArtifact) string {
+	extension := strings.ToLower(filepath.Ext(filepath.Base(strings.TrimSpace(artifact.FileName))))
+	if extension != "" && len(extension) <= 12 {
+		valid := true
+		for _, char := range strings.TrimPrefix(extension, ".") {
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			return extension
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(artifact.MimeType)) {
+	case "video/webm":
+		return ".webm"
+	case "video/mp4":
+		return ".mp4"
+	case "image/png":
+		return ".png"
+	case "image/jpeg":
+		return ".jpg"
+	case "application/json":
+		return ".json"
+	case "application/x-ndjson":
+		return ".jsonl"
+	case "application/zip":
+		return ".zip"
+	case "text/markdown":
+		return ".md"
+	case "text/plain":
+		return ".txt"
+	default:
+		return ".bin"
+	}
+}
+
+func directDownloadedAssetPath(artifactRoot, projectID, jobID, persistedFileName string) (string, bool) {
+	fileName := filepath.Base(strings.TrimSpace(persistedFileName))
+	if fileName == "" || fileName == "." {
+		return "", false
+	}
+	return filepath.Join(artifactRoot, "desktop", "direct-downloads", safePathSegment(projectID), safePathSegment(jobID), fileName), true
 }
 
 func (s *Service) ReviewDirectResult(ctx context.Context, projectID string, request DirectResultReviewRequest) (model.ResultReviewRecord, error) {

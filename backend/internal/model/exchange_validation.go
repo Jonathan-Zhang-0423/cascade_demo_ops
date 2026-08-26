@@ -351,6 +351,9 @@ func ValidateFormalRecordingResultArtifacts(result *RecordingResultPackage, sour
 	if result.ExecutionTrace != nil {
 		assets = append(assets, result.ExecutionTrace.Artifacts...)
 	}
+	for _, descriptor := range result.Delivery.AssetRefs {
+		assets = append(assets, ArtifactRef{ID: descriptor.ID, Kind: descriptor.Kind, URI: descriptor.URI, MimeType: descriptor.MimeType, SHA256: descriptor.SHA256, SizeBytes: descriptor.SizeBytes})
+	}
 	findKind := func(kinds ...string) (ArtifactRef, bool) {
 		for _, asset := range assets {
 			for _, kind := range kinds {

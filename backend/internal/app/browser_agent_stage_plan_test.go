@@ -182,6 +182,45 @@ func TestAdaptiveHarnessSkipsAbsentOptionalExecutionContinuation(t *testing.T) {
 	}
 }
 
+func TestAdaptiveHarnessRecordsEnhancementActionFailureWithoutBlockingCoreFlow(t *testing.T) {
+	enhancement := BrowserAgentRuntimeStage{
+		ID: "stage_enhancement_touch", Order: 1, NodeID: "enhancement_touch", StageKind: model.BusinessStageKindBusinessAction,
+		EntryRoute: "https://product.example/entity/1", TargetContract: model.BrowserAgentTargetContract{SemanticID: "primary_surface", Destructive: false, Confidence: .9},
+		Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionGesture, NonDestructive: true, Parameters: map[string]any{
+			"capability_layer": "enhancement", "capability_score": 8,
+		}}},
+	}
+	core := BrowserAgentRuntimeStage{
+		ID: "stage_core_stable", Order: 2, NodeID: "core_stable", StageKind: model.BusinessStageKindFinalObserve,
+		EntryRoute: "https://product.example/entity/1", TargetContract: model.BrowserAgentTargetContract{SemanticID: "primary_surface", Destructive: false, Confidence: .9},
+		Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionInspect, NonDestructive: true, Parameters: map[string]any{
+			"capability_layer": "core", "capability_score": 20,
+		}}},
+	}
+	plan := BrowserAgentRuntimePlan{
+		RunID: "run_enhancement_soft_failure", SourcePackageID: "pkg_enhancement_soft_failure",
+		SourceBundleHashSHA256: "bundle_enhancement_soft_failure", PolicyHashSHA256: "policy_enhancement_soft_failure",
+		HarnessProfile: model.AdaptiveBusinessHarnessProfileV1, Stages: []BrowserAgentRuntimeStage{enhancement, core},
+	}
+	result, err := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{}).Run(context.Background(), plan, stubStageObserver{}, &stubStageExecutor{failNodeID: enhancement.NodeID}, &memoryStageEventSink{})
+	if err != nil {
+		t.Fatalf("optional enhancement action failure blocked the core flow: %v", err)
+	}
+	foundSkip, foundEnhancementComplete, foundCoreComplete, foundScore := false, false, false, false
+	for _, event := range result.Events {
+		foundSkip = foundSkip || event.NodeID == enhancement.NodeID && event.EventType == model.StageExecutionEventStepSatisfied
+		foundEnhancementComplete = foundEnhancementComplete || event.NodeID == enhancement.NodeID && event.EventType == model.StageExecutionEventStageCompleted
+		foundCoreComplete = foundCoreComplete || event.NodeID == core.NodeID && event.EventType == model.StageExecutionEventStageCompleted
+		foundScore = foundScore || event.EventType == model.StageExecutionEventCapabilityScored
+		if event.NodeID == enhancement.NodeID && event.EventType == model.StageExecutionEventStageFailed {
+			t.Fatal("optional enhancement was recorded as a blocking stage failure")
+		}
+	}
+	if !foundSkip || !foundEnhancementComplete || !foundCoreComplete || !foundScore {
+		t.Fatalf("enhancement failure was not converted into a scored warning: %+v", result.Events)
+	}
+}
+
 func TestAdaptiveHarnessReobservesPreviouslySkippedContinuationAfterWorkerRestart(t *testing.T) {
 	stage := BrowserAgentRuntimeStage{
 		ID: "stage_optional_continue_restart", Order: 1, NodeID: "node_optional_continue_restart",

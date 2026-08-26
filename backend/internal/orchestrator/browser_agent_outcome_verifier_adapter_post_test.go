@@ -864,6 +864,74 @@ func TestValidatePostExecution_BrowserAssertionIsTraceableRuntimeEvidence(t *tes
 	}
 }
 
+func TestValidatePostExecution_EnhancementFailureRemainsWarning(t *testing.T) {
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(&model.ValidationConfig{
+		PreExecutionEnabled: true, RealTimeBatchEnabled: true, PostExecutionBatchEnabled: true,
+	})
+	vctx := model.BrowserAgentValidationContext{
+		RunID: "run-enhancement", SourcePackageID: "pkg-enhancement",
+		SourceBundleHashSHA256: "bundle-hash", EffectivePolicyHashSHA256: "policy-hash",
+		WorkflowGraph: &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}}, Plan: &model.ExecutionScriptDocument{},
+		StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{{
+			ID: "stage-enhancement", NodeID: "node-enhancement", Order: 1,
+			Interaction: model.BrowserAgentInteraction{Parameters: map[string]any{"capability_layer": "enhancement", "capability_score": 10}},
+		}}},
+		ScriptOutline: &model.BrowserAgentScriptOutline{ID: "outline"}, BrowserAgentContract: &model.BrowserAgentContract{},
+	}
+	now := time.Now()
+	evidence := []model.EvidenceRef{{ID: "evidence-enhancement", Kind: "webpage_screenshot", ArtifactID: "artifact-enhancement"}}
+	events := []model.StageExecutionEvent{
+		{EventType: model.StageExecutionEventStageStarted, NodeID: "node-enhancement", StageID: "stage-enhancement", OccurredAt: now},
+		{
+			EventType: model.StageExecutionEventObservationCollected, NodeID: "node-enhancement", StageID: "stage-enhancement", OccurredAt: now.Add(time.Second),
+			Observation:  &model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, URL: "https://example.com/app", Assertions: []model.RuntimeAssertion{{Kind: "target_resolved", Passed: false, Actual: "not present"}}},
+			EvidenceRefs: evidence,
+		},
+		{
+			EventType: model.StageExecutionEventStageCompleted, NodeID: "node-enhancement", StageID: "stage-enhancement", OccurredAt: now.Add(2 * time.Second),
+			Observation:  &model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, URL: "https://example.com/app", Assertions: []model.RuntimeAssertion{{Kind: "optional_capability_recorded", Passed: true, Actual: "optional control was not observed"}}},
+			EvidenceRefs: evidence,
+		},
+	}
+	runtimeReport, err := adapter.ValidateStageEvents(context.Background(), vctx, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range runtimeReport.EvidenceRefs {
+		if ref.ArtifactID == "evidence-enhancement" {
+			t.Fatalf("semantic evidence ID was emitted as an artifact ID: %+v", ref)
+		}
+	}
+	if runtimeReport.Decision == model.ValidationDecisionStopAndReport {
+		t.Fatalf("optional enhancement absence must not block runtime validation: %+v", runtimeReport)
+	}
+	result := model.RecordingResultPackage{
+		ResultID: "result-enhancement", SourcePackageID: "pkg-enhancement", Status: model.RecordingResultStatusGenerated,
+		StepResults: []model.StepResult{{NodeID: "node-enhancement", Status: "passed", ObservedState: "source=actual_browser; assertion:optional_capability_recorded=passed"}},
+		AuditTrail:  model.CloudExecutionAuditTrail{SourcePackageDigest: "bundle-hash"}, ValidationReports: []model.ValidationReport{runtimeReport},
+		GeneratedAssets: []model.ArtifactRef{{ID: "artifact-enhancement", Kind: "screenshot"}}, StageEventLogRef: &model.ArtifactRef{ID: "stage-log", Kind: "stage_event_log"},
+	}
+	postReport, err := adapter.ValidatePostExecution(context.Background(), vctx, result, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if postReport.Decision == model.ValidationDecisionStopAndReport {
+		t.Fatalf("optional enhancement absence must not block post validation: %+v", postReport)
+	}
+	foundWarning := false
+	for _, check := range postReport.Checks {
+		if check.Code == "REQUIRED_ASSERTION_FAILED" && !check.Passed {
+			t.Fatalf("enhancement assertion was incorrectly promoted to a required failure: %+v", check)
+		}
+		if check.Code == "ENHANCEMENT_ASSERTION_FAILED" && check.Severity == model.FindingSeverityWarning && !check.Required {
+			foundWarning = true
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("post validation did not preserve the enhancement failure as a warning: %+v", postReport)
+	}
+}
+
 func TestConvertEventsToPostExecutionAnalysesPreservesNodeIdentity(t *testing.T) {
 	adapter := NewBrowserAgentOutcomeVerifierAdapter(&model.ValidationConfig{})
 	analyses := adapter.convertEventsToPostExecutionAnalyses([]model.StageExecutionEvent{{

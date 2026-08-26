@@ -360,6 +360,15 @@ func validateStageEventLogContents(result model.RecordingResultPackage, source m
 		}
 		if event.EventType == model.StageExecutionEventStageCompleted {
 			completedStages[event.NodeID] = true
+			if model.RuntimeObservationRecordsOptionalCapability(event.Observation) {
+				for _, evidence := range event.EvidenceRefs {
+					if evidence.ArtifactID != "" {
+						if _, exists := uploaded[evidence.ArtifactID]; exists {
+							outcomeEvidence[event.NodeID] = true
+						}
+					}
+				}
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -539,6 +548,9 @@ func findResultArtifactByKind(result model.RecordingResultPackage, kinds ...stri
 	refs := append([]model.ArtifactRef(nil), result.GeneratedAssets...)
 	if result.ExecutionTrace != nil {
 		refs = append(refs, result.ExecutionTrace.Artifacts...)
+	}
+	for _, descriptor := range result.Delivery.AssetRefs {
+		refs = append(refs, model.ArtifactRef{ID: descriptor.ID, Kind: descriptor.Kind, URI: descriptor.URI, MimeType: descriptor.MimeType, SHA256: descriptor.SHA256, SizeBytes: descriptor.SizeBytes})
 	}
 	for _, ref := range refs {
 		for _, kind := range kinds {

@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -113,15 +115,37 @@ func directWorkerFailureResult(pkg *model.ClientExecutionPackage, jobID string, 
 
 func directWorkerArtifactFiles(result model.RecordingResultPackage, root string) ([]DirectWorkerArtifactFile, error) {
 	values := append([]model.ArtifactRef{}, result.GeneratedAssets...)
+	for _, step := range result.StepResults {
+		values = append(values, step.Artifacts...)
+	}
 	if result.ExecutionTrace != nil {
 		values = append(values, result.ExecutionTrace.Artifacts...)
+		for _, step := range result.ExecutionTrace.StepResults {
+			values = append(values, step.Artifacts...)
+		}
 	}
 	if result.StageEventLogRef != nil {
 		values = append(values, *result.StageEventLogRef)
 	}
+	for _, descriptor := range result.Delivery.AssetRefs {
+		values = append(values, artifactRefFromPackageDescriptor(descriptor))
+	}
+	if result.FailureDiagnostic != nil {
+		for _, descriptor := range append(append([]model.PackageArtifactDescriptor{}, result.FailureDiagnostic.ScreenshotRefs...), result.FailureDiagnostic.TraceRefs...) {
+			values = append(values, artifactRefFromPackageDescriptor(descriptor))
+		}
+		for _, descriptor := range []*model.PackageArtifactDescriptor{result.FailureDiagnostic.DOMSnapshotRef, result.FailureDiagnostic.AccessibilitySnapshotRef} {
+			if descriptor != nil {
+				values = append(values, artifactRefFromPackageDescriptor(*descriptor))
+			}
+		}
+	}
 	byID := map[string]DirectWorkerArtifactFile{}
 	for _, artifact := range values {
 		if strings.TrimSpace(artifact.ID) == "" || strings.TrimSpace(artifact.URI) == "" {
+			continue
+		}
+		if _, exists := byID[artifact.ID]; exists {
 			continue
 		}
 		path, err := directWorkerLocalPath(artifact.URI)
@@ -136,6 +160,18 @@ func directWorkerArtifactFiles(result model.RecordingResultPackage, root string)
 		if err != nil || info.IsDir() {
 			return nil, fmt.Errorf("direct worker artifact %s is not a readable file", artifact.ID)
 		}
+		file, err := os.Open(absolute)
+		if err != nil {
+			return nil, fmt.Errorf("direct worker artifact %s could not be opened", artifact.ID)
+		}
+		hasher := sha256.New()
+		_, copyErr := io.Copy(hasher, file)
+		closeErr := file.Close()
+		if copyErr != nil || closeErr != nil {
+			return nil, fmt.Errorf("direct worker artifact %s could not be read", artifact.ID)
+		}
+		artifact.SHA256 = fmt.Sprintf("%x", hasher.Sum(nil))
+		artifact.SizeBytes = info.Size()
 		byID[artifact.ID] = DirectWorkerArtifactFile{Artifact: artifact, Path: absolute}
 	}
 	ids := make([]string, 0, len(byID))
@@ -148,6 +184,13 @@ func directWorkerArtifactFiles(result model.RecordingResultPackage, root string)
 		files = append(files, byID[id])
 	}
 	return files, nil
+}
+
+func artifactRefFromPackageDescriptor(value model.PackageArtifactDescriptor) model.ArtifactRef {
+	return model.ArtifactRef{
+		ID: value.ID, Kind: value.Kind, URI: value.URI, MimeType: value.MimeType,
+		SHA256: value.SHA256, SizeBytes: value.SizeBytes, Sensitive: value.Sensitive, Metadata: value.Metadata,
+	}
 }
 
 func directWorkerLocalPath(value string) (string, error) {
@@ -219,6 +262,7 @@ func prepareDirectWorkerResult(result *model.RecordingResultPackage, jobID strin
 		}
 		if artifact, ok := byID[value.ID]; ok {
 			value.URI = artifact.URI
+			value.Kind = artifact.Kind
 			value.MimeType = artifact.MimeType
 			value.SHA256 = artifact.SHA256
 			value.SizeBytes = artifact.SizeBytes
@@ -260,6 +304,192 @@ func prepareDirectWorkerResult(result *model.RecordingResultPackage, jobID strin
 	}
 	result.Delivery.EncryptionAlg = model.DirectTransportCryptoSuite
 	result.Delivery.RecipientKeyID = "direct-lease"
+}
+
+// NormalizeDirectWorkerResultDescriptors reconciles package descriptors with
+// the canonical artifact identity already present in the result. This is also
+// safe to run when recovering a persisted finalization result: it needs no
+// local paths and prevents a generic delivery label (for example "video")
+// from disagreeing with the kind that was used for the authenticated upload.
+func NormalizeDirectWorkerResultDescriptors(result *model.RecordingResultPackage) {
+	if result == nil {
+		return
+	}
+	canonical := map[string]model.ArtifactRef{}
+	add := func(values []model.ArtifactRef) {
+		for _, value := range values {
+			if value.ID != "" {
+				if _, exists := canonical[value.ID]; !exists {
+					canonical[value.ID] = value
+				}
+			}
+		}
+	}
+	add(result.GeneratedAssets)
+	for _, step := range result.StepResults {
+		add(step.Artifacts)
+	}
+	if result.ExecutionTrace != nil {
+		add(result.ExecutionTrace.Artifacts)
+		for _, step := range result.ExecutionTrace.StepResults {
+			add(step.Artifacts)
+		}
+	}
+	if result.StageEventLogRef != nil {
+		add([]model.ArtifactRef{*result.StageEventLogRef})
+	}
+	normalize := func(descriptor *model.PackageArtifactDescriptor) {
+		if descriptor == nil {
+			return
+		}
+		if artifact, ok := canonical[descriptor.ID]; ok {
+			descriptor.Kind = artifact.Kind
+			descriptor.MimeType = artifact.MimeType
+		}
+	}
+	for index := range result.Delivery.AssetRefs {
+		normalize(&result.Delivery.AssetRefs[index])
+	}
+	if result.FailureDiagnostic != nil {
+		for index := range result.FailureDiagnostic.ScreenshotRefs {
+			normalize(&result.FailureDiagnostic.ScreenshotRefs[index])
+		}
+		for index := range result.FailureDiagnostic.TraceRefs {
+			normalize(&result.FailureDiagnostic.TraceRefs[index])
+		}
+		normalize(result.FailureDiagnostic.DOMSnapshotRef)
+		normalize(result.FailureDiagnostic.AccessibilitySnapshotRef)
+	}
+}
+
+// NormalizeDirectWorkerEvidenceArtifactIDs repairs legacy evidence refs that
+// placed a semantic evidence ID in artifact_id. Only IDs that resolve to an
+// artifact already present in this result are retained across the transport
+// boundary; the evidence citation itself is preserved.
+func NormalizeDirectWorkerEvidenceArtifactIDs(result *model.RecordingResultPackage) {
+	if result == nil {
+		return
+	}
+	artifacts := map[string]bool{}
+	addRef := func(value model.ArtifactRef) {
+		if value.ID != "" {
+			artifacts[value.ID] = true
+		}
+	}
+	for _, value := range result.GeneratedAssets {
+		addRef(value)
+	}
+	for _, step := range result.StepResults {
+		for _, value := range step.Artifacts {
+			addRef(value)
+		}
+	}
+	if result.ExecutionTrace != nil {
+		for _, value := range result.ExecutionTrace.Artifacts {
+			addRef(value)
+		}
+		for _, step := range result.ExecutionTrace.StepResults {
+			for _, value := range step.Artifacts {
+				addRef(value)
+			}
+		}
+	}
+	for _, value := range result.Delivery.AssetRefs {
+		if value.ID != "" {
+			artifacts[value.ID] = true
+		}
+	}
+	normalize := func(refs []model.EvidenceRef) {
+		for index := range refs {
+			artifactID := strings.TrimSpace(refs[index].ArtifactID)
+			if artifactID == "" || artifacts[artifactID] {
+				continue
+			}
+			candidate := strings.TrimPrefix(artifactID, "evidence_")
+			if candidate != artifactID && artifacts[candidate] {
+				refs[index].ArtifactID = candidate
+			} else {
+				refs[index].ArtifactID = ""
+			}
+		}
+	}
+	for reportIndex := range result.ValidationReports {
+		report := &result.ValidationReports[reportIndex]
+		normalize(report.EvidenceRefs)
+		for checkIndex := range report.Checks {
+			normalize(report.Checks[checkIndex].EvidenceRefs)
+		}
+	}
+	if result.ValidationRunReport != nil {
+		normalize(result.ValidationRunReport.EvidenceRefs)
+		for findingIndex := range result.ValidationRunReport.Findings {
+			normalize(result.ValidationRunReport.Findings[findingIndex].EvidenceRefs)
+		}
+	}
+}
+
+// SanitizeDirectWorkerResultMetadata removes worker-local path hints from
+// artifact metadata after those files have been converted to authenticated
+// Direct URIs. Business metadata is otherwise left untouched.
+func SanitizeDirectWorkerResultMetadata(result *model.RecordingResultPackage) {
+	if result == nil {
+		return
+	}
+	sanitize := func(metadata map[string]any) map[string]any {
+		if metadata == nil {
+			return nil
+		}
+		clean := make(map[string]any, len(metadata))
+		for key, value := range metadata {
+			lowerKey := strings.ToLower(strings.TrimSpace(key))
+			if lowerKey == "local_path" || lowerKey == "dev_local_artifact" || lowerKey == "render_manifest_path" {
+				continue
+			}
+			if text, ok := value.(string); ok {
+				lowerValue := strings.ToLower(strings.TrimSpace(text))
+				if strings.HasPrefix(lowerValue, "file://") || strings.HasPrefix(lowerValue, "/var/lib/") || strings.HasPrefix(lowerValue, "/home/") || strings.HasPrefix(lowerValue, "/root/") {
+					continue
+				}
+			}
+			clean[key] = value
+		}
+		return clean
+	}
+	sanitizeRefs := func(values []model.ArtifactRef) {
+		for index := range values {
+			values[index].Metadata = sanitize(values[index].Metadata)
+		}
+	}
+	sanitizeDescriptors := func(values []model.PackageArtifactDescriptor) {
+		for index := range values {
+			values[index].Metadata = sanitize(values[index].Metadata)
+		}
+	}
+	sanitizeRefs(result.GeneratedAssets)
+	for index := range result.StepResults {
+		sanitizeRefs(result.StepResults[index].Artifacts)
+	}
+	if result.ExecutionTrace != nil {
+		sanitizeRefs(result.ExecutionTrace.Artifacts)
+		for index := range result.ExecutionTrace.StepResults {
+			sanitizeRefs(result.ExecutionTrace.StepResults[index].Artifacts)
+		}
+	}
+	if result.StageEventLogRef != nil {
+		result.StageEventLogRef.Metadata = sanitize(result.StageEventLogRef.Metadata)
+	}
+	sanitizeDescriptors(result.Delivery.AssetRefs)
+	result.Delivery.ResultPackageRef.Metadata = sanitize(result.Delivery.ResultPackageRef.Metadata)
+	if result.FailureDiagnostic != nil {
+		sanitizeDescriptors(result.FailureDiagnostic.ScreenshotRefs)
+		sanitizeDescriptors(result.FailureDiagnostic.TraceRefs)
+		if result.FailureDiagnostic.DOMSnapshotRef != nil {
+			result.FailureDiagnostic.DOMSnapshotRef.Metadata = sanitize(result.FailureDiagnostic.DOMSnapshotRef.Metadata)
+		}
+		if result.FailureDiagnostic.AccessibilitySnapshotRef != nil {
+			result.FailureDiagnostic.AccessibilitySnapshotRef.Metadata = sanitize(result.FailureDiagnostic.AccessibilitySnapshotRef.Metadata)
+		}
+	}
 }
 
 func directWorkerArtifactURI(jobID, artifactID string) string {

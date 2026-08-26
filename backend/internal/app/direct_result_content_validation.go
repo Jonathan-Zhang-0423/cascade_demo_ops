@@ -116,6 +116,9 @@ func validateDirectStructuredArtifacts(job *direct.Job, source model.ClientExecu
 			outcomeEvidence[event.NodeID] = len(event.EvidenceRefs) > 0
 		case model.StageExecutionEventStageCompleted:
 			completed[event.NodeID] = true
+			if model.RuntimeObservationRecordsOptionalCapability(event.Observation) && len(event.EvidenceRefs) > 0 {
+				outcomeEvidence[event.NodeID] = true
+			}
 		case model.StageExecutionEventStageFailed:
 			failed[event.NodeID] = true
 		}

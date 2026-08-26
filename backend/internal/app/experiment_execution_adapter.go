@@ -423,6 +423,7 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 			return err
 		}
 	}
+	coreCapabilityTerminal := false
 	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
 		score, scoreEvidence, scoreErr := readAdaptiveCapabilityScore(downloads)
 		if scoreErr != nil {
@@ -438,16 +439,21 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 		if !score.CorePassed || !score.EligibleForFilm {
 			return &experiment.AdapterError{Code: "core_capability_gate_failed", Phase: "interaction_verification", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: []string{scoreEvidence}}
 		}
+		// The adaptive profile's authoritative terminal is the layered business
+		// score. It already combines real interaction, structural, and bounded
+		// visual evidence. A visual observation that calls itself "in_progress"
+		// must not override a 70/70 core pass or force a third model call.
+		coreCapabilityTerminal = true
 	}
 	visualArtifacts := []experiment.ArtifactRef{}
-	liveVisualCalls, liveTerminal, liveErr := recordLiveBrowserVisualObservations(downloads, emit)
+	liveVisualCalls, liveTerminal, liveErr := recordLiveBrowserVisualObservations(downloads, request.VisualCallBudget, emit)
 	if liveErr != nil {
 		return liveErr
 	}
-	if liveVisualCalls > request.VisualCallBudget {
+	if liveVisualCalls > request.ObservationPlan.MaxVisualCalls {
 		return &experiment.AdapterError{Code: "visual_call_budget_exceeded", Phase: "visual_observation_deferred", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: evidenceRefs}
 	}
-	if !experimentArtifactsContainRole(request.ExistingArtifacts, "temporal_visual_observation") && !liveTerminal {
+	if !experimentArtifactsContainRole(request.ExistingArtifacts, "temporal_visual_observation") && !liveTerminal && !coreCapabilityTerminal {
 		remaining := request.VisualCallBudget - liveVisualCalls
 		if remaining < 1 {
 			return &experiment.AdapterError{Code: "visual_terminal_evidence_incomplete", Phase: "preview_candidate", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: evidenceRefs}
@@ -536,8 +542,8 @@ func readAdaptiveCapabilityScore(downloads []CloudDeliverableDownloadResult) (*m
 	return latest, evidence, nil
 }
 
-func recordLiveBrowserVisualObservations(downloads []CloudDeliverableDownloadResult, emit func(experiment.LegExecutionUpdate) error) (int, bool, error) {
-	calls, terminal := 0, false
+func recordLiveBrowserVisualObservations(downloads []CloudDeliverableDownloadResult, newCallBudget int, emit func(experiment.LegExecutionUpdate) error) (int, bool, error) {
+	calls, recorded, terminal := 0, 0, false
 	for _, item := range downloads {
 		if item.Kind != "browser_visual_observation" {
 			continue
@@ -562,9 +568,16 @@ func recordLiveBrowserVisualObservations(downloads []CloudDeliverableDownloadRes
 		if observation.Decision == "succeeded" && observation.Confidence >= .85 {
 			terminal = true
 		}
-		if emit != nil {
-			if err := emit(experiment.LegExecutionUpdate{Kind: "visual_observation", Summary: "Worker 时序视觉观察已计入运行预算", EvidenceRefs: []string{item.ArtifactID}}); err != nil {
-				return calls, terminal, err
+		if emit != nil && recorded < newCallBudget {
+			toRecord := max(1, observation.ProviderCalls)
+			if toRecord > newCallBudget-recorded {
+				toRecord = newCallBudget - recorded
+			}
+			for index := 0; index < toRecord; index++ {
+				if err := emit(experiment.LegExecutionUpdate{Kind: "visual_observation", Summary: "Worker 时序视觉观察已计入运行预算", EvidenceRefs: []string{item.ArtifactID}}); err != nil {
+					return calls, terminal, err
+				}
+				recorded++
 			}
 		}
 	}

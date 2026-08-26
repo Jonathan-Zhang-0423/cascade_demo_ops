@@ -323,7 +323,9 @@ func terminalInteractionVerificationRepairGraph(state *orchestrator.CascadeState
 	if failedAction == model.GraphActionClick && browserAgentStageKindForNode(state.ExecutableScriptBundle, result.FailureDiagnostic.FailedNodeID) == model.BusinessStageKindBusinessSubmit {
 		return adaptiveSuccessorObservationRepairGraph(state, result, failedIndex, now)
 	}
-	isTerminalInteraction := failedAction == model.GraphActionPress || failedAction == model.GraphActionGesture || failedAction == model.GraphActionInspect || failedAction == model.GraphActionWait
+	failedNode := state.WorkflowGraph.Nodes[failedIndex]
+	isOptionalEnhancementClick := failedAction == model.GraphActionClick && graphNodeCapabilityLayer(failedNode) == "enhancement"
+	isTerminalInteraction := failedAction == model.GraphActionPress || failedAction == model.GraphActionGesture || failedAction == model.GraphActionInspect || failedAction == model.GraphActionWait || isOptionalEnhancementClick
 	if !isTerminalInteraction {
 		return nil, false, nil
 	}
@@ -437,6 +439,20 @@ func terminalInteractionVerificationRepairGraph(state *orchestrator.CascadeState
 	graph.CreatedAt = now
 	graph.UpdatedAt = now
 	return graph, true, nil
+}
+
+func graphNodeCapabilityLayer(node *model.GraphNode) string {
+	if node == nil || node.ActionSpec == nil {
+		return ""
+	}
+	parameters := node.ActionSpec.Parameters
+	if node.InteractionContract != nil && len(node.InteractionContract.Parameters) > 0 {
+		parameters = node.InteractionContract.Parameters
+	}
+	if layer, _ := parameters["capability_layer"].(string); layer == "core" || layer == "enhancement" {
+		return layer
+	}
+	return ""
 }
 
 // adaptiveSuccessorObservationRepairGraph handles the generic failure window

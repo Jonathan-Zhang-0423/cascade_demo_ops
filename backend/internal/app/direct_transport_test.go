@@ -28,6 +28,31 @@ import (
 	"cascade-demoops/backend/internal/store"
 )
 
+func TestDirectArtifactDownloadExtensionPreservesMediaType(t *testing.T) {
+	for name, artifact := range map[string]model.DirectArtifact{
+		"file name":     {FileName: "recording-segment-001.webm", MimeType: "video/webm"},
+		"mime fallback": {FileName: "recording", MimeType: "video/webm"},
+		"safe fallback": {FileName: "payload", MimeType: "application/octet-stream"},
+	} {
+		want := map[string]string{"file name": ".webm", "mime fallback": ".webm", "safe fallback": ".bin"}[name]
+		if got := directArtifactDownloadExtension(artifact); got != want {
+			t.Fatalf("%s extension=%q want %q", name, got, want)
+		}
+	}
+}
+
+func TestDirectDownloadedAssetPathPreservesPersistedMediaExtension(t *testing.T) {
+	root := t.TempDir()
+	path, ok := directDownloadedAssetPath(root, "project.unsafe", "job.unsafe", "artifact_recording.webm")
+	if !ok {
+		t.Fatal("persisted direct artifact file name was rejected")
+	}
+	want := filepath.Join(root, "desktop", "direct-downloads", "project_unsafe", "job_unsafe", "artifact_recording.webm")
+	if path != want {
+		t.Fatalf("downloaded asset path=%q want %q", path, want)
+	}
+}
+
 func TestDirectRequestAdmissionCertaintyUsesAuthoritativeHTTPRejection(t *testing.T) {
 	if directRequestMayHaveBeenAdmitted(&directTransportHTTPError{StatusCode: http.StatusBadRequest, Code: "package_validation_failed"}) {
 		t.Fatal("complete 4xx validation response must prove that no Direct job was admitted")

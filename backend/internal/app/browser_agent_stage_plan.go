@@ -479,6 +479,21 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		}
 		actionResult, err := executor.ExecuteStage(ctx, plan, activeStage)
 		if err != nil {
+			if layer, _, capability := stageCapability(stage); capability && layer == "enhancement" {
+				reason := "optional enhancement action was not completed"
+				decision := model.HarnessDecision{Kind: model.HarnessDecisionSkip, Confidence: 0.9, Reason: reason, EvidenceRefs: evidenceStrings(observed.EvidenceRefs)}
+				if item, ok := capabilityResultForStage(stage, false, observed.EvidenceRefs, reason); ok {
+					capabilityResults = append(capabilityResults, item)
+				}
+				if appendErr := appendEventDetails(stage, model.StageExecutionEventStepSatisfied, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil); appendErr != nil {
+					return result, appendErr
+				}
+				completedObservation := optionalCompletionObservation(observed.Observation, reason)
+				if appendErr := appendEvent(stage, model.StageExecutionEventStageCompleted, &completedObservation, observed.EvidenceRefs); appendErr != nil {
+					return result, appendErr
+				}
+				continue
+			}
 			_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, observed.EvidenceRefs)
 			// Preserve stable, redacted worker failure categories (notably the
 			// credential-login broker diagnostics) while keeping generic executor
@@ -490,6 +505,21 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 			return result, newRuntimeExecutionError(code, err)
 		}
 		if actionResult.Observation == nil || !runtimeObservationIsRealEvidence(actionResult.Observation.Source) || len(actionResult.EvidenceRefs) == 0 {
+			if layer, _, capability := stageCapability(stage); capability && layer == "enhancement" {
+				reason := "optional enhancement completion evidence was unavailable"
+				decision := model.HarnessDecision{Kind: model.HarnessDecisionSkip, Confidence: 0.9, Reason: reason, EvidenceRefs: evidenceStrings(observed.EvidenceRefs)}
+				if item, ok := capabilityResultForStage(stage, false, observed.EvidenceRefs, reason); ok {
+					capabilityResults = append(capabilityResults, item)
+				}
+				if appendErr := appendEventDetails(stage, model.StageExecutionEventStepSatisfied, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil); appendErr != nil {
+					return result, appendErr
+				}
+				completedObservation := optionalCompletionObservation(observed.Observation, reason)
+				if appendErr := appendEvent(stage, model.StageExecutionEventStageCompleted, &completedObservation, observed.EvidenceRefs); appendErr != nil {
+					return result, appendErr
+				}
+				continue
+			}
 			_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, observed.EvidenceRefs)
 			return result, newRuntimeExecutionError("browser_agent_action_failed", errors.New("stage action executor did not provide real completion evidence"))
 		}

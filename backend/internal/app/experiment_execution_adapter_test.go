@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -75,7 +76,7 @@ func TestAdaptiveExperimentPackageCompilesWithoutCascadeFlow(t *testing.T) {
 		}
 		expectedWait := "300000"
 		if stage.NodeID == "business_stage_continue_prepared_execution" {
-			expectedWait = "1800000"
+			expectedWait = strconv.Itoa(loaded.ObservationPlan.DeferAfterMS)
 		}
 		confirmationBound := stage.NodeID != "business_stage_continue_prepared_execution" || stage.Interaction.Parameters["continuation_confirmation_value"] == "确认，继续执行。"
 		foundContinuations[stage.NodeID] = stage.Interaction.Parameters["action_recipe"] == "continue_execution" && stage.Interaction.Parameters["optional_when_target_absent"] == "true" && stage.Interaction.Parameters["capture_result_surface_baseline"] == "true" && stage.Interaction.Parameters["target_wait_timeout_ms"] == expectedWait && confirmationBound
@@ -182,15 +183,23 @@ func TestRecordLiveBrowserVisualObservationsCountsCallsAndRequiresConfidentTermi
 		{ArtifactID: "screenshot", Kind: "browser_visual_poll_screenshot", LocalPath: filepath.Join(dir, "ignored.png")},
 	}
 	emitted := 0
-	calls, terminal, err := recordLiveBrowserVisualObservations(downloads, func(update experiment.LegExecutionUpdate) error {
+	calls, terminal, err := recordLiveBrowserVisualObservations(downloads, 4, func(update experiment.LegExecutionUpdate) error {
 		if update.Kind != "visual_observation" || len(update.EvidenceRefs) != 1 {
 			t.Fatalf("unexpected visual update: %+v", update)
 		}
 		emitted++
 		return nil
 	})
-	if err != nil || calls != 4 || emitted != 3 || !terminal {
+	if err != nil || calls != 4 || emitted != 4 || !terminal {
 		t.Fatalf("live observations calls=%d emitted=%d terminal=%t err=%v", calls, emitted, terminal, err)
+	}
+	emitted = 0
+	calls, terminal, err = recordLiveBrowserVisualObservations(downloads, 0, func(update experiment.LegExecutionUpdate) error {
+		emitted++
+		return nil
+	})
+	if err != nil || calls != 4 || emitted != 0 || !terminal {
+		t.Fatalf("recovered live observations were not reused idempotently: calls=%d emitted=%d terminal=%t err=%v", calls, emitted, terminal, err)
 	}
 }
 

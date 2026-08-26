@@ -81,6 +81,8 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	if observed.URL != "" {
 		result.FailureDiagnostic.CurrentURL = observed.URL
 	}
+	reconcileAdaptiveFailureDiagnosticFromEvents(result.FailureDiagnostic, observed.Events, sourcePackage)
+	reconcileAdaptiveCapabilityScoreFromEvents(result.FailureDiagnostic, observed.Events, repairState.WorkflowGraph, sourcePackage)
 	if result.FailureDiagnostic.Error.Code == "browser_agent_once_effect_replay_denied" && adaptiveContinuationEffectObserved(repairState.WorkflowGraph, observed.Events) {
 		if node := adaptivePostContinuationObservationNode(repairState.WorkflowGraph); node != nil {
 			result.FailureDiagnostic.FailedNodeID = node.ID
@@ -197,6 +199,46 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	return adaptiveDirectReconciliationBuild{State: next, Build: build, SourceResult: result, PendingContinuation: pendingContinuation}, nil
 }
 
+// A Worker interruption can finalize a stale failure diagnostic for an
+// earlier navigation even though the stage log proves that navigation
+// completed and a later observation/action had already started. Prefer that
+// later unfinished stage so reconciliation resumes from the observed entity
+// instead of treating a successfully completed route restore as the failure.
+func reconcileAdaptiveFailureDiagnosticFromEvents(diagnostic *model.ScriptFailureDiagnostic, events []model.StageExecutionEvent, sourcePackage *model.ClientExecutionPackage) {
+	if diagnostic == nil || strings.TrimSpace(diagnostic.FailedNodeID) == "" {
+		return
+	}
+	completedSequence := int64(-1)
+	for _, event := range events {
+		if event.NodeID != diagnostic.FailedNodeID {
+			continue
+		}
+		if event.EventType == model.StageExecutionEventActionCompleted || event.EventType == model.StageExecutionEventStageCompleted || event.EventType == model.StageExecutionEventActionEffectCommitted {
+			if event.Sequence > completedSequence {
+				completedSequence = event.Sequence
+			}
+		}
+	}
+	if completedSequence < 0 {
+		return
+	}
+	candidate := selectAdaptiveInterruptedStage(events)
+	if strings.TrimSpace(candidate.NodeID) == "" || candidate.NodeID == diagnostic.FailedNodeID || candidate.Sequence <= completedSequence {
+		return
+	}
+	diagnostic.FailedNodeID = candidate.NodeID
+	diagnostic.FailedStepOrder = 0
+	if sourcePackage == nil || sourcePackage.ExecutableScriptBundle == nil || sourcePackage.ExecutableScriptBundle.PlanJSON == nil {
+		return
+	}
+	for _, step := range sourcePackage.ExecutableScriptBundle.PlanJSON.Steps {
+		if step.NodeID == candidate.NodeID {
+			diagnostic.FailedStepOrder = step.Order
+			return
+		}
+	}
+}
+
 func adaptiveContinuationEffectObserved(source *model.DemoWorkflowGraph, events []model.StageExecutionEvent) bool {
 	continuations := map[string]bool{}
 	if source != nil {
@@ -292,14 +334,19 @@ func (s *Service) adaptiveInterruptedResultFromStageLog(ctx context.Context, pro
 		return model.RecordingResultPackage{}, errors.New("recovered stage-event log has no observed successor evidence")
 	}
 	failed := selectAdaptiveInterruptedStage(observed.Events)
-	if strings.TrimSpace(failed.NodeID) == "" {
-		return model.RecordingResultPackage{}, errors.New("recovered stage-event log has no failed or interrupted stage")
+	if strings.TrimSpace(failed.NodeID) != "" {
+		result.FailureDiagnostic.FailedNodeID = failed.NodeID
 	}
-	result.FailureDiagnostic.FailedNodeID = failed.NodeID
 	result.FailureDiagnostic.CurrentURL = observed.URL
+	if hydrated, hydrateErr := hydrateAdaptiveSourceGraph(source); hydrateErr == nil {
+		reconcileAdaptiveCapabilityScoreFromEvents(result.FailureDiagnostic, observed.Events, hydrated, &source)
+	}
+	if strings.TrimSpace(result.FailureDiagnostic.FailedNodeID) == "" {
+		return model.RecordingResultPackage{}, errors.New("recovered stage-event log has no failed, interrupted, or completed core stage")
+	}
 	if source.ExecutableScriptBundle != nil && source.ExecutableScriptBundle.PlanJSON != nil {
 		for _, step := range source.ExecutableScriptBundle.PlanJSON.Steps {
-			if step.NodeID == failed.NodeID {
+			if step.NodeID == result.FailureDiagnostic.FailedNodeID {
 				result.FailureDiagnostic.FailedStepOrder = step.Order
 				break
 			}
@@ -312,15 +359,22 @@ func selectAdaptiveInterruptedStage(events []model.StageExecutionEvent) model.St
 	var failed model.StageExecutionEvent
 	started := map[string]model.StageExecutionEvent{}
 	finished := map[string]bool{}
+	completed := map[string]bool{}
 	for _, event := range events {
-		if event.EventType == model.StageExecutionEventStageFailed && event.Sequence >= failed.Sequence {
+		// A restarted audit stream may append a credential/bootstrap failure for
+		// a stage that the same log already proves completed. With no new page
+		// observation that failure cannot invalidate the deeper observed state.
+		if event.EventType == model.StageExecutionEventStageFailed && (!completed[event.NodeID] || adaptiveFailureHasObservedState(event.Observation)) && event.Sequence >= failed.Sequence {
 			failed = event
 		}
 		switch event.EventType {
 		case model.StageExecutionEventActionStarted:
 			started[event.NodeID] = event
-		case model.StageExecutionEventActionCompleted, model.StageExecutionEventStageCompleted, model.StageExecutionEventStageFailed:
+		case model.StageExecutionEventActionCompleted, model.StageExecutionEventStageFailed:
 			finished[event.NodeID] = true
+		case model.StageExecutionEventStageCompleted:
+			finished[event.NodeID] = true
+			completed[event.NodeID] = true
 		}
 	}
 	if strings.TrimSpace(failed.NodeID) == "" {
@@ -331,6 +385,13 @@ func selectAdaptiveInterruptedStage(events []model.StageExecutionEvent) model.St
 		}
 	}
 	return failed
+}
+
+func adaptiveFailureHasObservedState(observation *model.RuntimeObservation) bool {
+	if observation == nil || observation.Source == model.RuntimeObservationInsufficient {
+		return false
+	}
+	return strings.TrimSpace(observation.URL) != "" || observation.StateFingerprint != nil || len(observation.Assertions) > 0 || observation.BusinessState != nil
 }
 
 func (s *Service) adaptiveObservedSuccessorEvidence(ctx context.Context, projectID string, state *orchestrator.CascadeState, result model.RecordingResultPackage) adaptiveObservedSuccessorEvidence {
@@ -373,7 +434,7 @@ func (s *Service) adaptiveObservedSuccessorEvidence(ctx context.Context, project
 	scanner.Buffer(make([]byte, 64*1024), experiment.MaxEventBodyBytes)
 	for scanner.Scan() {
 		var event model.StageExecutionEvent
-		if json.Unmarshal(scanner.Bytes(), &event) == nil && event.Observation != nil {
+		if json.Unmarshal(scanner.Bytes(), &event) == nil {
 			events = append(events, event)
 		}
 	}
@@ -381,6 +442,57 @@ func (s *Service) adaptiveObservedSuccessorEvidence(ctx context.Context, project
 		return adaptiveObservedSuccessorEvidence{URL: current}
 	}
 	return adaptiveObservedSuccessorEvidence{URL: selectObservedSuccessorURL(state.ProjectContext, current, events), Events: events}
+}
+
+// A run can finish its complete capability proof and still be marked failed by
+// an older post-execution adapter. When the audited score says every core
+// capability passed, resume from the latest completed core observation rather
+// than from an absent optional control. The continuation compiler will rebuild
+// the complete proof session and will not replay entity creation or submission.
+func reconcileAdaptiveCapabilityScoreFromEvents(diagnostic *model.ScriptFailureDiagnostic, events []model.StageExecutionEvent, graph *model.DemoWorkflowGraph, sourcePackage *model.ClientExecutionPackage) {
+	if diagnostic == nil || graph == nil {
+		return
+	}
+	corePassed := false
+	for _, event := range events {
+		if event.EventType == model.StageExecutionEventCapabilityScored && event.CapabilityScore != nil && event.CapabilityScore.CorePassed && event.CapabilityScore.EligibleForFilm {
+			corePassed = true
+		}
+	}
+	if !corePassed {
+		return
+	}
+	nodes := make(map[string]*model.GraphNode, len(graph.Nodes))
+	for _, node := range graph.Nodes {
+		if node != nil {
+			nodes[node.ID] = node
+		}
+	}
+	var latest model.StageExecutionEvent
+	for _, event := range events {
+		if event.EventType != model.StageExecutionEventStageCompleted ||
+			event.Observation == nil ||
+			!model.RuntimeObservationIsRealEvidence(event.Observation.Source) ||
+			graphNodeCapabilityLayer(nodes[event.NodeID]) != "core" ||
+			event.Sequence <= latest.Sequence {
+			continue
+		}
+		latest = event
+	}
+	if strings.TrimSpace(latest.NodeID) == "" {
+		return
+	}
+	diagnostic.FailedNodeID = latest.NodeID
+	diagnostic.FailedStepOrder = 0
+	if sourcePackage == nil || sourcePackage.ExecutableScriptBundle == nil || sourcePackage.ExecutableScriptBundle.PlanJSON == nil {
+		return
+	}
+	for _, step := range sourcePackage.ExecutableScriptBundle.PlanJSON.Steps {
+		if step.NodeID == latest.NodeID {
+			diagnostic.FailedStepOrder = step.Order
+			return
+		}
+	}
 }
 
 func insertPendingAdaptiveContinuation(repair, source *model.DemoWorkflowGraph, events []model.StageExecutionEvent, observedURL, failedNodeID string) (bool, error) {
