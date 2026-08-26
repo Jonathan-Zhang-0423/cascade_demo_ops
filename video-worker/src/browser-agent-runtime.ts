@@ -1127,10 +1127,11 @@ export function runtimeContinuationWaitTimeout(value: unknown): number {
 	return Math.max(0, Math.min(1_800_000, Math.trunc(Number(value) || 0)));
 }
 
-async function waitForFileStable(filePath: string, requiredStableChecks: number, intervalMS: number): Promise<boolean> {
+export async function waitForFileStable(filePath: string, requiredStableChecks: number, intervalMS: number, maxWaitMS = 45_000): Promise<boolean> {
   let previousSize = -1;
   let stableChecks = 0;
-  for (let attempt = 0; attempt < requiredStableChecks + 8; attempt++) {
+  const deadline = Date.now() + Math.max(intervalMS, maxWaitMS);
+  while (Date.now() <= deadline) {
     const size = await stat(filePath).then((value) => value.size).catch(() => -1);
     if (size > 0 && size === previousSize) {
       stableChecks++;
@@ -1139,6 +1140,7 @@ async function waitForFileStable(filePath: string, requiredStableChecks: number,
       stableChecks = 0;
     }
     previousSize = size;
+    if (Date.now() + intervalMS > deadline) break;
     await new Promise((resolve) => setTimeout(resolve, intervalMS));
   }
   return false;
