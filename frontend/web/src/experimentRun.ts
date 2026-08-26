@@ -22,17 +22,24 @@ export type ExperimentLeg = {
   target_submissions: number;
   checkpoint?: ExperimentCheckpoint;
   artifact_refs?: ExperimentArtifactRef[];
+  bound_entity_name?: string;
+  entity_created_at?: string;
+  entity_entry_ref?: string;
+  entity_task_ref?: string;
+  create_count?: number;
+  build_submit_count?: number;
+  product_repair_rounds?: number;
 };
 export type ExperimentRun = {
-  schema_version: "demoops.experiment_run.v1";
+  schema_version: "demoops.experiment_run.v1" | "demoops.experiment_run.v2";
   run_id: string;
   definition_id: string;
   workflow_template_id: "async-product-build-demo-v1";
-  harness_profile?: "adaptive-business-harness-v1" | "cascade-flow-compat-v1";
+  harness_profile?: "adaptive-business-harness-v1" | "adaptive-business-harness-v2" | "cascade-flow-compat-v1";
   state: ExecutionPortState;
   phase: string;
   revision: number;
-  budget: { target_submissions: number; final_film_jobs: number; provider_calls: number; visual_calls_per_run: number };
+  budget: { target_submissions: number; final_film_jobs: number; provider_calls: number; visual_calls_per_run: number; director_visual_calls?: number };
   legs: ExperimentLeg[];
   provider_calls_used: number;
   final_film?: { job_id: string; revision: number; package_id?: string; decision?: string };
@@ -42,7 +49,7 @@ export type ExperimentRun = {
 };
 export type ExperimentEvent = { event_id: string; sequence: number; state: ExecutionPortState; phase: string; leg_id?: string; type: string; summary: string; evidence_refs?: string[]; created_at: string };
 
-export type StartExperimentRequest = { definition_ref: string; target_url: string; credential_ref: string; authorization_ref: string; idempotency_key: string; harness_profile?: "adaptive-business-harness-v1" | "cascade-flow-compat-v1" };
+export type StartExperimentRequest = { definition_ref: string; target_url: string; credential_ref: string; authorization_ref: string; idempotency_key: string; harness_profile?: "adaptive-business-harness-v1" | "adaptive-business-harness-v2" | "cascade-flow-compat-v1" };
 
 export type ExperimentRunClient = {
   mode: "local" | "unavailable";

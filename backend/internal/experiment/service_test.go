@@ -40,6 +40,74 @@ func TestCreateRunFreezesTwoLegsAndIsIdempotent(t *testing.T) {
 	}
 }
 
+type staticProductSpecPlanner struct{ spec ProductSpec }
+
+func (p staticProductSpecPlanner) Generate(context.Context, string) (ProductSpec, error) {
+	return p.spec, nil
+}
+
+func TestCreateV2RunUsesOneFreshLegAndOriginalSentence(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "experiments")
+	loaded, err := LoadDefinition(root, "2048-v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextID := 0
+	service, err := NewService(ServiceOptions{Store: NewFileStore(t.TempDir()), DefinitionRoot: root, ProductSpecPlanner: staticProductSpecPlanner{spec: loaded.ProductSpec}, Now: func() time.Time { return time.Date(2026, 8, 27, 10, 0, nextID, 0, time.UTC) }, NewID: func(prefix string) (string, error) {
+		nextID++
+		return prefix + "_v2_" + strings.Repeat("x", nextID), nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := CreateRunRequest{DefinitionRef: "2048-v3", UserGoal: "构建一款适合产品演示的精致响应式 2048 网页游戏", TargetURL: "https://target.example.test/app", CredentialRef: "secret://demo/account", AuthorizationRef: "approval://experiment/start", IdempotencyKey: "closed-loop-v2-idem", HarnessProfile: HarnessProfileAdaptiveBusinessV2}
+	run, err := service.CreateRun(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.SchemaVersion != RunSchemaVersionV2 || len(run.Legs) != 1 || run.Legs[0].Kind != "main" {
+		t.Fatalf("v2 run created a recovery leg: %+v", run.Legs)
+	}
+	if run.Legs[0].BuildPrompt != request.UserGoal || run.Budget.TargetSubmissions != 1 || run.Budget.ProviderCalls != 6 || run.Budget.VisualCallsPerRun != 5 || run.Budget.DirectorVisualCalls != 3 {
+		t.Fatalf("v2 one-sentence boundary or budget drifted: prompt=%q budget=%+v", run.Legs[0].BuildPrompt, run.Budget)
+	}
+	if run.Legs[0].ProjectName == loaded.Definition.MainProjectName || !strings.Contains(run.Legs[0].ProjectName, "·") {
+		t.Fatalf("v2 project identity is not unique: %q", run.Legs[0].ProjectName)
+	}
+}
+
+func TestV2CommitRejectsOldOrMismatchedEntity(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "experiments")
+	loaded, err := LoadDefinition(root, "2048-v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	service, err := NewService(ServiceOptions{Store: NewFileStore(t.TempDir()), DefinitionRoot: root, ProductSpecPlanner: staticProductSpecPlanner{spec: loaded.ProductSpec}, Now: func() time.Time { now = now.Add(time.Second); return now }, NewID: func(prefix string) (string, error) { return prefix + "_fresh", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := service.CreateRun(t.Context(), CreateRunRequest{DefinitionRef: "2048-v3", UserGoal: loaded.Definition.ShortGoal, TargetURL: "https://target.example.test/app", CredentialRef: "secret://demo/account", AuthorizationRef: "approval://experiment/start", IdempotencyKey: "fresh-entity-idem", HarnessProfile: HarnessProfileAdaptiveBusinessV2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run = mustTransitionLeg(t, service, run, run.Legs[0].LegID, RunStateRunning, "submit_committed")
+	started, err := service.BeginOnceEffect(t.Context(), run.RunID, run.Revision, run.Legs[0].LegID, "target_submit", "target_submission", "fresh-submit-idem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := CommitOnceEffectRequest{ExpectedRevision: started.Revision, LegID: run.Legs[0].LegID, EffectID: "target_submit", StateFingerprintRef: "state:fresh", ResultEntryRef: "direct:project:job", EvidenceRefs: []string{"entity-card", "result-route"}, EntityCreatedAt: started.CreatedAt.Add(time.Second), EntityTaskRef: "job"}
+	base.EntityName = "some old project"
+	if _, err := service.CommitOnceEffect(t.Context(), run.RunID, base); err == nil {
+		t.Fatal("v2 accepted a mismatched old entity")
+	}
+	base.EntityName = started.Legs[0].ProjectName
+	base.EntityCreatedAt = started.CreatedAt.Add(-time.Second)
+	if _, err := service.CommitOnceEffect(t.Context(), run.RunID, base); err == nil {
+		t.Fatal("v2 accepted an entity created before the run")
+	}
+}
+
 func TestConfirmedOnceEffectResumesObserveOnlyWithoutReplay(t *testing.T) {
 	service := testService(t)
 	run := mustCreateRun(t, service)

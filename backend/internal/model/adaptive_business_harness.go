@@ -8,6 +8,7 @@ import (
 )
 
 const AdaptiveBusinessHarnessProfileV1 = "adaptive-business-harness-v1"
+const AdaptiveBusinessHarnessProfileV2 = "adaptive-business-harness-v2"
 
 type BusinessPhase string
 
@@ -165,7 +166,9 @@ func ScoreCapabilities(results []CapabilityResult) CapabilityScore {
 		}
 	}
 	score.TotalScore = score.CoreScore + score.EnhancementScore
-	score.CorePassed = coreCount > 0 && corePassed && score.CoreScore == 70
+	// Eligibility is criterion-driven. A Task Pack owns the weights; the
+	// generic harness must not assume that every product has a 70-point core.
+	score.CorePassed = coreCount > 0 && corePassed
 	score.EligibleForFilm = score.CorePassed
 	sort.Strings(score.Missing)
 	return score

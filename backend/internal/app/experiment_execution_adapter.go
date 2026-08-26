@@ -28,6 +28,10 @@ func newAppExperimentExecutionAdapter(service *Service) *appExperimentExecutionA
 	return &appExperimentExecutionAdapter{service: service, pollInterval: 5 * time.Second, now: time.Now}
 }
 
+func isAdaptiveExperimentHarness(profile string) bool {
+	return profile == experiment.HarnessProfileAdaptiveBusinessV1 || profile == experiment.HarnessProfileAdaptiveBusinessV2
+}
+
 func (a *appExperimentExecutionAdapter) DescribeCapabilities(context.Context) (experiment.ModuleManifest, error) {
 	if a == nil || a.service == nil {
 		return experiment.ModuleManifest{}, errors.New("experiment execution adapter is unavailable")
@@ -56,7 +60,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		if err == nil && status.Status == "failed" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
 			return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 		}
-		if err == nil && status.Status == "awaiting_credentials" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+		if err == nil && status.Status == "awaiting_credentials" && isAdaptiveExperimentHarness(request.HarnessProfile) {
 			if directStatusHasRecoveredStageLog(status) {
 				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 			}
@@ -84,7 +88,7 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 			if statusErr == nil && status.Status == "failed" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
 				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 			}
-			if statusErr == nil && status.Status == "awaiting_credentials" && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+			if statusErr == nil && status.Status == "awaiting_credentials" && isAdaptiveExperimentHarness(request.HarnessProfile) {
 				if directStatusHasRecoveredStageLog(status) {
 					return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 				}
@@ -129,6 +133,16 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 	}
 	if err != nil || prepared.State == nil || prepared.Build == nil || prepared.Build.Package.ConfidenceSummary == nil {
 		return &experiment.AdapterError{Code: "execution_package_planning_failed", Phase: "plan_review", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
+	}
+	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
+		intelligence := prepared.State.ProjectIntelligence
+		if intelligence == nil || intelligence.SchemaVersion != model.ProjectIntelligencePackSchemaVersion || intelligence.ScriptReadinessReport == nil {
+			return &experiment.AdapterError{Code: "project_intelligence_missing", Phase: "understanding", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: errors.New("closed-loop v2 requires a real ProjectIntelligenceGraph result")}
+		}
+		hasEvidence := len(intelligence.EvidenceRefs) > 0 || len(intelligence.InteractionSurfaces) > 0 || len(intelligence.FeatureCapabilities) > 0 || intelligence.Architecture != nil || intelligence.MissingEvidenceReport != nil
+		if !hasEvidence || intelligence.Confidence <= 0 {
+			return &experiment.AdapterError{Code: "project_intelligence_unsubstantiated", Phase: "understanding", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: errors.New("project intelligence must contain observed code/page evidence or an explicit missing-evidence report")}
+		}
 	}
 	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "plan_review", Summary: "执行包与 Interaction Contract 已完成本地门禁"}); err != nil {
 		return err
@@ -416,15 +430,20 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 	evidenceRefs := resultEvidenceRefs(result)
 	segmentRefs := experimentSegmentRefs(downloads)
 	if commitEffect {
+		entityCreatedAt := result.CreatedAt
+		if entityCreatedAt.IsZero() {
+			entityCreatedAt = a.now().UTC()
+		}
 		if err := emit(experiment.LegExecutionUpdate{
 			Kind: "once_effect_committed", EffectID: "target_submit", StateFingerprintRef: "result:" + result.ResultID,
 			ResultEntryRef: "direct:" + projectID + ":" + jobID, EvidenceRefs: evidenceRefs, SegmentRefs: segmentRefs,
+			EntityName: request.ProjectName, EntityCreatedAt: entityCreatedAt, EntityTaskRef: jobID,
 		}); err != nil {
 			return err
 		}
 	}
 	coreCapabilityTerminal := false
-	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+	if isAdaptiveExperimentHarness(request.HarnessProfile) {
 		score, scoreEvidence, scoreErr := readAdaptiveCapabilityScore(downloads)
 		if scoreErr != nil {
 			return &experiment.AdapterError{Code: "capability_score_invalid", Phase: "interaction_verification", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: evidenceRefs, Cause: scoreErr}
@@ -483,7 +502,7 @@ func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, r
 }
 
 func adaptiveObservationFailureShouldDefer(request experiment.LegExecutionRequest, result model.RecordingResultPackage) bool {
-	if request.HarnessProfile != experiment.HarnessProfileAdaptiveBusinessV1 || result.FailureDiagnostic == nil {
+	if !isAdaptiveExperimentHarness(request.HarnessProfile) || result.FailureDiagnostic == nil {
 		return false
 	}
 	code := strings.TrimSpace(result.FailureDiagnostic.Error.Code)
@@ -602,7 +621,7 @@ func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context,
 		case "completed":
 			return status, nil
 		case "failed":
-			if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
+			if isAdaptiveExperimentHarness(request.HarnessProfile) {
 				if result, resultErr := a.service.GetDirectResult(ctx, projectID, jobID); resultErr == nil && adaptiveObservationFailureShouldDefer(request, result) {
 					return status, &experiment.AdapterError{Code: "confidence_deferred", Phase: "confidence_deferred", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: resultEvidenceRefs(result)}
 				}
@@ -653,7 +672,7 @@ func directObservationTransportTimeout(request experiment.LegExecutionRequest) t
 	if idleTimeout <= 0 {
 		idleTimeout = 10 * time.Minute
 	}
-	if request.HarnessProfile != experiment.HarnessProfileAdaptiveBusinessV1 {
+	if !isAdaptiveExperimentHarness(request.HarnessProfile) {
 		return idleTimeout + 30*time.Second
 	}
 	absolute := idleTimeout * 3
@@ -747,9 +766,14 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 	}
 	var job model.FinalFilmJob
 	if request.FinalFilm == nil {
+		coverage, facts, coverageErr := closedLoopNarrativeBoundary(request, downloads)
+		if coverageErr != nil {
+			return &experiment.AdapterError{Code: "media_coverage_incomplete", Phase: "capture_ready", State: experiment.RunStateWaitingInput, Retryable: true, Cause: coverageErr}
+		}
 		job, err = a.service.CreateFinalFilmJob(ctx, FinalFilmCreateRequest{
 			EditorSessionID: sessionID, ExpectedRevision: session.Revision, SourcePackageID: result.SourcePackageID,
 			AutomationProfile: model.FinalFilmAutomationProfileGuidedDemoV1, ReviewSupplements: supplements,
+			PublicNarrativeFacts: facts, MediaCoverage: coverage,
 		})
 		if err != nil {
 			return &experiment.AdapterError{Code: "final_film_create_failed", Phase: "director_media", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
@@ -803,6 +827,83 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+func closedLoopNarrativeBoundary(request experiment.LegExecutionRequest, downloads []CloudDeliverableDownloadResult) (*model.MediaCoverageReport, []model.PublicNarrativeFact, error) {
+	if request.HarnessProfile != experiment.HarnessProfileAdaptiveBusinessV2 {
+		return nil, nil, nil
+	}
+	type chapterSpan struct {
+		Chapter string `json:"chapter"`
+		StartMS int    `json:"start_ms"`
+		EndMS   int    `json:"end_ms"`
+	}
+	var spans []chapterSpan
+	manifestRef := ""
+	segmentRefs := []string{}
+	for _, download := range downloads {
+		if download.Kind == "recording_segment" || download.Kind == "raw_recording" {
+			segmentRefs = append(segmentRefs, download.ArtifactID)
+		}
+		if download.Kind != "recording_segment_manifest" {
+			continue
+		}
+		raw, err := os.ReadFile(download.LocalPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		var manifest struct {
+			SchemaVersion string        `json:"schema_version"`
+			RolloverMS    int           `json:"rollover_ms"`
+			ChapterSpans  []chapterSpan `json:"chapter_spans"`
+		}
+		if err := json.Unmarshal(raw, &manifest); err != nil || manifest.SchemaVersion != "demoops.browser_recording_segments.v1" || manifest.RolloverMS != 120_000 {
+			return nil, nil, errors.New("closed-loop recording segment manifest is missing its two-minute timeline")
+		}
+		spans = append(spans, manifest.ChapterSpans...)
+		manifestRef = download.ArtifactID
+	}
+	if manifestRef == "" || len(segmentRefs) == 0 {
+		return nil, nil, errors.New("closed-loop recording segments are unavailable")
+	}
+	covered := map[string]bool{}
+	for _, span := range spans {
+		if span.EndMS > span.StartMS {
+			covered[strings.TrimSpace(span.Chapter)] = true
+		}
+	}
+	report := &model.MediaCoverageReport{SchemaVersion: model.MediaCoverageReportSchemaVersion, NonReplayable: []string{"login", "creation", "prompt_input", "submission"}, Rerecordable: []string{"build_wait", "result_reveal", "interaction"}}
+	facts := []model.PublicNarrativeFact{}
+	captionByChapter := map[string]string{
+		"login": "打开平台并完成登录", "creation": "创建本次实验的全新项目", "prompt_input": request.BuildPrompt,
+		"submission": "提交原始需求并开始构建", "build_wait": "等待平台完成真实构建", "result_reveal": "查看刚刚生成的项目",
+		"interaction": "实际操作并验证产品能力",
+	}
+	for index, chapter := range model.RequiredDemoChapters() {
+		refs := append([]string{manifestRef}, segmentRefs...)
+		entry := model.MediaChapterCoverage{Chapter: chapter, Covered: covered[chapter], ArtifactRefs: refs, Rerecordable: chapter == "build_wait" || chapter == "result_reveal" || chapter == "interaction"}
+		if !entry.Covered {
+			entry.QualityIssues = []string{"chapter_evidence_missing"}
+			report.QualityIssues = append(report.QualityIssues, chapter+":chapter_evidence_missing")
+		}
+		report.Chapters = append(report.Chapters, entry)
+		fact := model.PublicNarrativeFact{SchemaVersion: model.PublicNarrativeFactSchemaVersion, FactID: fmt.Sprintf("public_fact_%02d_%s", index+1, chapter), Chapter: chapter, ApprovedCaptionVariants: []string{captionByChapter[chapter]}, VisibleEvidenceRefs: refs, SourceKind: "visible_ui"}
+		if chapter == "prompt_input" {
+			fact.SourceKind = "user_goal"
+		}
+		if err := model.ValidatePublicNarrativeFact(fact); err != nil {
+			return nil, nil, err
+		}
+		facts = append(facts, fact)
+	}
+	report.Complete = len(report.QualityIssues) == 0
+	if err := model.ValidateMediaCoverageReport(*report); err != nil {
+		return nil, nil, err
+	}
+	if !report.Complete {
+		return report, facts, fmt.Errorf("required recording chapters are incomplete: %s", strings.Join(report.QualityIssues, ", "))
+	}
+	return report, facts, nil
 }
 
 func (a *appExperimentExecutionAdapter) materializeReviewSupplements(request experiment.LegExecutionRequest) ([]model.FinalFilmReviewSupplement, error) {

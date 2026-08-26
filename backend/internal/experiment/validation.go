@@ -24,28 +24,41 @@ func ValidateCreateRequest(request CreateRunRequest) error {
 	if strings.Contains(request.DefinitionRef, "..") || strings.ContainsAny(request.DefinitionRef, `/\\`) {
 		return errors.New("definition_ref must be a single registered identifier")
 	}
-	if request.HarnessProfile != "" && request.HarnessProfile != HarnessProfileAdaptiveBusinessV1 && request.HarnessProfile != HarnessProfileCascadeFlowCompat {
+	if request.HarnessProfile != "" && request.HarnessProfile != HarnessProfileAdaptiveBusinessV1 && request.HarnessProfile != HarnessProfileAdaptiveBusinessV2 && request.HarnessProfile != HarnessProfileCascadeFlowCompat {
 		return errors.New("unsupported harness_profile")
 	}
 	return nil
 }
 
 func ValidateDefinition(value Definition) error {
-	if value.SchemaVersion != DefinitionSchemaVersion || strings.TrimSpace(value.DefinitionID) == "" || value.WorkflowTemplateID != WorkflowTemplateAsyncProductDemo {
+	if (value.SchemaVersion != DefinitionSchemaVersion && value.SchemaVersion != DefinitionSchemaVersionV2) || strings.TrimSpace(value.DefinitionID) == "" || value.WorkflowTemplateID != WorkflowTemplateAsyncProductDemo {
 		return errors.New("unsupported experiment definition identity or workflow template")
 	}
-	if len(value.RunSet) != 2 || value.RunSet[0] != "main" || value.RunSet[1] != "recovery" || value.RecoveryInjectionPhase != "once_effect_committed" {
-		return errors.New("experiment definition must declare main and recovery legs with committed once-effect recovery")
+	if value.SchemaVersion == DefinitionSchemaVersionV2 {
+		if len(value.RunSet) != 1 || value.RunSet[0] != "main" || strings.TrimSpace(value.RecoveryInjectionPhase) != "" {
+			return errors.New("v2 experiment definition must declare one main leg and no recovery injection")
+		}
+	} else if len(value.RunSet) != 2 || value.RunSet[0] != "main" || value.RunSet[1] != "recovery" || value.RecoveryInjectionPhase != "once_effect_committed" {
+		return errors.New("v1 experiment definition must declare main and recovery legs with committed once-effect recovery")
 	}
 	if value.MainTargetDurationMS.Min != 100_000 || value.MainTargetDurationMS.Max != 110_000 {
 		return errors.New("experiment main target duration must be 100-110 seconds")
 	}
 	budget := value.AuthorizationBudget
-	if budget.TargetSubmissions != 2 || budget.FinalFilmJobs != 1 || budget.ProviderCalls != 8 || (budget.VisualCallsPerRun != 2 && budget.VisualCallsPerRun != 12) {
-		return errors.New("experiment authorization budget is not frozen")
-	}
-	if strings.TrimSpace(value.MainProjectName) == "" || strings.TrimSpace(value.RecoveryProjectName) == "" || value.MainProjectName == value.RecoveryProjectName {
-		return errors.New("main and recovery project names must be distinct")
+	if value.SchemaVersion == DefinitionSchemaVersionV2 {
+		if budget.TargetSubmissions != 1 || budget.FinalFilmJobs != 1 || budget.ProviderCalls != 6 || budget.VisualCallsPerRun != 5 || budget.DirectorVisualCalls != 3 {
+			return errors.New("v2 experiment authorization budget must be one submission, six provider calls, and 5+3 visual calls")
+		}
+		if strings.TrimSpace(value.MainProjectName) == "" || strings.TrimSpace(value.RecoveryProjectName) != "" {
+			return errors.New("v2 experiment must name only its main project")
+		}
+	} else {
+		if budget.TargetSubmissions != 2 || budget.FinalFilmJobs != 1 || budget.ProviderCalls != 8 || (budget.VisualCallsPerRun != 2 && budget.VisualCallsPerRun != 12) {
+			return errors.New("experiment authorization budget is not frozen")
+		}
+		if strings.TrimSpace(value.MainProjectName) == "" || strings.TrimSpace(value.RecoveryProjectName) == "" || value.MainProjectName == value.RecoveryProjectName {
+			return errors.New("main and recovery project names must be distinct")
+		}
 	}
 	if value.BuildDeliveryProfile != "" && value.BuildDeliveryProfile != BuildDeliveryPortableSingleHTML {
 		return errors.New("experiment build delivery profile is unsupported")
@@ -169,20 +182,24 @@ func validProofRequirement(value ProofRequirement) bool {
 }
 
 func ValidateRun(value Run) error {
-	if value.SchemaVersion != RunSchemaVersion || strings.TrimSpace(value.RunID) == "" || value.WorkflowTemplate != WorkflowTemplateAsyncProductDemo || value.Revision < 1 || value.CreatedAt.IsZero() || value.UpdatedAt.IsZero() {
+	if (value.SchemaVersion != RunSchemaVersion && value.SchemaVersion != RunSchemaVersionV2) || strings.TrimSpace(value.RunID) == "" || value.WorkflowTemplate != WorkflowTemplateAsyncProductDemo || value.Revision < 1 || value.CreatedAt.IsZero() || value.UpdatedAt.IsZero() {
 		return errors.New("experiment run identity, workflow, revision, and timestamps are required")
 	}
-	if !validRunState(value.State) || len(value.Legs) != 2 || value.Legs[0].Kind != "main" || value.Legs[1].Kind != "recovery" {
+	validLegShape := len(value.Legs) == 2 && value.Legs[0].Kind == "main" && value.Legs[1].Kind == "recovery"
+	if value.SchemaVersion == RunSchemaVersionV2 {
+		validLegShape = len(value.Legs) == 1 && value.Legs[0].Kind == "main"
+	}
+	if !validRunState(value.State) || !validLegShape {
 		return errors.New("experiment run state or legs are invalid")
 	}
 	if value.ProviderCallsUsed < 0 || value.ProviderCallsUsed > value.Budget.ProviderCalls {
 		return errors.New("experiment provider-call budget exceeded")
 	}
-	if value.HarnessProfile != "" && value.HarnessProfile != HarnessProfileAdaptiveBusinessV1 && value.HarnessProfile != HarnessProfileCascadeFlowCompat {
+	if value.HarnessProfile != "" && value.HarnessProfile != HarnessProfileAdaptiveBusinessV1 && value.HarnessProfile != HarnessProfileAdaptiveBusinessV2 && value.HarnessProfile != HarnessProfileCascadeFlowCompat {
 		return errors.New("experiment run harness_profile is invalid")
 	}
 	for _, leg := range value.Legs {
-		if leg.VisualCallsUsed > value.Budget.VisualCallsPerRun || leg.TargetSubmissions > 1 || !validRunState(leg.State) {
+		if leg.VisualCallsUsed > value.Budget.VisualCallsPerRun || leg.TargetSubmissions > 1 || leg.CreateCount > 1 || leg.BuildSubmitCount > 1 || leg.ProductRepairRounds > 3 || !validRunState(leg.State) {
 			return errors.New("experiment leg exceeded visual or once-effect budget")
 		}
 	}
@@ -220,10 +237,6 @@ func CompileBuildPrompt(value ProductSpec, userGoal string, deliveryProfiles ...
 		return "", errors.New("unsupported build delivery profile")
 	}
 	prompt := userGoal
-	promptRunes := []rune(prompt)
-	if !strings.ContainsRune(".。!！?？", promptRunes[len(promptRunes)-1]) {
-		prompt += "。"
-	}
 	if containsPromptForbiddenTerm(prompt) || len([]rune(prompt)) > 240 {
 		return "", errors.New("compiled target prompt violates the concise downstream boundary")
 	}

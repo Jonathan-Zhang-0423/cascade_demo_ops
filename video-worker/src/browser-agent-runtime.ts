@@ -308,6 +308,7 @@ type BrowserAgentSession = {
 	visionVerdictsByNodeID: Map<string, BrowserVisualObservation[]>;
 	resultSurfaceBaselineDigest?: string;
 	runtimeContinuationEffectsCommitted: number;
+	narrativeChapterSpans: Array<{ chapter: string; source_node_id: string; start_ms: number; end_ms: number }>;
   // A verified action may move an application from its entry route to a
   // newly-created result route. Subsequent non-navigation stages must keep
   // that live route instead of treating their planning-time entry route as a
@@ -454,6 +455,7 @@ export async function openBrowserAgentSession(request: BrowserAgentOpenRequest):
 		visionPollEvidenceByNodeID: new Map(),
 		visionVerdictsByNodeID: new Map(),
 		runtimeContinuationEffectsCommitted: 0,
+		narrativeChapterSpans: [],
     taskSecrets: validatedTaskSecrets(request.task_secrets),
   };
   await page.route("**/*", async (route: any) => {
@@ -888,6 +890,8 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
   const targetEvidence: EvidenceRef[] = [];
   const resolutionAttempts: BrowserTargetResolutionAttempt[] = [];
   let targetGeometry: BrowserTargetGeometry | undefined;
+	const narrativeChapter = narrativeChapterForStage(request.stage);
+	const narrativeStartedMS = Math.max(0, Date.now() - session.openedAtMS);
   try {
   const outcomeBefore = await captureOutcomeSnapshot(session.page);
   if (taskSecretRef) await executeFormalAuthentication(session, request.stage, taskSecretRef);
@@ -930,6 +934,7 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
     target_resolved: true,
   };
   } finally {
+		if (narrativeChapter) session.narrativeChapterSpans.push({ chapter: narrativeChapter, source_node_id: request.stage.node_id, start_ms: narrativeStartedMS, end_ms: Math.max(narrativeStartedMS + 1, Date.now() - session.openedAtMS) });
     clearStageSecretValues(secretValues);
     if (request.secrets && request.secrets !== secretValues) clearStageSecretValues(request.secrets);
   }
@@ -985,9 +990,15 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   if (recordingPath && await fileExists(recordingPath)) {
     if (!await waitForFileStable(recordingPath, 3, 750)) throw new Error("browser_agent_recording_not_stable");
     const segmentEntries = (await readdir(session.outputDir).catch(() => [] as string[])).filter((entry) => /^recording-segment-\d+\.webm$/i.test(entry));
-    const segmentPath = path.join(session.outputDir, `recording-segment-${String(segmentEntries.length + 1).padStart(3, "0")}.webm`);
-    if (path.resolve(recordingPath) !== path.resolve(segmentPath)) await rename(recordingPath, segmentPath);
-    recordingPath = segmentPath;
+		const fullPath = path.join(session.outputDir, `recording-full-${String(segmentEntries.length + 1).padStart(3, "0")}.webm`);
+		if (path.resolve(recordingPath) !== path.resolve(fullPath)) await rename(recordingPath, fullPath);
+		if (!await splitRecordingAtTwoMinutes(fullPath, session.outputDir, segmentEntries.length + 1)) {
+			const segmentPath = path.join(session.outputDir, `recording-segment-${String(segmentEntries.length + 1).padStart(3, "0")}.webm`);
+			await rename(fullPath, segmentPath);
+			recordingPath = segmentPath;
+		} else {
+			recordingPath = fullPath;
+		}
   }
   const recordingSegmentPaths = (await readdir(session.outputDir).catch(() => [] as string[]))
     .filter((entry) => /^recording-segment-\d+\.webm$/i.test(entry)).sort().map((entry) => path.join(session.outputDir, entry));
@@ -996,8 +1007,11 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
     segmentManifestPath = path.join(session.outputDir, "recording-segments.json");
     await writeFile(segmentManifestPath, JSON.stringify({
       schema_version: "demoops.browser_recording_segments.v1",
+		rollover_ms: 120000,
+		recording_started_at_unix_ms: session.openedAtMS,
       segment_count: recordingSegmentPaths.length,
       segments: recordingSegmentPaths.map((segmentPath, index) => ({ order: index + 1, file_name: path.basename(segmentPath) })),
+		chapter_spans: session.narrativeChapterSpans,
     }, null, 2) + "\n", { mode: 0o600 });
     if (recordingSegmentPaths.length > 1) {
       const stitchedPath = path.join(session.outputDir, "recording-stitched.webm");
@@ -1060,6 +1074,22 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
     artifacts,
     runtime_versions: { runner: "playwright-browser-agent", browser: session.engine },
   };
+}
+
+export function narrativeChapterForStage(stage: BrowserAgentWorkerStage): string | undefined {
+	const configured = stringParameter(stage.interactions[0]?.parameters, "narrative_chapter");
+	const allowed = ["login", "creation", "prompt_input", "submission", "build_wait", "result_reveal", "interaction"];
+	if (allowed.includes(configured)) return configured;
+	if (stage.interactions.some((interaction) => Boolean(interaction.secret_ref))) return "login";
+	if (stage.interactions.some((interaction) => interaction.kind === "press" || interaction.kind === "gesture")) return "interaction";
+	if (stage.interactions.some((interaction) => interaction.kind === "fill" && !interaction.secret_ref)) return "prompt_input";
+	if (stage.interactions.some((interaction) => interaction.kind === "click") && stage.interaction_contract?.replay_policy === "once_effect") return "submission";
+	const validations = new Set((stage.validations || []).map((validation) => validation.kind));
+	if (validations.has("interactive_surface_visible") || validations.has("frame_surface_changed")) return "result_reveal";
+	if (stage.interactions.some((interaction) => interaction.kind === "wait" || interaction.kind === "inspect")) return "build_wait";
+	if (stage.interactions.some((interaction) => interaction.kind === "click")) return "creation";
+	if (stage.interactions.some((interaction) => interaction.kind === "navigate")) return "login";
+	return undefined;
 }
 
 export function runtimeContinuationPollDecision(targetResolved: boolean, baselineDigest: string, currentDigest: string, deadlineReached: boolean, busy: boolean, idleResumeWithoutPriorEffect = false): "act" | "advance" | "observe" {
@@ -1126,6 +1156,18 @@ async function stitchRecordingSegments(segmentPaths: string[], outputPath: strin
     child.once("error", () => { clearTimeout(timer); resolve(false); });
     child.once("exit", (code) => { clearTimeout(timer); resolve(code === 0); });
   });
+}
+
+async function splitRecordingAtTwoMinutes(inputPath: string, outputDir: string, startNumber: number): Promise<boolean> {
+	const executable = String(process.env.CASCADE_FFMPEG_PATH || "").trim();
+	if (!executable) return false;
+	const outputPattern = path.join(outputDir, "recording-segment-%03d.webm");
+	return new Promise<boolean>((resolve) => {
+		const child = spawn(executable, ["-hide_banner", "-loglevel", "error", "-y", "-i", inputPath, "-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-f", "segment", "-segment_time", "120", "-segment_start_number", String(startNumber), "-reset_timestamps", "1", outputPattern], { windowsHide: true, stdio: "ignore" });
+		const timer = setTimeout(() => { child.kill(); resolve(false); }, 90_000);
+		child.once("error", () => { clearTimeout(timer); resolve(false); });
+		child.once("exit", (code) => { clearTimeout(timer); resolve(code === 0); });
+	});
 }
 
 async function executeInteraction(

@@ -103,15 +103,15 @@ func TestCompileBuildPromptKeepsOriginalSentenceAndAcceptanceInternal(t *testing
 	}
 }
 
-func TestCompileBuildPromptAddsOnlyMissingSentenceTerminator(t *testing.T) {
+func TestCompileBuildPromptPreservesSentenceBytes(t *testing.T) {
 	spec := validProductSpecFixture()
 	withTerminator := "构建一款适合产品演示的精致响应式网页游戏。"
 	if prompt, err := CompileBuildPrompt(spec, withTerminator, BuildDeliveryPortableSingleHTML); err != nil || prompt != withTerminator {
 		t.Fatalf("existing sentence terminator drifted: prompt=%q err=%v", prompt, err)
 	}
 	withoutTerminator := strings.TrimSuffix(withTerminator, "。")
-	if prompt, err := CompileBuildPrompt(spec, withoutTerminator, BuildDeliveryPortableSingleHTML); err != nil || prompt != withTerminator {
-		t.Fatalf("missing sentence terminator was not normalized: prompt=%q err=%v", prompt, err)
+	if prompt, err := CompileBuildPrompt(spec, withoutTerminator, BuildDeliveryPortableSingleHTML); err != nil || prompt != withoutTerminator {
+		t.Fatalf("one-sentence goal bytes drifted: prompt=%q err=%v", prompt, err)
 	}
 }
 

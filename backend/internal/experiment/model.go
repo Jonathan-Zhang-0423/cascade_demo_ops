@@ -4,15 +4,18 @@ import "time"
 
 const (
 	DefinitionSchemaVersion          = "demoops.experiment_definition.v1"
+	DefinitionSchemaVersionV2        = "demoops.experiment_definition.v2"
 	ProductSpecSchemaVersion         = "demoops.product_spec_artifact.v1"
 	ObservationPlanSchemaVersion     = "demoops.build_observation_plan.v1"
 	InteractionPlanSchemaVersion     = "demoops.interaction_evidence_plan.v1"
 	RunSchemaVersion                 = "demoops.experiment_run.v1"
+	RunSchemaVersionV2               = "demoops.experiment_run.v2"
 	EventSchemaVersion               = "demoops.execution_event.v1"
 	ReportSchemaVersion              = "demoops.experiment_run_report.v1"
 	WorkflowTemplateAsyncProductDemo = "async-product-build-demo-v1"
 	BuildDeliveryPortableSingleHTML  = "portable-single-document-web-v1"
 	HarnessProfileAdaptiveBusinessV1 = "adaptive-business-harness-v1"
+	HarnessProfileAdaptiveBusinessV2 = "adaptive-business-harness-v2"
 	HarnessProfileCascadeFlowCompat  = "cascade-flow-compat-v1"
 	MaxEventBodyBytes                = 1024 * 1024
 	EventBodyWarningBytes            = 512 * 1024
@@ -64,10 +67,11 @@ type DurationRange struct {
 }
 
 type AuthorizationBudget struct {
-	TargetSubmissions int `json:"target_submissions"`
-	FinalFilmJobs     int `json:"final_film_jobs"`
-	ProviderCalls     int `json:"provider_calls"`
-	VisualCallsPerRun int `json:"visual_calls_per_run"`
+	TargetSubmissions   int `json:"target_submissions"`
+	FinalFilmJobs       int `json:"final_film_jobs"`
+	ProviderCalls       int `json:"provider_calls"`
+	VisualCallsPerRun   int `json:"visual_calls_per_run"`
+	DirectorVisualCalls int `json:"director_visual_calls,omitempty"`
 }
 
 type ProductSpec struct {
@@ -207,19 +211,27 @@ type Run struct {
 }
 
 type RunLeg struct {
-	LegID              string              `json:"leg_id"`
-	Kind               string              `json:"kind"`
-	ProjectName        string              `json:"project_name"`
-	BuildPrompt        string              `json:"build_prompt"`
-	State              RunState            `json:"state"`
-	Phase              string              `json:"phase"`
-	BrowserAttempt     int                 `json:"browser_attempt"`
-	VisualCallsUsed    int                 `json:"visual_calls_used"`
-	TargetSubmissions  int                 `json:"target_submissions"`
-	Checkpoint         *Checkpoint         `json:"checkpoint,omitempty"`
-	ArtifactRefs       []ArtifactRef       `json:"artifact_refs,omitempty"`
-	HumanInterventions []HumanIntervention `json:"human_interventions,omitempty"`
-	CapabilityScore    *CapabilitySummary  `json:"capability_score,omitempty"`
+	LegID               string              `json:"leg_id"`
+	Kind                string              `json:"kind"`
+	ProjectName         string              `json:"project_name"`
+	BuildPrompt         string              `json:"build_prompt"`
+	State               RunState            `json:"state"`
+	Phase               string              `json:"phase"`
+	BrowserAttempt      int                 `json:"browser_attempt"`
+	VisualCallsUsed     int                 `json:"visual_calls_used"`
+	TargetSubmissions   int                 `json:"target_submissions"`
+	Checkpoint          *Checkpoint         `json:"checkpoint,omitempty"`
+	ArtifactRefs        []ArtifactRef       `json:"artifact_refs,omitempty"`
+	HumanInterventions  []HumanIntervention `json:"human_interventions,omitempty"`
+	CapabilityScore     *CapabilitySummary  `json:"capability_score,omitempty"`
+	BoundEntityName     string              `json:"bound_entity_name,omitempty"`
+	EntityCreatedAt     time.Time           `json:"entity_created_at,omitempty"`
+	EntityEntryRef      string              `json:"entity_entry_ref,omitempty"`
+	EntityTaskRef       string              `json:"entity_task_ref,omitempty"`
+	EntityEvidenceRefs  []string            `json:"entity_evidence_refs,omitempty"`
+	CreateCount         int                 `json:"create_count,omitempty"`
+	BuildSubmitCount    int                 `json:"build_submit_count,omitempty"`
+	ProductRepairRounds int                 `json:"product_repair_rounds,omitempty"`
 }
 
 type CapabilitySummary struct {

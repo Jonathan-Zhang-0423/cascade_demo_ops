@@ -1,0 +1,36 @@
+{
+  "schema_version": "demoops.product_spec_artifact.v1",
+  "spec_id": "acceptance_floor_neon_merge_game_v3",
+  "title": "响应式数字合并游戏",
+  "objective": "构建一款适合产品演示、可以直接游玩并在桌面和移动端保持清晰流畅的数字合并网页游戏。",
+  "audience": "希望快速理解一句需求如何成为可玩产品的演示观众",
+  "build_brief": "实现标准数字合并、分数、撤销、键盘与触控、胜利和结束状态，采用深蓝霓虹动效与响应式布局",
+  "requirements": [
+    { "id": "req_board", "statement": "使用 4×4 棋盘和标准合并规则，同一次移动中每个方块最多合并一次。", "priority": "must" },
+    { "id": "req_score", "statement": "展示当前分数与最佳分，并在本地保存最佳分。", "priority": "must" },
+    { "id": "req_controls", "statement": "提供新游戏、至少一步撤销和简洁操作说明。", "priority": "must" },
+    { "id": "req_terminal", "statement": "实现胜利、无可移动和重新开始状态。", "priority": "must" },
+    { "id": "req_demo_scenes", "statement": "提供不干扰默认玩法的演示场景入口，用于验证合并、胜利和结束状态。", "priority": "must" }
+  ],
+  "visual_direction": {
+    "theme": "深蓝渐变背景上的霓虹科技感界面",
+    "palette": ["深蓝", "青色", "紫色", "暖金色"],
+    "motion": "方块移动和合并使用平滑短动画，避免持续闪烁"
+  },
+  "interaction_requirements": [
+    { "id": "interaction_keyboard", "statement": "方向键和 WASD 均可移动棋盘。", "priority": "must" },
+    { "id": "interaction_touch", "statement": "触控设备可通过四向滑动移动棋盘。", "priority": "must" },
+    { "id": "interaction_undo", "statement": "撤销恢复上一棋盘与对应分数。", "priority": "must" }
+  ],
+  "responsive_requirements": ["桌面视口中主体无需滚动即可看清。", "移动视口中棋盘保持正方形且按钮不遮挡。"],
+  "observable_acceptance": [
+    { "id": "accept_surface", "statement": "标题、4×4 棋盘、当前分数、最佳分、新游戏、撤销和说明同时可见。", "evidence_kinds": ["aria", "visual"], "required": true },
+    { "id": "accept_moves", "statement": "两个不同方向操作均使棋盘区域发生变化。", "evidence_kinds": ["frame", "aria"], "required": true },
+    { "id": "accept_merge", "statement": "最多十二次自适应移动内至少完成一次合并并增加分数。", "evidence_kinds": ["visual", "dom"], "required": true },
+    { "id": "accept_undo", "statement": "撤销近似恢复上一棋盘和分数。", "evidence_kinds": ["frame", "dom"], "required": true },
+    { "id": "accept_touch", "statement": "移动视口下滑动手势使棋盘发生变化。", "evidence_kinds": ["frame", "aria"], "required": true },
+    { "id": "accept_terminal", "statement": "演示场景能显示胜利与无可移动状态。", "evidence_kinds": ["aria", "visual"], "required": true }
+  ],
+  "forbidden_outcomes": ["不得只输出计划、解释、静态截图或不可交互的占位页面。", "不得在产品界面显示开发标记、请求结构或内部执行信息。"]
+}
+

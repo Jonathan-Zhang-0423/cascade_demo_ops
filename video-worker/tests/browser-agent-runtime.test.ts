@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -67,6 +67,16 @@ describe("browser visual polling terminal evidence", () => {
 		expect(browserVisualHardRefreshDue(startedAt, startedAt + budget - 1, budget, false)).toBe(false);
 		expect(browserVisualHardRefreshDue(startedAt, startedAt + budget, budget, false)).toBe(true);
 		expect(browserVisualHardRefreshDue(startedAt, startedAt + budget + 60_000, budget, true)).toBe(false);
+	});
+});
+
+describe("closed-loop narrative chapter coverage", () => {
+	const base = { id: "stage", order: 1, node_id: "stage", target_contract: { semantic_id: "target", destructive: false }, validations: [] } as any;
+	it("classifies chapters from generic action semantics without site selectors", () => {
+		expect(narrativeChapterForStage({ ...base, interactions: [{ kind: "fill", input_ref: "user_goal" }] })).toBe("prompt_input");
+		expect(narrativeChapterForStage({ ...base, interactions: [{ kind: "click" }], interaction_contract: { replay_policy: "once_effect" } })).toBe("submission");
+		expect(narrativeChapterForStage({ ...base, interactions: [{ kind: "press" }] })).toBe("interaction");
+		expect(narrativeChapterForStage({ ...base, interactions: [{ kind: "inspect" }] })).toBe("build_wait");
 	});
 });
 

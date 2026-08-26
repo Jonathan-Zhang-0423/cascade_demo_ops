@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type LegExecutionRequest struct {
@@ -27,6 +28,7 @@ type LegExecutionRequest struct {
 	VisualCallBudget   int
 	WorkflowTemplateID string
 	HarnessProfile     string
+	RunStartedAt       time.Time
 }
 
 type LegExecutionUpdate struct {
@@ -47,6 +49,9 @@ type LegExecutionUpdate struct {
 	ProviderCallsUsed   int
 	FinalFilmPackageID  string
 	CapabilityScore     *CapabilitySummary
+	EntityName          string
+	EntityCreatedAt     time.Time
+	EntityTaskRef       string
 }
 
 type LegExecutionAdapter interface {
@@ -128,6 +133,7 @@ func (r *Runner) RunLeg(ctx context.Context, runID, legID string, adapter LegExe
 		InteractionPlan: run.InteractionPlan, VisualCallBudget: run.Budget.VisualCallsPerRun - leg.VisualCallsUsed,
 		WorkflowTemplateID: run.WorkflowTemplate,
 		HarnessProfile:     run.HarnessProfile,
+		RunStartedAt:       run.CreatedAt,
 	}
 	emit := func(update LegExecutionUpdate) error {
 		current, getErr := r.service.GetRun(ctx, runID)
@@ -140,7 +146,7 @@ func (r *Runner) RunLeg(ctx context.Context, runID, legID string, adapter LegExe
 		case "once_effect_started":
 			_, getErr = r.service.BeginOnceEffect(ctx, runID, current.Revision, legID, update.EffectID, update.EffectKind, update.IdempotencyKey)
 		case "once_effect_committed":
-			_, getErr = r.service.CommitOnceEffect(ctx, runID, CommitOnceEffectRequest{ExpectedRevision: current.Revision, LegID: legID, EffectID: update.EffectID, StateFingerprintRef: update.StateFingerprintRef, ResultEntryRef: update.ResultEntryRef, EvidenceRefs: update.EvidenceRefs, SegmentRefs: update.SegmentRefs})
+			_, getErr = r.service.CommitOnceEffect(ctx, runID, CommitOnceEffectRequest{ExpectedRevision: current.Revision, LegID: legID, EffectID: update.EffectID, StateFingerprintRef: update.StateFingerprintRef, ResultEntryRef: update.ResultEntryRef, EvidenceRefs: update.EvidenceRefs, SegmentRefs: update.SegmentRefs, EntityName: update.EntityName, EntityCreatedAt: update.EntityCreatedAt, EntityTaskRef: update.EntityTaskRef})
 		case "once_effect_admitted":
 			_, getErr = r.service.BindOnceEffectExternalTask(ctx, runID, current.Revision, legID, update.EffectID, update.ExternalTaskRef, update.EvidenceRefs)
 		case "checkpoint_result_entry":

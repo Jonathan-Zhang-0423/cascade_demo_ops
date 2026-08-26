@@ -11,17 +11,23 @@ import (
 )
 
 type ServiceOptions struct {
-	Store          Store
-	DefinitionRoot string
-	Now            func() time.Time
-	NewID          func(string) (string, error)
+	Store              Store
+	DefinitionRoot     string
+	Now                func() time.Time
+	NewID              func(string) (string, error)
+	ProductSpecPlanner ProductSpecGenerator
 }
 
 type Service struct {
-	store          Store
-	definitionRoot string
-	now            func() time.Time
-	newID          func(string) (string, error)
+	store              Store
+	definitionRoot     string
+	now                func() time.Time
+	newID              func(string) (string, error)
+	productSpecPlanner ProductSpecGenerator
+}
+
+type ProductSpecGenerator interface {
+	Generate(context.Context, string) (ProductSpec, error)
 }
 
 func NewService(options ServiceOptions) (*Service, error) {
@@ -36,7 +42,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 	if newID == nil {
 		newID = randomID
 	}
-	return &Service{store: options.Store, definitionRoot: options.DefinitionRoot, now: now, newID: newID}, nil
+	return &Service{store: options.Store, definitionRoot: options.DefinitionRoot, now: now, newID: newID, productSpecPlanner: options.ProductSpecPlanner}, nil
 }
 
 func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run, error) {
@@ -60,7 +66,24 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 	if request.UserGoal == "" {
 		request.UserGoal = strings.TrimSpace(loaded.Definition.ShortGoal)
 	}
-	if _, err := CompileBuildPrompt(loaded.ProductSpec, request.UserGoal, loaded.Definition.BuildDeliveryProfile); err != nil {
+	productSpec := loaded.ProductSpec
+	if request.HarnessProfile == HarnessProfileAdaptiveBusinessV2 {
+		if loaded.Definition.SchemaVersion != DefinitionSchemaVersionV2 {
+			return Run{}, errors.New("adaptive-business-harness-v2 requires a v2 single-leg definition")
+		}
+		if s.productSpecPlanner == nil {
+			return Run{}, errors.New("adaptive-business-harness-v2 requires the ProductSpec planning model")
+		}
+		planned, planErr := s.productSpecPlanner.Generate(ctx, request.UserGoal)
+		if planErr != nil {
+			return Run{}, fmt.Errorf("generate ProductSpec from the one-sentence goal: %w", planErr)
+		}
+		productSpec = mergeExperimentAcceptanceFloor(planned, loaded.ProductSpec)
+		if err := ValidateProductSpecQuality(productSpec); err != nil {
+			return Run{}, fmt.Errorf("validate generated ProductSpec: %w", err)
+		}
+	}
+	if _, err := CompileBuildPrompt(productSpec, request.UserGoal, loaded.Definition.BuildDeliveryProfile); err != nil {
 		return Run{}, fmt.Errorf("validate one-sentence user goal: %w", err)
 	}
 	if existing, ok, err := s.store.FindByIdempotencyKey(ctx, request.IdempotencyKey); err != nil {
@@ -76,27 +99,29 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 		return Run{}, err
 	}
 	mainProjectName := uniqueExperimentProjectName(loaded.Definition.MainProjectName, runID)
-	recoveryProjectName := uniqueExperimentProjectName(loaded.Definition.RecoveryProjectName, runID)
-	mainPrompt, err := CompileBuildPrompt(loaded.ProductSpec, request.UserGoal, loaded.Definition.BuildDeliveryProfile)
-	if err != nil {
-		return Run{}, err
-	}
-	recoveryPrompt, err := CompileBuildPrompt(loaded.ProductSpec, request.UserGoal, loaded.Definition.BuildDeliveryProfile)
+	mainPrompt, err := CompileBuildPrompt(productSpec, request.UserGoal, loaded.Definition.BuildDeliveryProfile)
 	if err != nil {
 		return Run{}, err
 	}
 	now := s.now().UTC()
+	legs := []RunLeg{{LegID: runID + ":main", Kind: "main", ProjectName: mainProjectName, BuildPrompt: mainPrompt, State: RunStateQueued, Phase: "awaiting_execution", BrowserAttempt: 1}}
+	runSchema := RunSchemaVersionV2
+	if loaded.Definition.SchemaVersion == DefinitionSchemaVersion {
+		recoveryProjectName := uniqueExperimentProjectName(loaded.Definition.RecoveryProjectName, runID)
+		recoveryPrompt, promptErr := CompileBuildPrompt(productSpec, request.UserGoal, loaded.Definition.BuildDeliveryProfile)
+		if promptErr != nil {
+			return Run{}, promptErr
+		}
+		legs = append(legs, RunLeg{LegID: runID + ":recovery", Kind: "recovery", ProjectName: recoveryProjectName, BuildPrompt: recoveryPrompt, State: RunStateCreated, Phase: "awaiting_main_completion", BrowserAttempt: 1})
+		runSchema = RunSchemaVersion
+	}
 	run := Run{
-		SchemaVersion: RunSchemaVersion, RunID: runID, DefinitionRef: request.DefinitionRef, DefinitionID: loaded.Definition.DefinitionID,
+		SchemaVersion: runSchema, RunID: runID, DefinitionRef: request.DefinitionRef, DefinitionID: loaded.Definition.DefinitionID,
 		WorkflowTemplate: loaded.Definition.WorkflowTemplateID, UserGoal: request.UserGoal, TargetURL: request.TargetURL, CredentialRef: request.CredentialRef,
 		AuthorizationRef: request.AuthorizationRef, IdempotencyKey: request.IdempotencyKey,
 		HarnessProfile: request.HarnessProfile,
 		State:          RunStateQueued, Phase: "product_spec_frozen", Revision: 1, Budget: loaded.Definition.AuthorizationBudget,
-		ProductSpec: loaded.ProductSpec, ObservationPlan: loaded.ObservationPlan, InteractionPlan: loaded.InteractionPlan,
-		Legs: []RunLeg{
-			{LegID: runID + ":main", Kind: "main", ProjectName: mainProjectName, BuildPrompt: mainPrompt, State: RunStateQueued, Phase: "awaiting_execution", BrowserAttempt: 1},
-			{LegID: runID + ":recovery", Kind: "recovery", ProjectName: recoveryProjectName, BuildPrompt: recoveryPrompt, State: RunStateCreated, Phase: "awaiting_main_completion", BrowserAttempt: 1},
-		},
+		ProductSpec: productSpec, ObservationPlan: loaded.ObservationPlan, InteractionPlan: loaded.InteractionPlan, Legs: legs,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := ValidateRun(run); err != nil {
@@ -107,6 +132,38 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 		return Run{}, err
 	}
 	return run, nil
+}
+
+func mergeExperimentAcceptanceFloor(planned, floor ProductSpec) ProductSpec {
+	// The planning model determines the product interpretation. The fixture is
+	// only an internal acceptance floor for this experiment and is never copied
+	// into the downstream builder prompt.
+	knownRequirements := map[string]bool{}
+	for _, requirement := range append(append([]ProductRequirement{}, planned.Requirements...), planned.InteractionRequirements...) {
+		knownRequirements[requirement.ID] = true
+	}
+	for _, requirement := range floor.Requirements {
+		if !knownRequirements[requirement.ID] {
+			planned.Requirements = append(planned.Requirements, requirement)
+			knownRequirements[requirement.ID] = true
+		}
+	}
+	for _, requirement := range floor.InteractionRequirements {
+		if !knownRequirements[requirement.ID] {
+			planned.InteractionRequirements = append(planned.InteractionRequirements, requirement)
+			knownRequirements[requirement.ID] = true
+		}
+	}
+	knownCriteria := map[string]bool{}
+	for _, criterion := range planned.ObservableAcceptance {
+		knownCriteria[criterion.ID] = true
+	}
+	for _, criterion := range floor.ObservableAcceptance {
+		if !knownCriteria[criterion.ID] {
+			planned.ObservableAcceptance = append(planned.ObservableAcceptance, criterion)
+		}
+	}
+	return planned
 }
 
 func firstNonEmptyHarnessProfile(value string) string {
@@ -239,6 +296,9 @@ type CommitOnceEffectRequest struct {
 	ResultEntryRef      string
 	EvidenceRefs        []string
 	SegmentRefs         []ArtifactRef
+	EntityName          string
+	EntityCreatedAt     time.Time
+	EntityTaskRef       string
 }
 
 func (s *Service) CommitOnceEffect(ctx context.Context, runID string, request CommitOnceEffectRequest) (Run, error) {
@@ -254,6 +314,18 @@ func (s *Service) CommitOnceEffect(ctx context.Context, runID string, request Co
 		return Run{}, errors.New("once-effect checkpoint was not found")
 	}
 	next := run
+	if run.SchemaVersion == RunSchemaVersionV2 {
+		if strings.TrimSpace(request.EntityName) != run.Legs[index].ProjectName || request.EntityCreatedAt.Before(run.CreatedAt) || request.EntityCreatedAt.IsZero() || strings.TrimSpace(request.ResultEntryRef) == "" {
+			return Run{}, errors.New("v2 once-effect must bind the fresh run-owned entity, creation time, and result entry")
+		}
+		next.Legs[index].BoundEntityName = strings.TrimSpace(request.EntityName)
+		next.Legs[index].EntityCreatedAt = request.EntityCreatedAt.UTC()
+		next.Legs[index].EntityEntryRef = strings.TrimSpace(request.ResultEntryRef)
+		next.Legs[index].EntityTaskRef = strings.TrimSpace(request.EntityTaskRef)
+		next.Legs[index].EntityEvidenceRefs = append([]string{}, request.EvidenceRefs...)
+		next.Legs[index].CreateCount++
+		next.Legs[index].BuildSubmitCount++
+	}
 	checkpoint := next.Legs[index].Checkpoint
 	found := false
 	for effectIndex := range checkpoint.OnceEffects {
@@ -276,7 +348,7 @@ func (s *Service) CommitOnceEffect(ctx context.Context, runID string, request Co
 		found = true
 		break
 	}
-	if !found || next.Legs[index].TargetSubmissions > 1 {
+	if !found || next.Legs[index].TargetSubmissions > 1 || next.Legs[index].CreateCount > 1 || next.Legs[index].BuildSubmitCount > 1 {
 		return Run{}, errors.New("once-effect is missing or would exceed the target-submission budget")
 	}
 	checkpoint.VerifiedPhase = "once_effect_committed"
@@ -544,9 +616,11 @@ func (s *Service) Resume(ctx context.Context, runID string, expectedRevision int
 		}
 	}
 	next := run
-	if strategy == "reconcile_observed_state" && run.HarnessProfile == HarnessProfileAdaptiveBusinessV1 {
+	if strategy == "reconcile_observed_state" && (run.HarnessProfile == HarnessProfileAdaptiveBusinessV1 || run.HarnessProfile == HarnessProfileAdaptiveBusinessV2) {
 		if loaded, loadErr := LoadDefinition(s.definitionRoot, run.DefinitionRef); loadErr == nil {
-			next.ProductSpec = loaded.ProductSpec
+			if run.HarnessProfile == HarnessProfileAdaptiveBusinessV1 {
+				next.ProductSpec = loaded.ProductSpec
+			}
 			next.ObservationPlan = loaded.ObservationPlan
 			next.InteractionPlan = loaded.InteractionPlan
 			next.Budget.VisualCallsPerRun = loaded.Definition.AuthorizationBudget.VisualCallsPerRun
@@ -812,7 +886,11 @@ func (s *Service) RecordFinalReview(ctx context.Context, runID string, expectedR
 	next := run
 	next.FinalFilm.PackageID, next.FinalFilm.Decision = packageID, decision
 	next.Legs[0].HumanInterventions = append(next.Legs[0].HumanInterventions, HumanIntervention{Kind: "final_review", Allowed: true, OccurredAt: s.now().UTC()})
-	if decision == "accept" && next.Legs[0].State == RunStateSucceeded && next.Legs[1].State == RunStateSucceeded {
+	allLegsSucceeded := true
+	for _, leg := range next.Legs {
+		allLegsSucceeded = allLegsSucceeded && leg.State == RunStateSucceeded
+	}
+	if decision == "accept" && allLegsSucceeded {
 		next.State, next.Phase = RunStateSucceeded, "completed_after_final_review"
 	} else if decision == "reject" {
 		next.State, next.Phase = RunStateWaitingInput, "final_revision_requested"
@@ -853,7 +931,11 @@ func aggregateRunState(run Run) (RunState, string) {
 			return RunStateWaitingInput, leg.Phase
 		}
 	}
-	if run.Legs[0].State == RunStateSucceeded && run.Legs[1].State == RunStateSucceeded {
+	allLegsSucceeded := len(run.Legs) > 0
+	for _, leg := range run.Legs {
+		allLegsSucceeded = allLegsSucceeded && leg.State == RunStateSucceeded
+	}
+	if allLegsSucceeded {
 		if run.FinalFilm != nil && run.FinalFilm.Decision == "accept" {
 			return RunStateSucceeded, "completed_after_final_review"
 		}
@@ -893,7 +975,10 @@ func terminalRunState(value RunState) bool {
 }
 
 func buildReport(run Run) *RunReport {
-	report := &RunReport{SchemaVersion: ReportSchemaVersion, RunID: run.RunID, Scores: map[string]float64{"orchestration": 0, "product": 0, "evidence": 0, "film": 0, "recovery": 0}, ModelConsumption: ModelConsumption{ProviderCalls: run.ProviderCallsUsed}, Automation: AutomationAttribution{AllowedHumanGates: 1}}
+	report := &RunReport{SchemaVersion: ReportSchemaVersion, RunID: run.RunID, Scores: map[string]float64{"orchestration": 0, "product": 0, "evidence": 0, "film": 0}, ModelConsumption: ModelConsumption{ProviderCalls: run.ProviderCallsUsed}, Automation: AutomationAttribution{AllowedHumanGates: 1}}
+	if run.SchemaVersion == RunSchemaVersion {
+		report.Scores["recovery"] = 0
+	}
 	for _, leg := range run.Legs {
 		report.ModelConsumption.VisualCalls += leg.VisualCallsUsed
 		report.HumanInterventions = append(report.HumanInterventions, leg.HumanInterventions...)
@@ -911,7 +996,10 @@ func buildReport(run Run) *RunReport {
 	report.Automation.AllowedHumanGates += len(report.HumanInterventions)
 	report.Valid = run.State == RunStateSucceeded && report.Automation.OutOfBandBrowserActions == 0 && report.Automation.AllowedHumanGates <= 2
 	if report.Valid {
-		report.Scores = map[string]float64{"orchestration": 100, "product": 100, "evidence": 100, "film": 100, "recovery": 100}
+		report.Scores = map[string]float64{"orchestration": 100, "product": 100, "evidence": 100, "film": 100}
+		if run.SchemaVersion == RunSchemaVersion {
+			report.Scores["recovery"] = 100
+		}
 	}
 	if len(run.Legs) > 0 && run.Legs[0].CapabilityScore != nil {
 		report.Scores["evidence"] = float64(run.Legs[0].CapabilityScore.TotalScore)

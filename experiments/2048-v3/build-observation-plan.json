@@ -1,0 +1,20 @@
+{
+  "schema_version": "demoops.build_observation_plan.v1",
+  "plan_id": "closed_loop_async_build_observation_v3",
+  "initial_phase": "request_submitted",
+  "terminal_phase": "preview_ready",
+  "transitions": [
+    { "from": "request_submitted", "to": "plan_ready", "evidence_kinds": ["dom", "visual"] },
+    { "from": "request_submitted", "to": "execution_active", "evidence_kinds": ["url", "dom"] },
+    { "from": "plan_ready", "to": "execution_active", "evidence_kinds": ["dom", "network"] },
+    { "from": "execution_active", "to": "preview_candidate", "evidence_kinds": ["url", "frame"] },
+    { "from": "preview_candidate", "to": "preview_ready", "evidence_kinds": ["visual", "interaction"] }
+  ],
+  "heartbeat_ms": 60000,
+  "warn_after_ms": 300000,
+  "defer_after_ms": 1800000,
+  "max_visual_calls": 5,
+  "required_terminal_channels": 2,
+  "failure_signals": ["明确的构建失败状态", "权限拒绝", "不可恢复异常", "任务已取消"]
+}
+

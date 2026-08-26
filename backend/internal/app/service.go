@@ -214,8 +214,13 @@ func NewService(runtime config.AppRuntimeConfig, states store.StateStore) (*Serv
 	if info, statErr := os.Stat(experimentRoot); statErr != nil || !info.IsDir() {
 		experimentRoot = filepath.Join(runtime.DevRepoRoot, "experiments")
 	}
+	productSpecPlanner, err := experiment.NewProductSpecPlanner(llmRouter)
+	if err != nil {
+		return nil, err
+	}
 	experimentService, err := experiment.NewService(experiment.ServiceOptions{
 		Store: experiment.NewFileStore(filepath.Join(runtime.DataRoot, "experiment_runs")), DefinitionRoot: experimentRoot,
+		ProductSpecPlanner: productSpecPlanner,
 	})
 	if err != nil {
 		return nil, err

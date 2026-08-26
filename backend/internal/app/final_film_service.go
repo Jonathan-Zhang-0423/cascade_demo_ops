@@ -12,12 +12,14 @@ import (
 )
 
 type FinalFilmCreateRequest struct {
-	EditorSessionID     string                               `json:"editor_session_id"`
-	ExpectedRevision    int                                  `json:"expected_revision"`
-	SourcePackageID     string                               `json:"source_package_id,omitempty"`
-	PresentationIntents []model.PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
-	AutomationProfile   string                               `json:"automation_profile,omitempty"`
-	ReviewSupplements   []model.FinalFilmReviewSupplement    `json:"review_supplements,omitempty"`
+	EditorSessionID      string                               `json:"editor_session_id"`
+	ExpectedRevision     int                                  `json:"expected_revision"`
+	SourcePackageID      string                               `json:"source_package_id,omitempty"`
+	PresentationIntents  []model.PresentationGenerationIntent `json:"presentation_generation_intents,omitempty"`
+	AutomationProfile    string                               `json:"automation_profile,omitempty"`
+	ReviewSupplements    []model.FinalFilmReviewSupplement    `json:"review_supplements,omitempty"`
+	PublicNarrativeFacts []model.PublicNarrativeFact          `json:"public_narrative_facts,omitempty"`
+	MediaCoverage        *model.MediaCoverageReport           `json:"media_coverage,omitempty"`
 }
 
 type FinalFilmGenerationDecisionRequest struct {
@@ -104,8 +106,9 @@ func (s *Service) CreateFinalFilmJob(ctx context.Context, request FinalFilmCreat
 	return s.finalFilm.CreateJob(ctx, finalfilm.CreateJobRequest{
 		EditorSessionID: session.SessionID, EditorRevision: session.Revision, SourcePackageID: sourcePackageID,
 		Catalog: session.AssetCatalog, BaselinePlan: session.EditPlan, Intents: request.PresentationIntents, RenderProfile: session.FinalProfile,
-		AutomationProfile: request.AutomationProfile,
-		ReviewSupplements: request.ReviewSupplements,
+		AutomationProfile:    request.AutomationProfile,
+		ReviewSupplements:    request.ReviewSupplements,
+		PublicNarrativeFacts: request.PublicNarrativeFacts, MediaCoverage: request.MediaCoverage,
 	})
 }
 

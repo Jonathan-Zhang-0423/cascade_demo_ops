@@ -93,8 +93,8 @@ func ValidatePublicNarrativeFact(value PublicNarrativeFact) error {
 // schema fields or execution-log assertions.
 func ValidatePublicCaption(value string) error {
 	caption := strings.TrimSpace(value)
-	if caption == "" || len([]rune(caption)) > 80 {
-		return errors.New("caption must contain 1-80 visible characters")
+	if caption == "" || len([]rune(caption)) > 240 {
+		return errors.New("caption must contain 1-240 visible characters")
 	}
 	lower := strings.ToLower(caption)
 	for _, token := range []string{"<", ">", "{", "}", "=", "selector", "schema", "observed_state", "expected_outcome", "source=", "assertion:", "node_id", "step_id", "request json", "dom dump", "html"} {
