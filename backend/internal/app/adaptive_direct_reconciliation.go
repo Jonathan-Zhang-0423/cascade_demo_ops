@@ -96,7 +96,7 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	// repair package may retain only its later follow-up; choosing that node
 	// would correctly avoid duplicate input but could never answer the original
 	// conversational confirmation.
-	if sourcePackage != nil && sourcePackage.ExecutableScriptBundle != nil && sourcePackage.ExecutableScriptBundle.RepairLineage != nil {
+	if sourcePackage != nil && sourcePackage.ExecutableScriptBundle != nil && sourcePackage.ExecutableScriptBundle.RepairLineage != nil && !adaptiveContinuationEffectObserved(repairState.WorkflowGraph, observed.Events) {
 		parentJobID := strings.TrimSpace(sourcePackage.ExecutableScriptBundle.RepairLineage.SourceCloudJobID)
 		if parentJobID != "" && parentJobID != strings.TrimSpace(sourceJobID) {
 			parentPackage, parentPackageErr := s.GetDirectSourcePackage(ctx, projectID, parentJobID)
@@ -179,6 +179,29 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		return adaptiveDirectReconciliationBuild{}, fmt.Errorf("build adaptive successor package: %w", err)
 	}
 	return adaptiveDirectReconciliationBuild{State: next, Build: build, SourceResult: result, PendingContinuation: pendingContinuation}, nil
+}
+
+func adaptiveContinuationEffectObserved(source *model.DemoWorkflowGraph, events []model.StageExecutionEvent) bool {
+	continuations := map[string]bool{}
+	if source != nil {
+		for _, node := range source.Nodes {
+			if node == nil || node.ActionSpec == nil {
+				continue
+			}
+			if recipe, _ := node.ActionSpec.Parameters["action_recipe"].(string); recipe == "continue_execution" {
+				continuations[node.ID] = true
+			}
+		}
+	}
+	for _, event := range events {
+		if !continuations[event.NodeID] {
+			continue
+		}
+		if event.EventType == model.StageExecutionEventActionStarted || event.EventType == model.StageExecutionEventActionCompleted || event.EventType == model.StageExecutionEventActionEffectCommitted {
+			return true
+		}
+	}
+	return false
 }
 
 // adaptiveInterruptedResultFromStageLog promotes the bounded Worker recovery

@@ -223,6 +223,18 @@ func TestInterruptedStageSelectionFallsBackToUnfinishedAction(t *testing.T) {
 	}
 }
 
+func TestObservedContinuationStopsAncestorFallback(t *testing.T) {
+	continuation := &model.GraphNode{ID: "confirmed", ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "continue_execution"}}}
+	source := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/entity")
+	source.Nodes = []*model.GraphNode{continuation}
+	if !adaptiveContinuationEffectObserved(source, []model.StageExecutionEvent{{NodeID: continuation.ID, EventType: model.StageExecutionEventActionCompleted}}) {
+		t.Fatal("completed continuation did not block ancestor fallback")
+	}
+	if adaptiveContinuationEffectObserved(source, []model.StageExecutionEvent{{NodeID: continuation.ID, EventType: model.StageExecutionEventStepSatisfied, HarnessDecision: &model.HarnessDecision{Kind: model.HarnessDecisionSkip}}}) {
+		t.Fatal("skipped continuation incorrectly blocked recovery from the parent package")
+	}
+}
+
 func TestInsertPendingAdaptiveContinuationRetriesConfirmedRollbackOnce(t *testing.T) {
 	continuation := &model.GraphNode{
 		ID: "continue_execution", Type: model.GraphNodeTypeAction,
