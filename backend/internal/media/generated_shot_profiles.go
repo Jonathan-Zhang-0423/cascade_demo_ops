@@ -190,7 +190,11 @@ func (compiler Seedance25GeneratedShotCompiler) Compile(intent GeneratedShotInte
 	if frameMode {
 		ratio = "adaptive"
 	}
-	taskType := "auto"
+	// The official Seedance 2.5 endpoint accepts omni_reference_task_type only
+	// for the multimodal general-reference scenario. Text-only and first-frame
+	// requests must omit the field entirely; sending the older "auto" sentinel
+	// is rejected before a provider task is created.
+	taskType := ""
 	if generalReferences {
 		taskType = "reference"
 	}
@@ -225,8 +229,8 @@ func validateSeedance25GeneratedShotRequest(request ContentGenerationTaskRequest
 	if generalReferences && request.OmniReferenceTaskType != "reference" {
 		return errors.New("general references require omni_reference_task_type=reference")
 	}
-	if !generalReferences && request.OmniReferenceTaskType != "auto" {
-		return errors.New("text and frame-mode requests require omni_reference_task_type=auto")
+	if !generalReferences && request.OmniReferenceTaskType != "" {
+		return errors.New("text and frame-mode requests must omit omni_reference_task_type")
 	}
 	return nil
 }

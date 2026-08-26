@@ -434,6 +434,11 @@ func TestEditorSessionFromResultPackageBuildsStepTimeline(t *testing.T) {
 	if session.AssetCatalog.WorkflowGraphID != "graph_1" || len(session.AssetCatalog.Steps) != 2 || len(session.EditPlan.Shots) != 2 {
 		t.Fatalf("unexpected imported timeline: %+v", session.AssetCatalog)
 	}
+	for _, step := range session.AssetCatalog.Steps {
+		if len(step.Artifacts) != 1 || step.Artifacts[0] != session.AssetCatalog.Artifacts[0].ID {
+			t.Fatalf("timeline step %s must bind the captured recording, not evidence attachments: %+v", step.StepID, step.Artifacts)
+		}
+	}
 	if got := *session.EditPlan.Shots[1].SourceTimeRangeMS; got != (model.MillisecondRange{2500, 5500}) {
 		t.Fatalf("second shot range = %+v", got)
 	}
@@ -472,6 +477,25 @@ func TestEnsureEditorSessionFromResultPackageReusesResultHandoff(t *testing.T) {
 	second, created, err := service.EnsureEditorSessionFromResultPackage(t.Context(), model.EditorCreateFromResultPackageRequest{ResultPackage: &result})
 	if err != nil || created || second.SessionID != first.SessionID {
 		t.Fatalf("expected repeated handoff to reuse the session: first=%+v second=%+v created=%v err=%v", first, second, created, err)
+	}
+}
+
+func TestNormalizeEditorFactTrackBindingsDropsEvidenceAttachments(t *testing.T) {
+	session := model.EditorSession{AssetCatalog: model.AssetTimelineCatalog{
+		Timeline: model.AssetTimelineInfo{RecordingArtifactID: "asset_recording"},
+		Steps: []model.TimelineStep{
+			{StepID: "required", Required: true, Artifacts: []string{"screenshot", "visual-observation-json"}},
+			{StepID: "optional", Required: false, Artifacts: []string{"screenshot"}},
+		},
+	}}
+	if !normalizeEditorFactTrackBindings(&session) {
+		t.Fatal("legacy evidence attachment bindings were not repaired")
+	}
+	if got := session.AssetCatalog.Steps[0].Artifacts; len(got) != 1 || got[0] != "asset_recording" {
+		t.Fatalf("required fact-track source binding=%v", got)
+	}
+	if got := session.AssetCatalog.Steps[1].Artifacts; len(got) != 1 || got[0] != "screenshot" {
+		t.Fatalf("optional evidence-only step was unexpectedly rewritten: %v", got)
 	}
 }
 

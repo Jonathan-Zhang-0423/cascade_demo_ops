@@ -121,7 +121,11 @@ func buildDirectorStoryPlan(job model.FinalFilmJob, digest model.DirectorEvidenc
 		}
 		speed := existingShotSpeed(shot)
 		step := stepByID[shot.SourceStepID]
-		if waitLikeText(step.Action+" "+step.ObservedState) && rangeMS[1]-rangeMS[0] >= 4000 {
+		// ObservedState contains generic provenance such as "url_observed" on
+		// every successful browser step. Classifying on that field compressed the
+		// entire factual interaction proof as if it were a wait. Only the action's
+		// business meaning may opt a segment into wait compression.
+		if waitLikeText(step.Action) && rangeMS[1]-rangeMS[0] >= 4000 {
 			speed = maxFloat(speed, 8)
 		}
 		output := maxInt(1, int(float64(rangeMS[1]-rangeMS[0])/speed))
@@ -156,9 +160,14 @@ func buildDirectorStoryPlan(job model.FinalFilmJob, digest model.DirectorEvidenc
 		})
 	}
 	total := factDuration + generatedDuration
-	if total < policy.TargetDuration.MinMS {
-		total = policy.TargetDuration.MinMS
+	// guided-demo-v1 aims at the center of the requested 100-110 second
+	// product-demo window. The deterministic EDL compiler later reconciles the
+	// exact accepted candidate set to this target using source-derived pacing.
+	target := 105_000
+	if total > target {
+		target = total
 	}
+	total = target
 	if total > policy.TargetDuration.MaxMS {
 		total = policy.TargetDuration.MaxMS
 	}

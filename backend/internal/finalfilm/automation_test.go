@@ -2,6 +2,7 @@ package finalfilm
 
 import (
 	"context"
+	"encoding/json"
 	"image"
 	"image/color"
 	"image/png"
@@ -40,6 +41,93 @@ func TestDirectorEvidencePaletteComesFromObservedScreenshots(t *testing.T) {
 	}
 	if len(digest.VisualStyle.DominantColors) == 0 || digest.VisualStyle.DominantColors[0] != "#2288ee" {
 		t.Fatalf("observed screenshot palette was not extracted: %+v", digest.VisualStyle)
+	}
+}
+
+func TestDirectorStoryDoesNotTreatObservedProvenanceAsWaiting(t *testing.T) {
+	catalog, baseline := finalFilmFixture()
+	for index := range catalog.Steps {
+		catalog.Steps[index].ObservedState = "url_observed; title_observed; assertion passed"
+	}
+	job := model.FinalFilmJob{JobID: "story_wait_classification", Constraints: model.StoryboardConstraintSet{ConstraintSetID: "constraints_story"}, Catalog: catalog, BaselinePlan: baseline, PresentationIntents: guidedDemoPresentationIntents(catalog)}
+	digest, err := buildDirectorEvidenceDigest(job, false, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	story, err := buildDirectorStoryPlan(job, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if story.TargetDurationMS != 105_000 {
+		t.Fatalf("guided story target=%d want 105000", story.TargetDurationMS)
+	}
+	for _, segment := range story.Timeline {
+		if segment.Kind == "fact" && segment.Speed != 1 {
+			t.Fatalf("interactive fact segment was compressed by provenance text: %+v", segment)
+		}
+	}
+}
+
+func TestFitAutomatedFactTrackReconcilesExactTargetWithoutInventedMedia(t *testing.T) {
+	first, second, generated := model.MillisecondRange{0, 30_000}, model.MillisecondRange{30_000, 60_000}, model.MillisecondRange{0, 4_000}
+	plan := model.DemoEditPlan{Shots: []model.DemoEditShot{
+		{ID: "fact_1", SourceStepID: "step_1", SourceTimeRangeMS: &first},
+		{ID: "fact_2", SourceStepID: "step_2", SourceTimeRangeMS: &second},
+		{ID: "generated", SourceTimeRangeMS: &generated, OutputDurationMS: 4_000},
+	}}
+	fitAutomatedFactTrackToTarget(&plan, 90_000)
+	if got := timelineDuration(plan); got != 90_000 {
+		t.Fatalf("fitted timeline duration=%d want 90000", got)
+	}
+	for _, shot := range plan.Shots[:2] {
+		if speed := existingShotSpeed(shot); speed < 0.5 || speed > 1 {
+			t.Fatalf("source-derived pacing left supported range: %f", speed)
+		}
+	}
+}
+
+func TestRecoverFailedAutomationRetriesOnlyProviderRejectedBeforeTaskCreation(t *testing.T) {
+	service, _ := newFinalFilmTestService(t)
+	policy := model.DefaultFinalFilmAutomationPolicy()
+	intent, _ := model.PresentationGenerationIntentDefaults("divider", media.GeneratedShotPurposeSectionDivider, nil)
+	record := GeneratedTrackRecord{SchemaVersion: generatedTrackRecordSchemaVersion, DirectorPlanID: "director_recovery", Intents: []media.GeneratedShotIntent{{IntentID: intent.IntentID, Purpose: intent.Purpose}}}
+	raw, _ := json.Marshal(record)
+	job := model.FinalFilmJob{
+		SchemaVersion: model.FinalFilmJobSchemaVersion, JobID: "recover_provider_rejection", Revision: 1,
+		State: model.FinalFilmJobFailed, Phase: "automation_failed", AutomationProfile: model.FinalFilmAutomationProfileGuidedDemoV1,
+		AutomationPolicy: &policy, RunAuthorization: &model.FinalFilmRunAuthorization{AuthorizationRef: "approved", MaxProviderCalls: 8, ProviderCallsUsed: 2}, GeneratedTrack: raw,
+		ProviderAttempts: []model.FinalFilmProviderAttempt{
+			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderSeedance25, Attempt: 1, Status: "retry"},
+			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderSeedance25, Attempt: 2, Status: "fallback_fact_track"},
+		},
+		QualityReports: []model.CandidateQualityReport{
+			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderSeedance25, Attempt: 1, Decision: "retry", Findings: []string{"InvalidParameter.TaskTypeConstraint: omni_reference_task_type"}},
+			{IntentID: intent.IntentID, Provider: media.GeneratedShotProviderSeedance25, Attempt: 2, Decision: "fallback_fact_track", Findings: []string{"InvalidParameter.TaskTypeConstraint: omni_reference_task_type"}},
+		},
+		LastError: &model.FinalFilmJobError{Retryable: true, Message: "request compiler mismatch"},
+	}
+	if err := service.store.CreateJob(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := service.recoverFailedAutomation(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.State != model.FinalFilmJobGeneratingPresentation || recovered.RunAuthorization.ProviderCallsUsed != 0 || len(recovered.QualityReports) != 0 {
+		t.Fatalf("provider-rejected attempts were not reconciled: %+v", recovered)
+	}
+	for _, attempt := range recovered.ProviderAttempts {
+		if attempt.Status != "superseded_pre_admission" || attempt.RecoveryCount != 1 {
+			t.Fatalf("pre-admission audit record was not retained: %+v", attempt)
+		}
+	}
+}
+
+func TestAutomatedBookendBlackGateAllowsShortFadeOnly(t *testing.T) {
+	intro := media.GeneratedShotIntent{Purpose: media.GeneratedShotPurposeIntro}
+	divider := media.GeneratedShotIntent{Purpose: media.GeneratedShotPurposeSectionDivider}
+	if automatedBlackDurationLimitMS(intro) != 750 || automatedBlackDurationLimitMS(divider) != 500 {
+		t.Fatal("purpose-aware black-frame limits drifted")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"math"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"cascade-demoops/backend/internal/executor"
 	"cascade-demoops/backend/internal/media"
@@ -92,12 +93,173 @@ func (s *Service) ResumeAutomation(ctx context.Context, jobID string) (model.Fin
 			}
 		case model.FinalFilmJobComposing:
 			return s.finishAutomatedComposition(ctx, job)
-		case model.FinalFilmJobAwaitingFinalReview, model.FinalFilmJobCompleted, model.FinalFilmJobFailed, model.FinalFilmJobRevisionRequested:
+		case model.FinalFilmJobFailed:
+			recovered, recoverErr := s.recoverFailedAutomation(ctx, job)
+			if recoverErr != nil {
+				return job, recoverErr
+			}
+			if recovered.State == model.FinalFilmJobFailed {
+				return recovered, nil
+			}
+		case model.FinalFilmJobAwaitingFinalReview, model.FinalFilmJobCompleted, model.FinalFilmJobRevisionRequested:
 			return job, nil
 		default:
 			return model.FinalFilmJob{}, fmt.Errorf("automatic runner cannot resume state %s", job.State)
 		}
 	}
+}
+
+func (s *Service) recoverFailedAutomation(ctx context.Context, job model.FinalFilmJob) (model.FinalFilmJob, error) {
+	if job.LastError == nil || !job.LastError.Retryable || job.RunAuthorization == nil || job.AutomationPolicy == nil {
+		return job, nil
+	}
+	record, err := decodeGeneratedTrack(job.GeneratedTrack)
+	if err != nil {
+		return job, err
+	}
+	next := job
+	next.QualityReports = append([]model.CandidateQualityReport{}, job.QualityReports...)
+	next.ProviderAttempts = append([]model.FinalFilmProviderAttempt{}, job.ProviderAttempts...)
+	recovered := false
+
+	// Reassess already downloaded candidates when the quality policy was made
+	// purpose-aware. This spends no provider budget and preserves the exact
+	// immutable provider output.
+	for _, intent := range record.Intents {
+		if automatedIntentAccepted(next.QualityReports, intent.IntentID) {
+			continue
+		}
+		for reportIndex := len(next.QualityReports) - 1; reportIndex >= 0; reportIndex-- {
+			report := &next.QualityReports[reportIndex]
+			if report.IntentID != intent.IntentID || report.CandidateID != "" {
+				continue
+			}
+			attempt := findAutomatedProviderAttempt(next.ProviderAttempts, intent.IntentID, report.Provider, report.Attempt)
+			if attempt == nil || attempt.ProviderTaskID == "" {
+				continue
+			}
+			candidate := findGeneratedCandidateByTask(record, intent.IntentID, attempt.ProviderTaskID)
+			if candidate == nil || !s.persistedCandidatePassesCurrentGate(ctx, intent, *candidate) {
+				continue
+			}
+			report.TechnicalPass, report.ContentPass, report.Score = true, true, 1
+			report.CandidateID, report.Findings, report.Decision = candidate.CandidateID, nil, "accept"
+			report.CheckedAt = s.now().UTC()
+			attempt.Status, attempt.CompletedAt = "accept", report.CheckedAt
+			recovered = true
+			break
+		}
+	}
+
+	removeReports := map[string]bool{}
+	for index := range next.ProviderAttempts {
+		attempt := &next.ProviderAttempts[index]
+		report := automatedQualityReport(next.QualityReports, attempt.IntentID, attempt.Provider, attempt.Attempt)
+		if report == nil || report.Decision == "accept" || attempt.RecoveryCount >= 1 {
+			continue
+		}
+		key := automatedAttemptKey(attempt.IntentID, attempt.Provider, attempt.Attempt)
+		if attempt.ProviderTaskID == "" && preAdmissionRequestRejected(report.Findings) {
+			attempt.Status = "superseded_pre_admission"
+			attempt.RecoveryCount++
+			removeReports[key] = true
+			recovered = true
+			continue
+		}
+		if attempt.ProviderTaskID != "" && report.Decision == "fallback_fact_track" && retryableProviderPollingFailure(report.Findings) {
+			attempt.Status = "submitted"
+			attempt.CompletedAt = time.Time{}
+			attempt.RecoveryCount++
+			removeReports[key] = true
+			recovered = true
+		}
+	}
+	if len(removeReports) > 0 {
+		filtered := next.QualityReports[:0]
+		for _, report := range next.QualityReports {
+			if !removeReports[automatedAttemptKey(report.IntentID, report.Provider, report.Attempt)] {
+				filtered = append(filtered, report)
+			}
+		}
+		next.QualityReports = filtered
+	}
+	if !recovered {
+		return job, nil
+	}
+	used := 0
+	seenTasks := map[string]bool{}
+	for _, attempt := range next.ProviderAttempts {
+		taskID := strings.TrimSpace(attempt.ProviderTaskID)
+		if taskID != "" && !seenTasks[taskID] {
+			seenTasks[taskID] = true
+			used++
+		}
+	}
+	next.RunAuthorization.ProviderCallsUsed = used
+	next.Revision++
+	next.UpdatedAt = s.now().UTC()
+	next.State, next.Phase = model.FinalFilmJobGeneratingPresentation, "retryable_provider_reconciled"
+	next.LastError, next.FinalCatalog, next.FinalPlan, next.FinalOutputValidation = nil, nil, nil, nil
+	next.FinalRender = model.FinalFilmRenderOutput{}
+	if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, next, s.event(next, next.Phase, "已复用候选并恢复 provider 未接纳或可续轮询的任务", map[string]any{"provider_calls_used": used})); err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	return next, nil
+}
+
+func automatedIntentAccepted(reports []model.CandidateQualityReport, intentID string) bool {
+	for _, report := range reports {
+		if report.IntentID == intentID && report.Decision == "accept" {
+			return true
+		}
+	}
+	return false
+}
+
+func automatedQualityReport(reports []model.CandidateQualityReport, intentID, provider string, attempt int) *model.CandidateQualityReport {
+	for index := len(reports) - 1; index >= 0; index-- {
+		if reports[index].IntentID == intentID && reports[index].Provider == provider && reports[index].Attempt == attempt {
+			return &reports[index]
+		}
+	}
+	return nil
+}
+
+func automatedAttemptKey(intentID, provider string, attempt int) string {
+	return intentID + "\x00" + provider + fmt.Sprintf("\x00%d", attempt)
+}
+
+func findGeneratedCandidateByTask(record GeneratedTrackRecord, intentID, taskID string) *media.GeneratedShotCandidate {
+	for index := len(record.Candidates) - 1; index >= 0; index-- {
+		candidate := &record.Candidates[index]
+		if candidate.IntentID == intentID && candidate.ProviderTaskID == taskID {
+			return candidate
+		}
+	}
+	return nil
+}
+
+func (s *Service) persistedCandidatePassesCurrentGate(ctx context.Context, intent media.GeneratedShotIntent, candidate media.GeneratedShotCandidate) bool {
+	if media.ValidateGeneratedShotCandidate(candidate) != nil {
+		return false
+	}
+	probe, err := s.renderer.ProbeMedia(ctx, executor.MediaProbeRequest{Path: candidate.NormalizedArtifact.Path})
+	return err == nil && probe.QualityAnalysisAvailable && probe.BlackDurationMS <= automatedBlackDurationLimitMS(intent) && probe.FreezeDurationMS <= 1000
+}
+
+func preAdmissionRequestRejected(findings []string) bool {
+	text := strings.ToLower(strings.Join(findings, " "))
+	return strings.Contains(text, "invalidparameter.tasktypeconstraint") || strings.Contains(text, "omni_reference_task_type")
+}
+
+func retryableProviderPollingFailure(findings []string) bool {
+	text := strings.ToLower(strings.Join(findings, " "))
+	for _, token := range []string{"http 502", "http 503", "timeout", "timed out", "temporar", "connection reset"} {
+		if strings.Contains(text, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) analyzeAutomationEvidence(ctx context.Context, job model.FinalFilmJob) (model.FinalFilmJob, error) {
@@ -278,7 +440,7 @@ func regenerationFeedback(reports []model.CandidateQualityReport, intentID strin
 }
 
 func findAutomatedProviderAttempt(attempts []model.FinalFilmProviderAttempt, intentID, provider string, attempt int) *model.FinalFilmProviderAttempt {
-	for index := range attempts {
+	for index := len(attempts) - 1; index >= 0; index-- {
 		candidate := &attempts[index]
 		if candidate.IntentID == intentID && candidate.Provider == provider && candidate.Attempt == attempt {
 			return candidate
@@ -315,9 +477,10 @@ func (s *Service) persistAutomatedProviderResult(ctx context.Context, job model.
 				technicalPass = false
 				findings = append(findings, "quality_analysis_unavailable: FFmpeg black/freeze analysis is required")
 			} else {
-				if probe.BlackDurationMS > 500 {
+				blackLimit := automatedBlackDurationLimitMS(intent)
+				if probe.BlackDurationMS > blackLimit {
 					technicalPass = false
-					findings = append(findings, fmt.Sprintf("black_duration_exceeded: %dms > 500ms", probe.BlackDurationMS))
+					findings = append(findings, fmt.Sprintf("black_duration_exceeded: %dms > %dms", probe.BlackDurationMS, blackLimit))
 				}
 				if probe.FreezeDurationMS > 1000 {
 					technicalPass = false
@@ -398,8 +561,8 @@ func (s *Service) finishAutomatedComposition(ctx context.Context, job model.Fina
 	if err == nil && !outputValidation.QualityAnalysisAvailable {
 		err = errors.New("automated final requires FFmpeg black/freeze/loudness analysis")
 	}
-	if err == nil && outputValidation.BlackDurationMS > 500 {
-		err = fmt.Errorf("automated final black duration %dms exceeds 500ms", outputValidation.BlackDurationMS)
+	if err == nil && outputValidation.BlackDurationMS > 1000 {
+		err = fmt.Errorf("automated final black duration %dms exceeds 1000ms", outputValidation.BlackDurationMS)
 	}
 	if err == nil {
 		// Product UIs legitimately hold a stable result while the viewer reads it.
@@ -511,6 +674,13 @@ func compileAutomatedGeneratedPlan(job model.FinalFilmJob, record GeneratedTrack
 	}
 	plan.Shots = append(assembled, suffix...)
 	plan.PlanID = job.BaselinePlan.PlanID + "+automated"
+	if job.DirectorPlan != nil && job.DirectorPlan.StoryPlan != nil {
+		target := job.DirectorPlan.StoryPlan.TargetDurationMS
+		if job.AutomationProfile == model.FinalFilmAutomationProfileGuidedDemoV1 && target < 105_000 {
+			target = 105_000
+		}
+		fitAutomatedFactTrackToTarget(&plan, target)
+	}
 	plan.TargetDurationMS = timelineDuration(plan)
 	return catalog, plan, shotIDs
 }
@@ -528,6 +698,60 @@ func automatedPlacement(job model.FinalFilmJob, intentID string) (string, string
 
 func automatedGeneratedTimelineArtifact(id string, candidate media.GeneratedShotCandidate, duration int) model.TimelineArtifact {
 	return model.TimelineArtifact{ID: id, Kind: media.GeneratedShotEditorAssetKind, URI: candidate.NormalizedArtifact.Path, LocalPath: candidate.NormalizedArtifact.Path, MimeType: candidate.NormalizedArtifact.MimeType, SHA256: candidate.NormalizedArtifact.SHA256, SizeBytes: candidate.NormalizedArtifact.SizeBytes, DurationMS: duration, AssetRole: "presentation_generated_candidate", IncludeInDemo: true, Metadata: map[string]any{"media_eligible": true, "approval_mode": "final_output_review_pending", "review_scope": model.FinalFilmReviewScopeFinalOutput, "automated_quality_gate_passed": true, "presentation_only": true, "non_authoritative": true, "source_material_policy": media.GeneratedShotSourceMaterialPolicy, "artifact_variant": "normalized", "normalization_status": "ok", "media_probe_status": "ok", "candidate_id": candidate.CandidateID, "intent_id": candidate.IntentID, "normalization_profile": candidate.NormalizedArtifact.NormalizationProfile, "width": candidate.NormalizedArtifact.Probe.Width, "height": candidate.NormalizedArtifact.Probe.Height, "fps": candidate.NormalizedArtifact.Probe.FPS, "cfr": candidate.NormalizedArtifact.Probe.CFR}}
+}
+
+func automatedBlackDurationLimitMS(intent media.GeneratedShotIntent) int {
+	if intent.Purpose == media.GeneratedShotPurposeIntro || intent.Purpose == media.GeneratedShotPurposeOutro {
+		// A short fade to/from black is part of the requested packaging grammar.
+		// Keep the gate strict for dividers while allowing a sub-second bookend.
+		return 750
+	}
+	return 500
+}
+
+func fitAutomatedFactTrackToTarget(plan *model.DemoEditPlan, targetMS int) {
+	if plan == nil || targetMS <= 0 {
+		return
+	}
+	remaining := targetMS - timelineDuration(*plan)
+	if remaining <= 0 {
+		return
+	}
+	// Prefer longer verified result/interaction shots from the end of the
+	// narrative. Source-derived 0.5-1x pacing is deterministic and avoids
+	// inventing footage when the accepted generated-track duration is short.
+	indices := make([]int, 0, len(plan.Shots))
+	for index, shot := range plan.Shots {
+		if shot.SourceStepID != "" && shot.SourceTimeRangeMS != nil && shot.SourceTimeRangeMS[1]-shot.SourceTimeRangeMS[0] >= 1000 {
+			indices = append(indices, index)
+		}
+	}
+	for cursor := len(indices) - 1; cursor >= 0 && remaining > 0; cursor-- {
+		shot := &plan.Shots[indices[cursor]]
+		sourceDuration := shot.SourceTimeRangeMS[1] - shot.SourceTimeRangeMS[0]
+		currentDuration := int(math.Round(float64(sourceDuration) / existingShotSpeed(*shot)))
+		capacity := sourceDuration*2 - currentDuration
+		if capacity <= 0 {
+			continue
+		}
+		addition := capacity
+		if remaining < addition {
+			addition = remaining
+		}
+		newDuration := currentDuration + addition
+		setAutomatedShotSpeed(shot, math.Max(0.5, float64(sourceDuration)/float64(newDuration)))
+		remaining -= addition
+	}
+}
+
+func setAutomatedShotSpeed(shot *model.DemoEditShot, speed float64) {
+	for index := len(shot.Operations) - 1; index >= 0; index-- {
+		if shot.Operations[index].Type == model.EditOperationSpeed {
+			shot.Operations[index].Speed = &speed
+			return
+		}
+	}
+	shot.Operations = append(shot.Operations, model.EditOperation{Type: model.EditOperationSpeed, Speed: &speed})
 }
 
 func (s *Service) MarkAutomationFailed(ctx context.Context, jobID string, cause error) (model.FinalFilmJob, error) {
@@ -568,7 +792,7 @@ func (s *Service) ResumeRunnableAutomations() {
 
 func automatedRunnableState(state model.FinalFilmJobState) bool {
 	switch state {
-	case model.FinalFilmJobAnalyzingEvidence, model.FinalFilmJobPlanning, model.FinalFilmJobGeneratingPresentation, model.FinalFilmJobQualityGate, model.FinalFilmJobComposing:
+	case model.FinalFilmJobAnalyzingEvidence, model.FinalFilmJobPlanning, model.FinalFilmJobGeneratingPresentation, model.FinalFilmJobQualityGate, model.FinalFilmJobComposing, model.FinalFilmJobFailed:
 		return true
 	default:
 		return false

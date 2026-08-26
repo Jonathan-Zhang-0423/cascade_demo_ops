@@ -166,7 +166,11 @@ func (s *Service) EnsureEditorSessionFromResultPackage(ctx context.Context, requ
 	}
 	for _, session := range sessions {
 		if session.AssetCatalog.Source.RecordingResultPackageID == resultID {
-			return session, false, nil
+			normalized, normalizeErr := s.ensureEditorFactTrackBindings(ctx, session.SessionID)
+			if normalizeErr != nil {
+				return model.EditorSession{}, false, normalizeErr
+			}
+			return normalized, false, nil
 		}
 	}
 	normalized := request
@@ -174,6 +178,49 @@ func (s *Service) EnsureEditorSessionFromResultPackage(ctx context.Context, requ
 	normalized.ResultPackagePath = ""
 	created, err := s.CreateEditorSessionFromResultPackage(ctx, normalized)
 	return created, err == nil, err
+}
+
+func (s *Service) ensureEditorFactTrackBindings(ctx context.Context, sessionID string) (model.EditorSession, error) {
+	s.editorMu.Lock()
+	defer s.editorMu.Unlock()
+	session, err := s.loadEditorSession(sessionID)
+	if err != nil {
+		return model.EditorSession{}, err
+	}
+	if !normalizeEditorFactTrackBindings(&session) {
+		return session, nil
+	}
+	session.Revision++
+	session.UpdatedAt = time.Now().UTC()
+	if s.editorWorker != nil {
+		if validation, validateErr := s.editorWorker.ValidateEditPlan(ctx, executor.EditPlanValidationRequest{Catalog: session.AssetCatalog, EditPlan: session.EditPlan}); validateErr == nil {
+			session.Validation = &validation
+		}
+	}
+	if err := s.saveEditorSessionUnlocked(session); err != nil {
+		return model.EditorSession{}, err
+	}
+	return session, nil
+}
+
+func normalizeEditorFactTrackBindings(session *model.EditorSession) bool {
+	if session == nil {
+		return false
+	}
+	sourceID := strings.TrimSpace(session.AssetCatalog.Timeline.RecordingArtifactID)
+	if sourceID == "" {
+		return false
+	}
+	changed := false
+	for index := range session.AssetCatalog.Steps {
+		step := &session.AssetCatalog.Steps[index]
+		if !step.Required || len(step.Artifacts) == 1 && step.Artifacts[0] == sourceID {
+			continue
+		}
+		step.Artifacts = []string{sourceID}
+		changed = true
+	}
+	return changed
 }
 
 func (s *Service) ListEditorSessions(_ context.Context) ([]model.EditorSession, error) {
@@ -1135,10 +1182,12 @@ func applyResultPackageToEditorSession(session *model.EditorSession, result *mod
 	for index, step := range steps {
 		startMS, endMS := editorStepRange(step, traceStartedAt, cursor, asset.DurationMS)
 		cursor = maxInt(cursor, endMS)
-		artifactIDs := make([]string, 0, len(step.Artifacts))
-		for _, artifact := range step.Artifacts {
-			artifactIDs = append(artifactIDs, artifact.ID)
-		}
+		// A required timeline step binds the captured fact-track media that can
+		// actually reproduce the step. StepArtifacts are evidence attachments
+		// (screenshots, visual-observation JSON, traces, and similar diagnostics);
+		// those remain available in the catalog/review package where applicable,
+		// but must not become immutable edit-source bindings.
+		artifactIDs := []string{asset.ID}
 		timelineSteps = append(timelineSteps, model.TimelineStep{
 			StepID: step.NodeID, Order: index + 1, Action: step.NodeID, Status: step.Status, Required: true,
 			StartMS: startMS, EndMS: endMS, DurationMS: maxInt(0, endMS-startMS), ObservedState: step.ObservedState, Artifacts: artifactIDs,

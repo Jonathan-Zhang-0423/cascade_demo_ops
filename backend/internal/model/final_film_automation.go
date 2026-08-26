@@ -54,6 +54,7 @@ type FinalFilmProviderAttempt struct {
 	IdempotencyKey string    `json:"idempotency_key"`
 	ProviderTaskID string    `json:"provider_task_id,omitempty"`
 	Status         string    `json:"status"`
+	RecoveryCount  int       `json:"recovery_count,omitempty"`
 	AdmittedAt     time.Time `json:"admitted_at"`
 	CompletedAt    time.Time `json:"completed_at,omitempty"`
 }

@@ -88,8 +88,20 @@ func TestSeedance25CompilerLocksFrameModeToAdaptive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if compiled.Request.Ratio != "adaptive" || compiled.Request.OmniReferenceTaskType != "auto" || compiled.Request.Content[1].Role != "first_frame" {
+	if compiled.Request.Ratio != "adaptive" || compiled.Request.OmniReferenceTaskType != "" || compiled.Request.Content[1].Role != "first_frame" {
 		t.Fatalf("Seedance 2.5 frame request = %+v", compiled.Request)
+	}
+}
+
+func TestSeedance25CompilerOmitsReferenceTaskTypeForTextOnly(t *testing.T) {
+	intent := validGeneratedShotIntent()
+	intent.References = nil
+	compiled, err := (Seedance25GeneratedShotCompiler{}).Compile(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.Request.OmniReferenceTaskType != "" {
+		t.Fatalf("text-only request unexpectedly set omni_reference_task_type=%q", compiled.Request.OmniReferenceTaskType)
 	}
 }
 
