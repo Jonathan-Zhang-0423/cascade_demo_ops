@@ -250,7 +250,15 @@ func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Con
 		}
 	} else {
 		evidenceRefs := resultEvidenceRefs(prepared.SourceResult)
-		if err := emit(experiment.LegExecutionUpdate{Kind: "once_effect_committed", EffectID: "target_submit", StateFingerprintRef: "result:" + prepared.SourceResult.ResultID, ResultEntryRef: entryRef, EvidenceRefs: evidenceRefs}); err != nil {
+		entityCreatedAt := prepared.SourceResult.CreatedAt
+		if entityCreatedAt.IsZero() {
+			entityCreatedAt = a.now().UTC()
+		}
+		if err := emit(experiment.LegExecutionUpdate{
+			Kind: "once_effect_committed", EffectID: "target_submit", StateFingerprintRef: "result:" + prepared.SourceResult.ResultID,
+			ResultEntryRef: entryRef, EvidenceRefs: evidenceRefs, EntityName: request.ProjectName,
+			EntityCreatedAt: entityCreatedAt, EntityTaskRef: sourceJobID,
+		}); err != nil {
 			return err
 		}
 	}
