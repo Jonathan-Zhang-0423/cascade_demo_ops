@@ -849,15 +849,24 @@ func (s *Service) CancelDirectExecution(ctx context.Context, projectID, jobID, r
 		JobID:           jobID,
 		Reason:          strings.TrimSpace(reason),
 	}
+	message, err := encryptDirectJobCancelRequest(request, lease, time.Now().UTC())
+	if err != nil {
+		return status, err
+	}
 	var receipt model.DirectJobCancelReceipt
 	path := "/v1/direct/jobs/" + url.PathEscape(jobID) + "/cancel"
-	if err := s.directDataRequest(ctx, lease, http.MethodPost, path, request, "job_cancel_receipt", &receipt); err != nil {
+	if err := s.directDataRequest(ctx, lease, http.MethodPost, path, message, "job_cancel_receipt", &receipt); err != nil {
 		return status, err
 	}
 	if receipt.ProtocolVersion != model.DirectTransportProtocolVersion || receipt.JobID != jobID || receipt.Status != "canceled" {
 		return status, errors.New("direct Browser Agent cancel receipt binding mismatch")
 	}
 	return s.GetDirectExecutionStatus(ctx, projectID, jobID)
+}
+
+func encryptDirectJobCancelRequest(request model.DirectJobCancelRequest, lease model.DirectPortLease, now time.Time) (model.DirectEncryptedMessage, error) {
+	messageID := "cancel_" + shortID(request.JobID+"|"+request.Reason)
+	return model.EncryptDirectTransportJSON(request, lease, messageID, "job_cancel", model.DirectTransportDirectionUpload, now)
 }
 
 // ReuploadDirectCredential restores the one-time in-memory credential grant

@@ -66,6 +66,37 @@ func TestDirectRequestAdmissionCertaintyUsesAuthoritativeHTTPRejection(t *testin
 	}
 }
 
+func TestDirectJobCancelRequestUsesAuthenticatedUploadEnvelope(t *testing.T) {
+	now := time.Now().UTC()
+	lease := model.DirectPortLease{
+		ProtocolVersion: model.DirectTransportProtocolVersion,
+		LeaseID:         "lease_cancel", InstallationID: "install_cancel",
+		DataURL: "https://browser.example:24443", DataPort: 24443,
+		LeaseToken: "cancel-test-token-with-more-than-thirty-two-bytes-of-entropy",
+		IssuedAt:   now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour),
+		CryptoSuite: model.DirectTransportCryptoSuite,
+	}
+	want := model.DirectJobCancelRequest{
+		ProtocolVersion: model.DirectTransportProtocolVersion,
+		InstallationID:  lease.InstallationID,
+		JobID:           "job_cancel", Reason: "harness repair",
+	}
+	message, err := encryptDirectJobCancelRequest(want, lease, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.MessageType != "job_cancel" || message.Direction != model.DirectTransportDirectionUpload || message.CiphertextBase64 == "" {
+		t.Fatalf("cancel request was not encrypted as a Direct upload: %+v", message)
+	}
+	var got model.DirectJobCancelRequest
+	if err := model.DecryptDirectTransportJSON(message, lease, "job_cancel", model.DirectTransportDirectionUpload, now, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cancel envelope changed the request: got=%+v want=%+v", got, want)
+	}
+}
+
 func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *testing.T) {
 	root := t.TempDir()
 	port := reserveDirectAppTestPort(t)
