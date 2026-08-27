@@ -52,6 +52,19 @@ type localBrowserAgentStageRuntime struct {
 	taskSecretRefs     map[string]bool
 }
 
+func browserVisualObservationLimit(providerCallBudget int) int {
+	if providerCallBudget <= 0 {
+		return 1
+	}
+	if providerCallBudget <= 2 {
+		return providerCallBudget
+	}
+	// A visual observation can consume one structured-output call plus one
+	// JSON-repair fallback. Reserve for that worst case so an odd provider
+	// budget (for example five calls) cannot be exceeded by observations.
+	return max(1, providerCallBudget/2)
+}
+
 func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request BrowserAgentOutlineRunRequest) (model.RecordingResultPackage, error) {
 	if r.service == nil {
 		return model.RecordingResultPackage{}, newRuntimeExecutionError(runtimeErrorOutlineRunnerUnavailable, errors.New("browser-agent runner service is not configured"))
@@ -126,10 +139,7 @@ func (r localBrowserAgentOutlineRunner) Run(ctx context.Context, request Browser
 		workerEnvironment["CASCADE_BROWSER_VISION_OBSERVER_URL"] = visualObserver.URL
 		workerEnvironment["CASCADE_BROWSER_VISION_OBSERVER_TOKEN"] = visualObserver.Token
 		workerEnvironment["CASCADE_BROWSER_VISION_INTERVAL_MS"] = "60000"
-		visualObservationLimit := (visualCallBudget + 1) / 2
-		if visualCallBudget <= 2 {
-			visualObservationLimit = visualCallBudget
-		}
+		visualObservationLimit := browserVisualObservationLimit(visualCallBudget)
 		workerEnvironment["CASCADE_BROWSER_VISION_MAX_CALLS"] = strconv.Itoa(max(1, visualObservationLimit))
 		worker := driver.NewBrowserAgentWorker(r.service.nodeBinaryForExecution(), workerPath, workerEnvironment)
 		factory = func(ctx context.Context, open driver.BrowserAgentWorkerOpenRequest) (browserAgentWorkerSession, driver.BrowserAgentWorkerOpenResult, error) {

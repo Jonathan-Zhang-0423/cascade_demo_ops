@@ -205,3 +205,21 @@ func TestBrowserVisualObserverTwoCallBudgetUsesOneParseableLineCall(t *testing.T
 		t.Fatalf("two-call budget did not use one parseable provider call: result=%+v calls=%d/%d", result, client.multimodalCalls, client.textCalls)
 	}
 }
+
+func TestBrowserVisualObservationLimitReservesJSONRepairFallback(t *testing.T) {
+	tests := []struct {
+		budget int
+		want   int
+	}{
+		{budget: 1, want: 1},
+		{budget: 2, want: 2},
+		{budget: 5, want: 2},
+		{budget: 6, want: 3},
+		{budget: 12, want: 6},
+	}
+	for _, test := range tests {
+		if got := browserVisualObservationLimit(test.budget); got != test.want {
+			t.Fatalf("budget %d: got %d observations, want %d", test.budget, got, test.want)
+		}
+	}
+}

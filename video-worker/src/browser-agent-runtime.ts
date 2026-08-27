@@ -3586,6 +3586,17 @@ function approvedContinuationRouteVerified(
 async function structuralInputValueEquals(page: any, stage: BrowserAgentWorkerStage, expected: unknown, timeout: number): Promise<boolean> {
   const interaction = (stage.interactions || []).find((candidate) => candidate.kind === "fill" || candidate.kind === "select");
   if (!interaction || String(interaction.value ?? "") !== String(expected ?? "")) return false;
+	if (String(interaction.parameters?.action_recipe || "") === "product_repair") {
+		// Product repair inputs are intentionally selector-free: the composer is
+		// rediscovered from the live page so a stale planning locator cannot make
+		// a successful fill look empty. Reuse the same bounded runtime resolver
+		// used by the action and compare the exact visible/editable value.
+		const resolved = await runtimeProductRepairInputTarget(page, stage, []);
+		if (resolved) {
+			const value = await readableEditableValue(resolved.locator, timeout);
+			return value !== undefined && String(value) === String(expected ?? "");
+		}
+	}
   const structural = structuralInputLocator(page, stage, interaction);
   if (!structural) return false;
   const count = await withTimeout(structural.locator.count(), targetProbeTimeoutMS, 0);

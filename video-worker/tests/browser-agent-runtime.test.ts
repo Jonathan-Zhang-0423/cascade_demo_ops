@@ -1331,6 +1331,57 @@ describe("browser agent required validations", () => {
     }]);
   });
 
+  it("verifies a selector-free product repair value on the runtime rediscovered composer", async () => {
+		const expected = "请修复当前项目：初始化棋盘必须能实际工作。保留已有内容，直接更新当前项目。";
+		const stale = { first: () => ({ inputValue: async () => undefined, evaluate: async () => undefined }) };
+		const candidate = {
+			isVisible: async () => true,
+			isEnabled: async () => true,
+			evaluate: async (callback: (element: any) => unknown) => callback({
+				tagName: "TEXTAREA",
+				isContentEditable: false,
+				getAttribute: (name: string) => name === "placeholder" ? "按 Enter 开始构建你的方案..." : null,
+				closest: () => ({}),
+			}),
+			inputValue: async () => expected,
+		};
+		const candidates = {
+			count: async () => 1,
+			nth: () => candidate,
+		};
+		const assertions = await evaluateRequiredValidations({
+			locator: (selector: string) => selector === 'textarea, [contenteditable="true"], input:not([type]), input[type="text"]' ? candidates : stale,
+		}, {
+			id: "stage_repair_fill",
+			order: 1,
+			node_id: "product_repair_input",
+			target_contract: {
+				semantic_id: "product_repair_input",
+				allowed_roles: ["textbox"],
+				allowed_names: ["产品修复输入"],
+				destructive: false,
+			},
+			interactions: [{
+				kind: "fill",
+				value: expected,
+				parameters: { action_recipe: "product_repair" },
+				non_destructive: true,
+			}],
+			validations: [{
+				id: "repair_value",
+				kind: "value_equals",
+				target: { selector: "[data-planning-only='stale']" },
+				expected,
+				required: true,
+			}],
+		} as any);
+		expect(assertions).toEqual([{
+			kind: "required_value_equals:repair_value",
+			passed: true,
+			actual: "structural_input_value_verified",
+		}]);
+	});
+
   it("does not accept a mismatched value or a non-evidence-bound fill selector", async () => {
     const current = {
       count: async () => 1,
