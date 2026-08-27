@@ -2477,17 +2477,15 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			deadline = Math.min(deadline, Date.now() + postRefreshObserveMS);
 			nextCaptureAt = Date.now();
 		}
+		if (await pageShowsCompletedPlaceholderContradiction(session.page, undefined)) {
+			// Some terminal placeholders expose no focusable runtime target at all,
+			// so classify the parent preview shell before surface discovery.
+			return { surface: false, score: false, controls: false };
+		}
 		const target = await interactiveSurfaceTargetOnce(session.page);
 		if (target) {
 			const busyNow = await pageStillBusy(session.page);
 			if (busyNow) sawBusy = true;
-			if (await pageShowsCompletedPlaceholderContradiction(session.page, target.digestTarget)) {
-				// A finished/successful lifecycle claim and an unmistakable builder
-				// placeholder in the runtime surface are two independent structural
-				// facts. Route a same-entity product repair instead of spending
-				// another full observation budget or depending on a visual Provider.
-				return { surface: false, score: false, controls: false };
-			}
 			const surfaceDigest = session.resultSurfaceBaselineDigest ? await visualDigest(session.page, target.digestTarget) : "";
 			const surfaceChanged = Boolean(session.resultSurfaceBaselineDigest && surfaceDigest && surfaceDigest !== session.resultSurfaceBaselineDigest);
 			const existing = session.visionVerdictsByNodeID.get(stage.node_id) || [];
