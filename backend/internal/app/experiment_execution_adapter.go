@@ -1036,11 +1036,24 @@ func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context,
 	plan := request.ObservationPlan
 	warned := false
 	lastProgress := -1
+	consecutiveStatusErrors := 0
+	lastStatus := model.DirectJobStatus{}
 	for {
 		status, err := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
 		if err != nil {
-			return status, &experiment.AdapterError{Code: "direct_status_unavailable", Phase: "waiting_external", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
+			consecutiveStatusErrors++
+			if consecutiveStatusErrors <= directStatusReadRetryLimit(request) {
+				select {
+				case <-ctx.Done():
+					return lastStatus, ctx.Err()
+				case <-time.After(a.pollInterval):
+					continue
+				}
+			}
+			return lastStatus, &experiment.AdapterError{Code: "direct_status_unavailable", Phase: "waiting_external", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{jobID}, Cause: err}
 		}
+		consecutiveStatusErrors = 0
+		lastStatus = status
 		if status.ProgressPercent != lastProgress {
 			lastProgress = status.ProgressPercent
 			_ = emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: normalizedDirectPhase(status), Summary: "异步构建进度已变化", EvidenceRefs: []string{jobID}})
@@ -1095,6 +1108,19 @@ func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context,
 			return status, ctx.Err()
 		case <-time.After(a.pollInterval):
 		}
+	}
+}
+
+func directStatusReadRetryLimit(request experiment.LegExecutionRequest) int {
+	switch request.HarnessProfile {
+	case experiment.HarnessProfileAdaptiveBusinessV2:
+		// Six five-second retries absorb a short gateway/network interruption
+		// without losing the persisted external task binding.
+		return 6
+	case experiment.HarnessProfileAdaptiveBusinessV1:
+		return 2
+	default:
+		return 0
 	}
 }
 

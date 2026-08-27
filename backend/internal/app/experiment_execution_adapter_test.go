@@ -455,6 +455,21 @@ func TestWithRuntimeConfirmedTargetSubmitDoesNotMutateInputSnapshot(t *testing.T
 	}
 }
 
+func TestDirectStatusReadRetryLimitKeepsV2OnSameExternalTask(t *testing.T) {
+	request := experiment.LegExecutionRequest{HarnessProfile: experiment.HarnessProfileAdaptiveBusinessV2}
+	if got := directStatusReadRetryLimit(request); got != 6 {
+		t.Fatalf("v2 direct status retry limit = %d", got)
+	}
+	request.HarnessProfile = experiment.HarnessProfileAdaptiveBusinessV1
+	if got := directStatusReadRetryLimit(request); got != 2 {
+		t.Fatalf("v1 direct status retry limit = %d", got)
+	}
+	request.HarnessProfile = "legacy"
+	if got := directStatusReadRetryLimit(request); got != 0 {
+		t.Fatalf("legacy direct status retry limit = %d", got)
+	}
+}
+
 func TestAdaptiveTransportWaitDoesNotPreemptWorkerProgressWindow(t *testing.T) {
 	request := experiment.LegExecutionRequest{
 		HarnessProfile:  experiment.HarnessProfileAdaptiveBusinessV1,
