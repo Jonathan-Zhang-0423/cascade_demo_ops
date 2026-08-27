@@ -63,6 +63,9 @@ describe("browser visual polling terminal evidence", () => {
 			"Task completed successfully.",
 			"Welcome to the finished customer portal.",
 		)).toBe(false);
+		const portalText = "Task completed successfully. Welcome! Start building your project here.";
+		expect(completedPlaceholderContradiction(portalText, "")).toBe(false);
+		expect(completedPlaceholderContradiction(portalText, portalText)).toBe(true);
 	});
 
 	it("spends the final visual call only after the business process becomes idle", () => {

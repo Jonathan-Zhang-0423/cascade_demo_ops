@@ -2551,7 +2551,11 @@ async function waitForPlayableSurfaceWithVisualObservation(
 async function pageShowsCompletedPlaceholderContradiction(page: any, surface: any): Promise<boolean> {
 	const pageText = await page.evaluate(() => String((globalThis as any).document?.body?.innerText || "")).catch(() => "");
 	const surfaceText = await surface?.evaluate?.((element: any) => String(element?.innerText || element?.textContent || "")).catch(() => "") || "";
-	return completedPlaceholderContradiction(pageText, surfaceText);
+	// Portals frequently host the preview in an iframe or canvas while the
+	// placeholder copy belongs to the parent preview shell. Include both
+	// runtime regions; the marker remains deliberately narrow and still needs
+	// an independent completed/succeeded lifecycle claim.
+	return completedPlaceholderContradiction(pageText, `${surfaceText} ${pageText}`);
 }
 
 export function completedPlaceholderContradiction(pageText: string, surfaceText: string): boolean {
