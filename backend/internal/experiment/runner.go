@@ -32,6 +32,7 @@ type LegExecutionRequest struct {
 	HarnessProfile      string
 	RunStartedAt        time.Time
 	ProductRepairRounds int
+	EntryPhase          string
 }
 
 type LegExecutionUpdate struct {
@@ -117,6 +118,7 @@ func (r *Runner) RunLeg(ctx context.Context, runID, legID string, adapter LegExe
 		return Run{}, errors.New("experiment leg was not found")
 	}
 	leg := run.Legs[index]
+	entryPhase := leg.Phase
 	if leg.State == RunStateCreated {
 		run, err = r.service.TransitionLeg(ctx, runID, LegTransitionRequest{ExpectedRevision: run.Revision, LegID: legID, State: RunStateQueued, Phase: "adapter_admitted", EventType: "module_admitted", Summary: "执行与录制模块已通过能力门禁"})
 		if err != nil {
@@ -139,6 +141,7 @@ func (r *Runner) RunLeg(ctx context.Context, runID, legID string, adapter LegExe
 		HarnessProfile:      run.HarnessProfile,
 		RunStartedAt:        run.CreatedAt,
 		ProductRepairRounds: leg.ProductRepairRounds,
+		EntryPhase:          entryPhase,
 	}
 	emit := func(update LegExecutionUpdate) error {
 		current, getErr := r.service.GetRun(ctx, runID)

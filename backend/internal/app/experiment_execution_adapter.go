@@ -58,6 +58,9 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		}
 		status, err := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
 		if err == nil && status.Status == "failed" && isAdaptiveExperimentHarness(request.HarnessProfile) {
+			if adaptiveExplicitReconciliationRequested(request) {
+				return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
+			}
 			if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
 				if failedResult, resultErr := a.service.GetDirectResult(ctx, projectID, jobID); resultErr == nil {
 					if _, repairable := adaptiveFailedCapabilityScore(request, failedResult); repairable {
@@ -234,6 +237,10 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		return err
 	}
 	return a.completeDirectLeg(ctx, request, prepared.State.ProjectID, jobID, status, true, emit)
+}
+
+func adaptiveExplicitReconciliationRequested(request experiment.LegExecutionRequest) bool {
+	return request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 && strings.TrimSpace(request.EntryPhase) == "reconcile_observed_state"
 }
 
 // A Direct task can cross from running to failed between the preflight status

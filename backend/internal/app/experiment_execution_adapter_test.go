@@ -595,6 +595,26 @@ func TestAdaptiveWaitFailureKeepsObservedStateReconciliationRaceClosed(t *testin
 	}
 }
 
+func TestAdaptiveExplicitReconciliationOutranksExhaustedRepairResult(t *testing.T) {
+	request := experiment.LegExecutionRequest{
+		HarnessProfile:      experiment.HarnessProfileAdaptiveBusinessV2,
+		EntryPhase:          "reconcile_observed_state",
+		ProductRepairRounds: 3,
+	}
+	if !adaptiveExplicitReconciliationRequested(request) {
+		t.Fatal("explicit failed-run reconciliation was lost behind the exhausted repair result")
+	}
+	request.EntryPhase = "resume_observe_only"
+	if adaptiveExplicitReconciliationRequested(request) {
+		t.Fatal("ordinary checkpoint resume was mistaken for an explicit reconciliation revision")
+	}
+	request.EntryPhase = "reconcile_observed_state"
+	request.HarnessProfile = experiment.HarnessProfileAdaptiveBusinessV1
+	if adaptiveExplicitReconciliationRequested(request) {
+		t.Fatal("legacy adaptive profile unexpectedly changed reconciliation semantics")
+	}
+}
+
 func TestAdaptiveRuntimeFailureRetryIsLimitedToPreBrowserInfrastructure(t *testing.T) {
 	for _, code := range []string{runtimeErrorVideoWorkerMissing, runtimeErrorNodeMissing, "browser_agent_session_start_failed"} {
 		if !adaptiveRetryableRuntimeFailure(code) {
