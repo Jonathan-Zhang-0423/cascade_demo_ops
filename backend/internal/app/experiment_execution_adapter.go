@@ -86,6 +86,14 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		if err == nil && status.Status != "completed" {
 			status, err = a.waitForDirectResult(ctx, projectID, jobID, request, emit)
 		}
+		if err == nil && adaptiveRepairableFailedDirectResult(request, status, func() (model.RecordingResultPackage, error) {
+			return a.service.GetDirectResult(ctx, projectID, jobID)
+		}) {
+			// The job may cross running -> failed inside waitForDirectResult. Treat
+			// that race exactly like a failure observed by the initial status read:
+			// materialize the proof and enter the bounded same-entity repair loop.
+			return a.completeDirectLeg(ctx, request, projectID, jobID, status, false, emit)
+		}
 		if adaptiveWaitResultNeedsReconciliation(request, status, err) {
 			return a.reconcileFailedDirectLeg(ctx, request, projectID, jobID, emit)
 		}
@@ -935,6 +943,18 @@ func adaptiveFailedCapabilityScore(request experiment.LegExecutionRequest, resul
 		return model.CapabilityScore{}, false
 	}
 	return model.ScoreCapabilities(results), true
+}
+
+func adaptiveRepairableFailedDirectResult(request experiment.LegExecutionRequest, status model.DirectJobStatus, loadResult func() (model.RecordingResultPackage, error)) bool {
+	if status.Status != "failed" || request.HarnessProfile != experiment.HarnessProfileAdaptiveBusinessV2 || loadResult == nil {
+		return false
+	}
+	result, err := loadResult()
+	if err != nil {
+		return false
+	}
+	_, repairable := adaptiveFailedCapabilityScore(request, result)
+	return repairable
 }
 
 func checkpointHasConfirmedTargetSubmit(checkpoint *experiment.Checkpoint) bool {

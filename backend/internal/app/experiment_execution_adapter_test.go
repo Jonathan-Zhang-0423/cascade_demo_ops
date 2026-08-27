@@ -351,6 +351,44 @@ func TestAdaptiveV2ActionProofFailureRoutesToSameEntityProductRepair(t *testing.
 	}
 }
 
+func TestAdaptiveV2RepairableFailureAfterWaitIsMaterialized(t *testing.T) {
+	request := experiment.LegExecutionRequest{
+		HarnessProfile: experiment.HarnessProfileAdaptiveBusinessV2,
+		Checkpoint: &experiment.Checkpoint{
+			ResultEntryRef: "direct:project-one:job-original",
+			OnceEffects:    []experiment.OnceEffectRecord{{EffectID: "target_submit", Status: "confirmed"}},
+		},
+		InteractionPlan: experiment.InteractionPlan{Steps: []experiment.InteractionStep{
+			{StepID: "surface_ready", ReplayPolicy: experiment.ReplayObserveOnly, CapabilityLayer: "core", CapabilityScore: 20},
+		}},
+	}
+	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{
+		FailedNodeID: "business_stage_contract_experiment_interaction_surface_ready",
+		Error:        model.AgentError{Code: "outcome_verification_failed"},
+	}}
+	loads := 0
+	load := func() (model.RecordingResultPackage, error) {
+		loads++
+		return result, nil
+	}
+	if !adaptiveRepairableFailedDirectResult(request, model.DirectJobStatus{Status: "failed"}, load) {
+		t.Fatal("a repairable running-to-failed transition was not routed to result materialization")
+	}
+	if loads != 1 {
+		t.Fatalf("failed result load count = %d, want 1", loads)
+	}
+	if adaptiveRepairableFailedDirectResult(request, model.DirectJobStatus{Status: "running"}, load) {
+		t.Fatal("a nonterminal status was incorrectly routed to failed result materialization")
+	}
+	if loads != 1 {
+		t.Fatalf("nonterminal status loaded the result unexpectedly: %d", loads)
+	}
+	request.HarnessProfile = experiment.HarnessProfileAdaptiveBusinessV1
+	if adaptiveRepairableFailedDirectResult(request, model.DirectJobStatus{Status: "failed"}, load) {
+		t.Fatal("v1 compatibility path was changed by the v2 race fix")
+	}
+}
+
 func TestAdaptiveV2RetriesOnlySameEntityRepairFailuresBeforeSubmitEffect(t *testing.T) {
 	request := experiment.LegExecutionRequest{HarnessProfile: experiment.HarnessProfileAdaptiveBusinessV2, ProductRepairRounds: 1}
 	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{
