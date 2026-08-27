@@ -1175,6 +1175,48 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     }));
   });
 
+  it("binds a visible component label when its authoritative native checkbox is hidden", async () => {
+		const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+		const hiddenInput = { isChecked: async () => true };
+		const label = {
+			isVisible: async () => true,
+			locator: () => ({ count: async () => 1, first: () => hiddenInput }),
+			evaluate: async () => ({ role: "checkbox", localText: "计划", primary: true }),
+		};
+		const page = {
+			getByRole: () => absent,
+			getByTestId: () => absent,
+			getByLabel: () => absent,
+			getByText: () => absent,
+			locator: (selector: string) => selector === "label"
+				? { count: async () => 1, nth: () => label }
+				: { count: async () => 1, nth: () => ({ isVisible: async () => false }) },
+		};
+		const attempts: BrowserTargetResolutionAttempt[] = [];
+		const stage = {
+			id: "stage_mode",
+			stage_kind: "mode_selection",
+			order: 2,
+			node_id: "configure_mode",
+			target_contract: {
+				semantic_id: "mode_control",
+				allowed_roles: ["checkbox", "switch", "radio"],
+				allowed_names: ["计划", "Plan"],
+				destructive: false,
+			},
+			interactions: [{ kind: "click", parameters: { action_recipe: "configure_boolean", desired_checked: "false" }, non_destructive: true }],
+		};
+
+		const resolved = await resolveTarget(page, stage, stage.interactions[0], false, attempts);
+		expect(resolved.strategy).toBe("runtime_boolean_configuration");
+		expect(resolved.locator).toBe(label);
+		expect(attempts).toContainEqual(expect.objectContaining({
+			strategy: "runtime_boolean_configuration",
+			candidate_count: 1,
+			outcome: "resolved",
+		}));
+	});
+
   it("rejects ambiguous unnamed boolean controls even when both local labels match", async () => {
     const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
     const toggles = ["计划", "计划模式"].map((localText) => ({

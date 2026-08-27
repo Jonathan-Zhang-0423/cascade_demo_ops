@@ -1371,7 +1371,12 @@ async function executeInteraction(
 		const actual = await booleanControlState(resolved.locator);
 		if (actual === undefined) throw new Error(`browser_agent_boolean_configuration_state_unavailable: ${stage.node_id}`);
 		const desired = booleanParameter(interaction.parameters, "desired_checked", false);
-		if (actual !== desired) await resolved.locator.click({ timeout });
+		if (actual !== desired) {
+			await resolved.locator.click({ timeout });
+			if (!await waitForBooleanControlState(resolved.locator, desired, Math.min(timeout, 2_000))) {
+				throw new Error(`browser_agent_boolean_configuration_not_applied: ${stage.node_id}`);
+			}
+		}
 	} else if (recipe === "continue_execution" && resolved.strategy === "runtime_execution_confirmation_input") {
 		const value = await runtimeContinuationConfirmationValue(session.page, interaction);
 		await resolved.locator.fill(value, { timeout });
@@ -1698,6 +1703,17 @@ async function runtimeContinuationConfirmationValue(page: any, interaction: Brow
 async function booleanControlState(locator: any): Promise<boolean | undefined> {
 	const checked = await locator.isChecked?.().catch(() => undefined);
 	if (typeof checked === "boolean") return checked;
+	// Component libraries commonly hide the native input and expose a visible
+	// label as the only actionable geometry. Preserve the native boolean as the
+	// state authority while allowing that label to be the interaction target.
+	const nested = locator.locator?.('input[type="checkbox"], input[type="radio"]');
+	if (nested) {
+		const nestedCount = Math.min(await withTimeout(nested.count(), targetProbeTimeoutMS, 0), 2);
+		if (nestedCount === 1) {
+			const nestedChecked = await nested.first().isChecked?.().catch(() => undefined);
+			if (typeof nestedChecked === "boolean") return nestedChecked;
+		}
+	}
 	const value = await locator.getAttribute?.("aria-checked").catch(() => null);
 	if (value === "true") return true;
 	if (value === "false") return false;
@@ -1707,7 +1723,25 @@ async function booleanControlState(locator: any): Promise<boolean | undefined> {
 	const dataState = String(await locator.getAttribute?.("data-state").catch(() => "") || "").toLowerCase();
 	if (dataState === "checked" || dataState === "on") return true;
 	if (dataState === "unchecked" || dataState === "off") return false;
+	const associatedNativeState = await locator.evaluate?.((element: any) => {
+		const native = element?.matches?.('input[type="checkbox"], input[type="radio"]')
+			? element
+			: (element?.control?.matches?.('input[type="checkbox"], input[type="radio"]')
+				? element.control
+				: element?.querySelector?.('input[type="checkbox"], input[type="radio"]'));
+		return native && typeof native.checked === "boolean" ? native.checked : undefined;
+	}).catch(() => undefined);
+	if (typeof associatedNativeState === "boolean") return associatedNativeState;
 	return undefined;
+}
+
+async function waitForBooleanControlState(locator: any, desired: boolean, timeoutMS: number): Promise<boolean> {
+	const deadline = Date.now() + Math.max(100, timeoutMS);
+	do {
+		if (await booleanControlState(locator) === desired) return true;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	} while (Date.now() < deadline);
+	return false;
 }
 
 // Some component libraries render a checked control without wiring its nearby
@@ -1756,6 +1790,42 @@ async function runtimeBooleanConfigurationTarget(
 			transition_feasibility: 1,
 		});
 		if (semantic > 0) candidates.push({ locator: item, score });
+	}
+	// If the native input is intentionally hidden, bind its one visible label.
+	// This remains a boolean-control path: the label must own exactly one native
+	// checkbox/radio, expose a readable approved local label, and provide the
+	// visible click geometry. It is not a generic text or primary-button fallback.
+	if (candidates.length === 0) {
+		const labels = page.locator('label');
+		const labelCount = Math.min(await withTimeout(labels.count(), targetProbeTimeoutMS, 0), 32);
+		for (let index = 0; index < labelCount; index += 1) {
+			const label = labels.nth(index);
+			if (!await withTimeout(label.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
+			if (await booleanControlState(label) === undefined) continue;
+			const metadata = await withTimeout(label.evaluate((element: any) => {
+				const native = element?.control?.matches?.('input[type="checkbox"], input[type="radio"]')
+					? element.control
+					: element?.querySelector?.('input[type="checkbox"], input[type="radio"]');
+				const type = String(native?.getAttribute?.("type") || "").toLowerCase();
+				return {
+					role: type === "radio" ? "radio" : type === "checkbox" ? "checkbox" : "",
+					localText: String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 240),
+					primary: Boolean(element.closest?.('form, [role="dialog"], dialog, [aria-modal="true"], main, article, section, [role="main"], [role="region"]')),
+				};
+			}), targetProbeTimeoutMS, { role: "", localText: "", primary: false });
+			if (!allowedRoles.has(metadata.role) || forbiddenName(metadata.localText, stage.target_contract.forbidden_names || [])) continue;
+			const normalizedContext = normalizeElementName(metadata.localText);
+			const semantic = allowedNames.some((name) => normalizedContext === name || normalizedContext.includes(name)) ? 1 : 0;
+			if (semantic <= 0) continue;
+			const score = adaptiveTargetCandidateScore({
+				role_state: 1,
+				semantic,
+				container_context: metadata.primary ? 1 : .4,
+				uniqueness: 0,
+				transition_feasibility: 1,
+			});
+			candidates.push({ locator: label, score });
+		}
 	}
 	for (const candidate of candidates) candidate.score += candidates.length === 1 ? .15 : 0;
 	candidates.sort((left, right) => right.score - left.score);
