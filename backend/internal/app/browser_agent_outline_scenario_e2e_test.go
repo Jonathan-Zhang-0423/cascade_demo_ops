@@ -138,7 +138,7 @@ func TestControlledOutlineScenarioPackagesRunCompleteServerPath(t *testing.T) {
 		expectedAfter  string
 		stageCount     int
 	}{
-		{"selector_alternative_repair", controlledOutlineSelectorRepairHandler, controlledOutlineSelectorRepairPackage, "script_outline.stages[].components[].selector", "", "testid:current-confirm-action", 2},
+		{"selector_alternative_repair", controlledOutlineSelectorRepairHandler, controlledOutlineSelectorRepairPackage, "script_outline.stages[].components[].selector", "testid:stale-confirm-action", "testid:current-confirm-action", 2},
 		{"busy_page_wait_repair", controlledOutlineBusyWaitRepairHandler, controlledOutlineBusyWaitRepairPackage, "script_outline.stages[].wait_conditions", "wait_after_entry_at_least_250ms", "wait_after_entry_at_least_1250ms", 2},
 	}
 	for _, tc := range repairCases {

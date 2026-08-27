@@ -212,9 +212,13 @@ func validateBrowserAgentEvidenceMaster(ctx context.Context, service DeliveryRen
 	if !probe.FFProbeAvailable {
 		return errors.New("recording_evidence_probe_unavailable: ffprobe is required before editing browser evidence")
 	}
-	const expectedWidth, expectedHeight = 2560, 1440
+	// Browser evidence keeps a 2K CSS viewport for stable layout/geometry while
+	// the Worker records a capped 1080p performance profile. Requiring the CSS
+	// viewport dimensions from the encoded WebM would reject every legitimate
+	// capped capture and force expensive long-form 2K encoding.
+	const expectedWidth, expectedHeight = 1920, 1080
 	if probe.Width != expectedWidth || probe.Height != expectedHeight {
-		return fmt.Errorf("recording_evidence_resolution_mismatch: got=%dx%d want=%dx%d; final 2K upscaling is not accepted as 2K source evidence", probe.Width, probe.Height, expectedWidth, expectedHeight)
+		return fmt.Errorf("recording_evidence_resolution_mismatch: got=%dx%d want=%dx%d; encoded evidence must match the 1080p capture profile", probe.Width, probe.Height, expectedWidth, expectedHeight)
 	}
 	if probe.DurationMS <= 0 || strings.TrimSpace(probe.VideoCodec) == "" {
 		return fmt.Errorf("recording_evidence_not_decodable: codec=%q duration_ms=%d", probe.VideoCodec, probe.DurationMS)

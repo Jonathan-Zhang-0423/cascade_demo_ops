@@ -114,7 +114,10 @@ func (s *Service) RunBrowserAgentAcceptance(ctx context.Context) (BrowserAgentAc
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return BrowserAgentAcceptanceView{}, err
 	}
-	runCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	// The fixed acceptance now executes six complete browser, recording, and
+	// render scenarios. Keep a bounded wall clock, but allow the final scenario
+	// to finish instead of canceling an otherwise healthy suite at three minutes.
+	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	report, err := s.runProtocolBrowserAgentAcceptance(runCtx, fixturePath)
 	if err != nil {
@@ -199,7 +202,7 @@ func readBrowserAgentAcceptanceReport(path string) (BrowserAgentAcceptanceReport
 func (s *Service) runProtocolBrowserAgentAcceptance(ctx context.Context, fixturePath string) (BrowserAgentAcceptanceReport, error) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Acceptance Dashboard</title></head><body><main aria-label="Dashboard"><h1>Dashboard</h1><button type="button" data-testid="invite-member">Invite teammate</button><p id="status">Waiting</p></main><script>document.querySelector('[data-testid="invite-member"]').addEventListener('click',()=>document.querySelector('#status').textContent='Invite flow starts')</script></body></html>`))
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Acceptance Dashboard</title></head><body><main aria-label="Dashboard"><h1>Dashboard</h1><button type="button" data-testid="invite-member">Invite teammate</button><p data-testid="invite-dialog" hidden>Invite flow starts</p></main><script>document.querySelector('[data-testid="invite-member"]').addEventListener('click',()=>document.querySelector('[data-testid="invite-dialog"]').hidden=false)</script></body></html>`))
 	}))
 	defer server.Close()
 
@@ -354,6 +357,14 @@ func protocolAcceptancePackage(fixturePath string, baseURL string) (model.Client
 	}
 	if err := normalizeClientExecutionPackageForUpload(&pkg); err != nil {
 		return model.ClientExecutionPackage{}, err
+	}
+	// The protocol gate verifies execution, recording, dual-profile rendering,
+	// probing, packaging, and acknowledgement. A one-minute delivery target adds
+	// minutes of redundant encoding to every test without exercising another
+	// protocol branch, so the acceptance-only clone uses a compact render.
+	pkg.RecordingRunSpec.Timeline.TargetDurationSec = 6
+	if pkg.ExecutableScriptBundle != nil && pkg.ExecutableScriptBundle.PlanJSON != nil {
+		pkg.ExecutableScriptBundle.PlanJSON.RecordingRunSpec.Timeline.TargetDurationSec = 6
 	}
 	// Session entry must stay inside the approved route scope: the worker opens
 	// the session at the product URL before executing the first stage, so the

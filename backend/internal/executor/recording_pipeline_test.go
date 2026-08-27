@@ -546,7 +546,7 @@ func TestValidateBrowserAgentEvidenceMasterRejectsUpscaledLowResolutionSource(t 
 	}
 }
 
-func TestValidateBrowserAgentEvidenceMasterAcceptsCanonical2KSource(t *testing.T) {
+func TestValidateBrowserAgentEvidenceMasterAcceptsCanonical1080Capture(t *testing.T) {
 	pkg := sampleClientExecutionPackageForExecutorTest(t)
 	pkg.ExecutableScriptBundle.ScriptManifest.Runtime = model.ExecutableScriptRuntimeBrowserAgentOutlineV1
 	rawPath := filepath.Join(t.TempDir(), "recording.webm")
@@ -556,10 +556,10 @@ func TestValidateBrowserAgentEvidenceMasterAcceptsCanonical2KSource(t *testing.T
 	}}}
 	service := &fakeRecordingRenderService{probeResult: MediaProbeResult{
 		Path: rawPath, Format: "matroska,webm", VideoCodec: "vp8", DurationMS: 1000,
-		Width: 2560, Height: 1440, FPS: 25, PixelFormat: "yuv420p", FFProbeAvailable: true,
+		Width: 1920, Height: 1080, FPS: 25, PixelFormat: "yuv420p", FFProbeAvailable: true,
 	}}
 	if err := validateBrowserAgentEvidenceMaster(t.Context(), service, &pkg, recording); err != nil {
-		t.Fatalf("expected canonical 2K Browser Agent evidence to pass, got %v", err)
+		t.Fatalf("expected canonical 1080p Browser Agent capture to pass, got %v", err)
 	}
 }
 
