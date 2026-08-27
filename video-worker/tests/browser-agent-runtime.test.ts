@@ -128,9 +128,16 @@ describe("same-entity product repair target confidence", () => {
 			getAttribute: async () => null,
 			innerText: async () => "",
 		};
+		const auxiliaryButton = (title: string) => ({
+			isVisible: async () => true,
+			isEnabled: async () => true,
+			getAttribute: async (name: string) => name === "title" ? title : null,
+			innerText: async () => "",
+		});
+		const localButtons = [auxiliaryButton("切换到规划模式"), auxiliaryButton("润色"), button];
 		const buttons = {
-			count: async () => 1,
-			nth: () => button,
+			count: async () => localButtons.length,
+			nth: (index: number) => localButtons[index],
 		};
 		const actionContainer = {
 			count: async () => 1,

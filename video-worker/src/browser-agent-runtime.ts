@@ -1809,10 +1809,13 @@ async function runtimeProductRepairSubmitTarget(page: any, stage: BrowserAgentWo
 		const item = buttons.nth(index);
 		if (!await item.isVisible().catch(() => false) || !await item.isEnabled().catch(() => false)) continue;
 		const name = String(await item.getAttribute("aria-label").catch(() => "") || await item.getAttribute("title").catch(() => "") || await item.innerText().catch(() => "")).trim();
-		// An icon-only control can legitimately be the sole action beside the
-		// unique composer. Reject named abort actions, but let uniqueness and the
-		// local composer context carry an unnamed button's confidence score.
-		if (name && structuralAbortActionName(name)) continue;
+		// An icon-only control can legitimately be the sole submit action beside
+		// the unique composer. Exclude named configuration and authoring helpers
+		// (mode switches, polish/rewrite, attachments) before applying the normal
+		// confidence margin; otherwise those sibling controls make a local send
+		// button look ambiguous even though they cannot cause the requested state
+		// transition.
+		if (name && (structuralAbortActionName(name) || structuralComposerAuxiliaryActionName(name))) continue;
 		const semantic = /send|submit|apply|update|run|start|发送|提交|应用|更新|执行|开始/.test(name.toLowerCase()) ? 1 : .7;
 		candidates.push({ locator: item, score: runtimeProductRepairTargetScore({ roleState: 1, semantic, containerContext: 1, uniqueness: 0, transitionFeasibility: 1 }) });
 	}
@@ -1874,6 +1877,12 @@ function structuralAbortActionName(value: string): boolean {
   if (["取消", "关闭", "返回", "放弃"].some((token) => normalized.includes(token))) return true;
   if (/(?:^|\s)(?:cancel|close|dismiss|back|abort)(?:\s|$)/i.test(normalized)) return true;
   return normalized === "x" || (/^(?:x|×|✕)\s+/u.test(normalized) && normalized.length <= 32);
+}
+
+function structuralComposerAuxiliaryActionName(value: string): boolean {
+	const normalized = normalizeElementName(value);
+	if (["规划", "模式", "润色", "改写", "扩写", "附件", "上传", "文件", "工具", "设置"].some((token) => normalized.includes(token))) return true;
+	return /(?:^|\s)(?:plan(?:ning)?|mode|polish|rewrite|enhance|attach(?:ment)?|upload|file|tool|settings?)(?:\s|$)/i.test(normalized);
 }
 
 async function resolveUniqueVisibleStructuralInputTarget(locator: any, strategy: string, contract: BrowserAgentTargetContract, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget | undefined> {
