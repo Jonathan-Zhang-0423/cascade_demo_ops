@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -513,6 +514,29 @@ func TestApproveClientExecutionPackageRebindsConfidenceAfterCredentialGrantExpir
 	})
 	if err != nil || repeated.PackageDigestSHA256 != approved.PackageDigestSHA256 || repeated.ApprovalSubjectDigestSHA256 != approved.ApprovalSubjectDigestSHA256 {
 		t.Fatalf("idempotent approval did not return the same normalized package: repeated=%+v err=%v", repeated, err)
+	}
+}
+
+func TestRenewDirectCredentialGrantsKeepsScopeAndRefreshesEnvelopeTTL(t *testing.T) {
+	now := time.Date(2026, 8, 27, 8, 0, 0, 0, time.UTC)
+	original := []model.CredentialGrant{{
+		GrantID: "grant-login", Kind: "username_password", Purpose: "browser_login",
+		CloudSecretRef: "credential://demo/session", ExpiresAt: now.Add(-time.Minute),
+		AllowedDomains: []string{"app.example.test"}, AllowedOperations: []string{"fill_username", "fill_password", "submit_login"},
+	}}
+	renewed := renewDirectCredentialGrants(original, now)
+	if len(renewed) != 1 || renewed[0].GrantID != original[0].GrantID || renewed[0].CloudSecretRef != original[0].CloudSecretRef {
+		t.Fatalf("credential recovery changed the approved grant identity: %+v", renewed)
+	}
+	if got, want := renewed[0].ExpiresAt, now.Add(45*time.Minute); !got.Equal(want) {
+		t.Fatalf("credential recovery expiry=%s want=%s", got, want)
+	}
+	if !reflect.DeepEqual(renewed[0].AllowedDomains, original[0].AllowedDomains) || !reflect.DeepEqual(renewed[0].AllowedOperations, original[0].AllowedOperations) {
+		t.Fatalf("credential recovery expanded or changed scope: %+v", renewed[0])
+	}
+	renewed[0].AllowedDomains[0] = "mutated.example.test"
+	if original[0].AllowedDomains[0] != "app.example.test" {
+		t.Fatal("credential recovery aliased the persisted grant scope")
 	}
 }
 

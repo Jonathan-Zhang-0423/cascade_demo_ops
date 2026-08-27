@@ -881,6 +881,12 @@ func (s *Service) ReuploadDirectCredential(ctx context.Context, projectID, jobID
 		}
 		grants = append(grants, draft.Package.CredentialGrants...)
 	}
+	// A credential envelope is deliberately memory-only on the Worker. Long
+	// external builds can outlive the original 45-minute envelope even though
+	// the user-authorized experiment and its bound job are still active. Reissue
+	// only the same opaque grant identity and scope for that exact active job;
+	// the secret value is read afresh below and is never persisted here.
+	grants = renewDirectCredentialGrants(grants, time.Now().UTC())
 	build := ClientExecutionPackageBuild{PackageDigestSHA256: run.PackageDigestSHA256}
 	build.Package.PackageID = run.PackageID
 	build.Package.CredentialGrants = grants
@@ -898,6 +904,17 @@ func (s *Service) ReuploadDirectCredential(ctx context.Context, projectID, jobID
 		return accepted, err
 	}
 	return accepted, nil
+}
+
+func renewDirectCredentialGrants(grants []model.CredentialGrant, now time.Time) []model.CredentialGrant {
+	renewed := append([]model.CredentialGrant(nil), grants...)
+	expiresAt := now.UTC().Add(45 * time.Minute)
+	for index := range renewed {
+		renewed[index].AllowedDomains = append([]string(nil), renewed[index].AllowedDomains...)
+		renewed[index].AllowedOperations = append([]string(nil), renewed[index].AllowedOperations...)
+		renewed[index].ExpiresAt = expiresAt
+	}
+	return renewed
 }
 
 func (s *Service) GetDirectResult(ctx context.Context, projectID, jobID string) (model.RecordingResultPackage, error) {
