@@ -1193,7 +1193,24 @@ func directObservationTransportTimeout(request experiment.LegExecutionRequest) t
 func (a *appExperimentExecutionAdapter) downloadDirectArtifacts(ctx context.Context, projectID, jobID string, artifacts []model.DirectArtifact) ([]CloudDeliverableDownloadResult, error) {
 	downloads := make([]CloudDeliverableDownloadResult, 0, len(artifacts))
 	for _, artifact := range artifacts {
-		download, err := a.service.DownloadDirectArtifact(ctx, projectID, DirectArtifactDownloadRequest{JobID: jobID, Artifact: artifact})
+		var download CloudDeliverableDownloadResult
+		var err error
+		for attempt := 0; attempt < 3; attempt++ {
+			download, err = a.service.DownloadDirectArtifact(ctx, projectID, DirectArtifactDownloadRequest{JobID: jobID, Artifact: artifact})
+			if err == nil {
+				break
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if attempt < 2 {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
+				}
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
