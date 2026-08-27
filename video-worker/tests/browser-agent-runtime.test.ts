@@ -850,6 +850,83 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     expect(attempts.some((attempt) => attempt.strategy === "active_modal_unique_primary_action")).toBe(false);
   });
 
+  it("binds one unnamed boolean control from its approved local label context", async () => {
+    const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+    const toggle = {
+      isVisible: async () => true,
+      isDisabled: async () => false,
+      isChecked: async () => true,
+      evaluate: async () => ({ role: "checkbox", localText: "计划", primary: true }),
+    };
+    const page = {
+      getByRole: () => absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+      locator: () => ({ count: async () => 1, nth: () => toggle }),
+    };
+    const attempts: BrowserTargetResolutionAttempt[] = [];
+    const stage = {
+      id: "stage_mode",
+      stage_kind: "mode_selection",
+      order: 2,
+      node_id: "configure_mode",
+      target_contract: {
+        semantic_id: "mode_control",
+        allowed_roles: ["checkbox", "switch", "radio"],
+        allowed_names: ["计划", "Plan"],
+        destructive: false,
+      },
+      interactions: [{ kind: "click", parameters: { action_recipe: "configure_boolean", desired_checked: "false" }, non_destructive: true }],
+    };
+
+    const resolved = await resolveTarget(page, stage, stage.interactions[0], false, attempts);
+    expect(resolved.strategy).toBe("runtime_boolean_configuration");
+    expect(attempts).toContainEqual(expect.objectContaining({
+      strategy: "runtime_boolean_configuration",
+      candidate_count: 1,
+      outcome: "resolved",
+    }));
+  });
+
+  it("rejects ambiguous unnamed boolean controls even when both local labels match", async () => {
+    const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+    const toggles = ["计划", "计划模式"].map((localText) => ({
+      isVisible: async () => true,
+      isDisabled: async () => false,
+      isChecked: async () => true,
+      evaluate: async () => ({ role: "checkbox", localText, primary: true }),
+    }));
+    const page = {
+      getByRole: () => absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+      locator: () => ({ count: async () => toggles.length, nth: (index: number) => toggles[index] }),
+    };
+    const attempts: BrowserTargetResolutionAttempt[] = [];
+    const stage = {
+      id: "stage_mode",
+      stage_kind: "mode_selection",
+      order: 2,
+      node_id: "configure_mode",
+      target_contract: {
+        semantic_id: "mode_control",
+        allowed_roles: ["checkbox", "switch", "radio"],
+        allowed_names: ["计划", "Plan"],
+        destructive: false,
+      },
+      interactions: [{ kind: "click", parameters: { action_recipe: "configure_boolean", desired_checked: "false" }, non_destructive: true }],
+    };
+
+    await expect(resolveTarget(page, stage, stage.interactions[0], false, attempts)).rejects.toThrow("browser_agent_target_not_resolved");
+    expect(attempts).toContainEqual(expect.objectContaining({
+      strategy: "runtime_boolean_configuration",
+      candidate_count: 2,
+      outcome: "ambiguous",
+    }));
+  });
+
   it("does not structurally bind a disabled once-effect submit control", async () => {
     const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
     const disabledButton = {

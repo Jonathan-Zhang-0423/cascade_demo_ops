@@ -1482,6 +1482,11 @@ export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, i
     );
     if (resolved) return resolved;
   }
+	const structuralBoolean = await runtimeBooleanConfigurationTarget(page, stage, interaction, attempts);
+	if (structuralBoolean) {
+		seen.add(structuralBoolean.strategy);
+		return structuralBoolean;
+	}
   const structuralSubmit = structuralModalSubmitLocator(page, stage, interaction);
 	if (String(interaction.parameters?.action_recipe || "") === "product_repair_submit") {
 		seen.add("runtime_product_repair_submit");
@@ -1601,7 +1606,72 @@ async function booleanControlState(locator: any): Promise<boolean | undefined> {
 	const value = await locator.getAttribute?.("aria-checked").catch(() => null);
 	if (value === "true") return true;
 	if (value === "false") return false;
+	const pressed = await locator.getAttribute?.("aria-pressed").catch(() => null);
+	if (pressed === "true") return true;
+	if (pressed === "false") return false;
+	const dataState = String(await locator.getAttribute?.("data-state").catch(() => "") || "").toLowerCase();
+	if (dataState === "checked" || dataState === "on") return true;
+	if (dataState === "unchecked" || dataState === "off") return false;
 	return undefined;
+}
+
+// Some component libraries render a checked control without wiring its nearby
+// visible label into the accessibility tree. Bind such controls only when the
+// local label text matches the approved semantic contract and produces one
+// unambiguous candidate. This keeps mode configuration structural without
+// falling back to a modal's primary submit button.
+async function runtimeBooleanConfigurationTarget(
+	page: any,
+	stage: BrowserAgentWorkerStage,
+	interaction: BrowserAgentInteraction,
+	attempts: BrowserTargetResolutionAttempt[],
+): Promise<ResolvedTarget | undefined> {
+	if (String(interaction.parameters?.action_recipe || "") !== "configure_boolean" || stage.target_contract.destructive) return undefined;
+	const allowedRoles = new Set((stage.target_contract.allowed_roles || []).map((entry) => entry.trim().toLowerCase()));
+	if (!["checkbox", "switch", "radio"].some((role) => allowedRoles.has(role))) return undefined;
+	const allowedNames = (stage.target_contract.allowed_names || []).map(normalizeElementName).filter(Boolean);
+	const locator = page.locator('input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="switch"], [role="radio"], [aria-checked], button[aria-pressed], [data-state="checked"], [data-state="unchecked"]');
+	const count = Math.min(await withTimeout(locator.count(), targetProbeTimeoutMS, 0), 32);
+	const candidates: Array<{ locator: any; score: number }> = [];
+	for (let index = 0; index < count; index += 1) {
+		const item = locator.nth(index);
+		if (!await withTimeout(item.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
+		if (await withTimeout(item.isDisabled?.(), targetProbeTimeoutMS, true)) continue;
+		if (await booleanControlState(item) === undefined) continue;
+		const metadata = await withTimeout(item.evaluate((element: any) => {
+			const explicitRole = String(element.getAttribute?.("role") || "").toLowerCase();
+			const type = String(element.getAttribute?.("type") || "").toLowerCase();
+			const role = explicitRole || (type === "radio" ? "radio" : (type === "checkbox" ? "checkbox" : (element.hasAttribute?.("aria-pressed") ? "switch" : "checkbox")));
+			const local = element.closest?.("label") || element.parentElement;
+			const localText = String(local?.innerText || local?.textContent || "").replace(/\s+/g, " ").trim().slice(0, 240);
+			return {
+				role,
+				localText,
+				primary: Boolean(element.closest?.('form, [role="dialog"], dialog, [aria-modal="true"], main, article, section, [role="main"], [role="region"]')),
+			};
+		}), targetProbeTimeoutMS, { role: "", localText: "", primary: false });
+		if (!allowedRoles.has(metadata.role) || forbiddenName(metadata.localText, stage.target_contract.forbidden_names || [])) continue;
+		const normalizedContext = normalizeElementName(metadata.localText);
+		const semantic = allowedNames.some((name) => normalizedContext === name || normalizedContext.includes(name)) ? 1 : 0;
+		const score = adaptiveTargetCandidateScore({
+			role_state: 1,
+			semantic,
+			container_context: metadata.primary ? 1 : .4,
+			uniqueness: 0,
+			transition_feasibility: 1,
+		});
+		if (semantic > 0) candidates.push({ locator: item, score });
+	}
+	for (const candidate of candidates) candidate.score += candidates.length === 1 ? .15 : 0;
+	candidates.sort((left, right) => right.score - left.score);
+	const best = candidates[0];
+	const second = candidates[1];
+	if (!best || !adaptiveTargetCandidateExecutable(Math.min(1, best.score), second ? Math.min(1, second.score) : undefined)) {
+		attempts.push(targetResolutionAttempt("runtime_boolean_configuration", candidates.length, candidates.length === 1, Boolean(best), false, candidates.length === 0 ? "no_candidates" : "ambiguous"));
+		return undefined;
+	}
+	attempts.push(targetResolutionAttempt("runtime_boolean_configuration", candidates.length, true, true, false, "resolved", true, true));
+	return { locator: best.locator, strategy: "runtime_boolean_configuration" };
 }
 
 // A newly opened modal often contains an input that could not have appeared in
