@@ -48,6 +48,38 @@ func (p staticProductSpecPlanner) Generate(context.Context, string) (ProductSpec
 	return p.spec, nil
 }
 
+func TestMergeExperimentAcceptanceFloorKeepsFrozenVisualAndResponsiveBaseline(t *testing.T) {
+	planned := validProductSpecFixture()
+	planned.VisualDirection = VisualDirection{Theme: "generic light theme", Palette: []string{"white"}, Motion: "generic motion"}
+	planned.ResponsiveRequirements = []string{"wide screen"}
+	planned.ForbiddenOutcomes = []string{"broken controls"}
+	floor := validProductSpecFixture()
+	floor.VisualDirection = VisualDirection{Theme: "required dark visual", Palette: []string{"navy", "cyan"}, Motion: "stable short motion"}
+	floor.ResponsiveRequirements = []string{"mobile square layout"}
+	floor.ForbiddenOutcomes = []string{"internal request text"}
+	floor.ObservableAcceptance = append(floor.ObservableAcceptance, AcceptanceCriterion{
+		ID: "accept_visual_floor", Statement: "required visual direction is visible", EvidenceKinds: []string{"visual", "frame"}, Required: true,
+	})
+
+	merged := mergeExperimentAcceptanceFloor(planned, floor)
+	if merged.VisualDirection.Theme != floor.VisualDirection.Theme || strings.Join(merged.VisualDirection.Palette, ",") != "navy,cyan" || merged.VisualDirection.Motion != floor.VisualDirection.Motion {
+		t.Fatalf("frozen visual acceptance floor was lost: %+v", merged.VisualDirection)
+	}
+	if !containsString(merged.ResponsiveRequirements, "wide screen") || !containsString(merged.ResponsiveRequirements, "mobile square layout") {
+		t.Fatalf("responsive floor was not merged: %+v", merged.ResponsiveRequirements)
+	}
+	if !containsString(merged.ForbiddenOutcomes, "broken controls") || !containsString(merged.ForbiddenOutcomes, "internal request text") {
+		t.Fatalf("forbidden outcome floor was not merged: %+v", merged.ForbiddenOutcomes)
+	}
+	foundVisual := false
+	for _, criterion := range merged.ObservableAcceptance {
+		foundVisual = foundVisual || criterion.ID == "accept_visual_floor" && criterion.Required
+	}
+	if !foundVisual {
+		t.Fatal("required visual acceptance criterion was not merged")
+	}
+}
+
 func TestCreateV2RunUsesOneFreshLegAndOriginalSentence(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "experiments")
 	loaded, err := LoadDefinition(root, "2048-v3")

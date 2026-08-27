@@ -165,7 +165,39 @@ func mergeExperimentAcceptanceFloor(planned, floor ProductSpec) ProductSpec {
 			planned.ObservableAcceptance = append(planned.ObservableAcceptance, criterion)
 		}
 	}
+	// A versioned experiment may freeze a required visual and responsive
+	// baseline that a one-sentence planning model cannot infer reliably. Keep
+	// that baseline in the internal acceptance artifact (the downstream builder
+	// still receives only the original user sentence) so visual/product repair
+	// is judged against the experiment users actually authorized.
+	if strings.TrimSpace(floor.VisualDirection.Theme) != "" {
+		planned.VisualDirection.Theme = floor.VisualDirection.Theme
+	}
+	if len(floor.VisualDirection.Palette) > 0 {
+		planned.VisualDirection.Palette = append([]string{}, floor.VisualDirection.Palette...)
+	}
+	if strings.TrimSpace(floor.VisualDirection.Motion) != "" {
+		planned.VisualDirection.Motion = floor.VisualDirection.Motion
+	}
+	planned.ResponsiveRequirements = appendUniqueStrings(planned.ResponsiveRequirements, floor.ResponsiveRequirements)
+	planned.ForbiddenOutcomes = appendUniqueStrings(planned.ForbiddenOutcomes, floor.ForbiddenOutcomes)
 	return planned
+}
+
+func appendUniqueStrings(existing, required []string) []string {
+	result := append([]string{}, existing...)
+	seen := make(map[string]bool, len(result))
+	for _, value := range result {
+		seen[strings.TrimSpace(value)] = true
+	}
+	for _, value := range required {
+		value = strings.TrimSpace(value)
+		if value != "" && !seen[value] {
+			result = append(result, value)
+			seen[value] = true
+		}
+	}
+	return result
 }
 
 func firstNonEmptyHarnessProfile(value string) string {

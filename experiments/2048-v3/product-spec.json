@@ -24,6 +24,7 @@
   ],
   "responsive_requirements": ["桌面视口中主体无需滚动即可看清。", "移动视口中棋盘保持正方形且按钮不遮挡。"],
   "observable_acceptance": [
+    { "id": "accept_visual_direction", "statement": "界面采用深蓝渐变与青紫霓虹层级，动画平滑且没有持续闪烁。", "evidence_kinds": ["visual", "dom"], "required": true },
     { "id": "accept_surface", "statement": "标题、4×4 棋盘、当前分数、最佳分、新游戏、撤销和说明同时可见。", "evidence_kinds": ["aria", "visual"], "required": true },
     { "id": "accept_moves", "statement": "两个不同方向操作均使棋盘区域发生变化。", "evidence_kinds": ["frame", "aria"], "required": true },
     { "id": "accept_merge", "statement": "最多十二次自适应移动内至少完成一次合并并增加分数。", "evidence_kinds": ["visual", "dom"], "required": true },
@@ -33,4 +34,3 @@
   ],
   "forbidden_outcomes": ["不得只输出计划、解释、静态截图或不可交互的占位页面。", "不得在产品界面显示开发标记、请求结构或内部执行信息。"]
 }
-
