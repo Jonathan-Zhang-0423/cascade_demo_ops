@@ -292,8 +292,14 @@ func (a *appExperimentExecutionAdapter) retryAdaptiveRuntimeFailure(ctx context.
 }
 
 func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, emit func(experiment.LegExecutionUpdate) error) error {
-	if sourceResult, resultErr := a.service.GetDirectResult(ctx, projectID, sourceJobID); resultErr == nil && adaptiveSameEntityRepairPackageRetryable(request, sourceResult) {
-		return a.retryAdaptiveSameEntityRepairInput(ctx, request, projectID, sourceJobID, emit)
+	if sourceResult, resultErr := a.service.GetDirectResult(ctx, projectID, sourceJobID); resultErr == nil {
+		if adaptiveSameEntityRepairPackageRetryable(request, sourceResult) {
+			return a.retryAdaptiveSameEntityRepairInput(ctx, request, projectID, sourceJobID, emit)
+		}
+		if parentJobID, ok := a.adaptivePreEffectRepairLineageSource(ctx, request, projectID, sourceJobID); ok {
+			history := a.restoreClosedLoopCaptureHistory(ctx, projectID, parentJobID)
+			return a.executeSameEntityProductRepairRound(ctx, request, projectID, parentJobID, requiredProductRepairScore(request), history, request.ProductRepairRounds, true, emit)
+		}
 	}
 	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "reconcile_observed_state", Summary: "失败诊断显示业务已进入后继实体；正在生成只观察续接包", EvidenceRefs: []string{sourceJobID}}); err != nil {
 		return err
@@ -356,6 +362,52 @@ func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Con
 		return err
 	}
 	return a.completeDirectLeg(ctx, request, projectID, jobID, status, true, emit)
+}
+
+func adaptivePreEffectRepairLineageEligible(request experiment.LegExecutionRequest, currentJobID string, state *orchestrator.CascadeState, parent model.RecordingResultPackage) (string, bool) {
+	if request.HarnessProfile != experiment.HarnessProfileAdaptiveBusinessV2 || request.ProductRepairRounds < 1 || state == nil || state.DesktopCloudRun == nil || state.ExecutableScriptBundle == nil || state.ExecutableScriptBundle.RepairLineage == nil {
+		return "", false
+	}
+	if strings.TrimSpace(state.DesktopCloudRun.CloudJobID) != strings.TrimSpace(currentJobID) {
+		return "", false
+	}
+	parentJobID := strings.TrimSpace(state.ExecutableScriptBundle.RepairLineage.SourceCloudJobID)
+	if parentJobID == "" || parentJobID == strings.TrimSpace(currentJobID) || strings.TrimSpace(parent.CloudJobID) != parentJobID {
+		return "", false
+	}
+	if !adaptiveSameEntityRepairPackageRetryable(request, parent) {
+		return "", false
+	}
+	return parentJobID, true
+}
+
+func (a *appExperimentExecutionAdapter) adaptivePreEffectRepairLineageSource(ctx context.Context, request experiment.LegExecutionRequest, projectID, currentJobID string) (string, bool) {
+	if a == nil || a.service == nil || a.service.states == nil {
+		return "", false
+	}
+	state, err := a.service.states.Load(ctx, projectID)
+	if err != nil || state == nil || state.ExecutableScriptBundle == nil || state.ExecutableScriptBundle.RepairLineage == nil {
+		return "", false
+	}
+	parentJobID := strings.TrimSpace(state.ExecutableScriptBundle.RepairLineage.SourceCloudJobID)
+	if parentJobID == "" {
+		return "", false
+	}
+	parent, err := a.service.getDirectHistoricalResult(ctx, projectID, parentJobID)
+	if err != nil {
+		return "", false
+	}
+	return adaptivePreEffectRepairLineageEligible(request, currentJobID, state, parent)
+}
+
+func requiredProductRepairScore(request experiment.LegExecutionRequest) model.CapabilityScore {
+	missing := make([]string, 0, len(request.InteractionPlan.Steps))
+	for _, step := range request.InteractionPlan.Steps {
+		if strings.TrimSpace(step.StepID) != "" {
+			missing = append(missing, strings.TrimSpace(step.StepID))
+		}
+	}
+	return model.CapabilityScore{Missing: missing}
 }
 
 func adaptiveSameEntityRepairPackageRetryable(request experiment.LegExecutionRequest, result model.RecordingResultPackage) bool {
@@ -777,12 +829,20 @@ func (a *appExperimentExecutionAdapter) restoreClosedLoopCaptureHistory(ctx cont
 }
 
 func (a *appExperimentExecutionAdapter) executeSameEntityProductRepair(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, score model.CapabilityScore, history []closedLoopCaptureBatch, emit func(experiment.LegExecutionUpdate) error) error {
-	prepared, err := a.service.prepareAdaptiveSameEntityProductRepair(ctx, projectID, sourceJobID, request, score)
+	return a.executeSameEntityProductRepairRound(ctx, request, projectID, sourceJobID, score, history, request.ProductRepairRounds+1, false, emit)
+}
+
+func (a *appExperimentExecutionAdapter) executeSameEntityProductRepairRound(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, score model.CapabilityScore, history []closedLoopCaptureBatch, round int, preEffectRecovery bool, emit func(experiment.LegExecutionUpdate) error) error {
+	prepareRequest := request
+	prepareRequest.ProductRepairRounds = max(0, round-1)
+	prepared, err := a.service.prepareAdaptiveSameEntityProductRepair(ctx, projectID, sourceJobID, prepareRequest, score)
 	if err != nil || prepared.State == nil || prepared.Build == nil || prepared.Build.Package.ConfidenceSummary == nil {
 		return &experiment.AdapterError{Code: "same_entity_product_repair_package_failed", Phase: "product_repair", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: closedLoopHistoryArtifactIDs(history), Cause: err}
 	}
-	round := request.ProductRepairRounds + 1
 	key := fmt.Sprintf("product-repair-%s-%s-%d", safePathSegment(request.RunID), safePathSegment(request.LegID), round)
+	if preEffectRecovery {
+		key += fmt.Sprintf("-pre-effect-%d", request.BrowserAttempt)
+	}
 	upload, err := a.service.UploadDirectExecutionPackage(ctx, projectID, DirectTransportUploadRequest{
 		OrgID: defaultDesktopOrgID, PackageDigestSHA256: prepared.Build.PackageDigestSHA256,
 		ApprovalSubjectDigestSHA256: prepared.Build.ApprovalSubjectDigestSHA256,
@@ -802,7 +862,11 @@ func (a *appExperimentExecutionAdapter) executeSameEntityProductRepair(ctx conte
 	if err := emit(experiment.LegExecutionUpdate{Kind: "checkpoint_result_entry", ResultEntryRef: "direct:" + projectID + ":" + jobID, EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
 		return err
 	}
-	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "product_repair", Summary: fmt.Sprintf("正在同一项目中执行第 %d 轮自动修复；不会创建第二个项目", round), EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
+	summary := fmt.Sprintf("正在同一项目中执行第 %d 轮自动修复；不会创建第二个项目", round)
+	if preEffectRecovery {
+		summary = fmt.Sprintf("第 %d 轮修复的提交 effect 尚未发生；已恢复其幂等输入并重新解析局部提交控件", round)
+	}
+	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "product_repair", Summary: summary, EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
 		return err
 	}
 	status, err := a.waitForDirectResult(ctx, projectID, jobID, request, emit)
@@ -810,7 +874,7 @@ func (a *appExperimentExecutionAdapter) executeSameEntityProductRepair(ctx conte
 		return err
 	}
 	nextRequest := request
-	nextRequest.ProductRepairRounds = round
+	nextRequest.ProductRepairRounds = max(request.ProductRepairRounds, round)
 	for _, batch := range history {
 		nextRequest.ExistingArtifacts = append(nextRequest.ExistingArtifacts, experimentArtifactRefs(batch.Downloads)...)
 	}

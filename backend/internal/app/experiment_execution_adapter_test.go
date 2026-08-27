@@ -385,6 +385,43 @@ func TestAdaptiveV2RetriesOnlySameEntityRepairFailuresBeforeSubmitEffect(t *test
 	}
 }
 
+func TestAdaptiveV2BacktracksObserveOnlyLineageWhenRepairSubmitNeverStarted(t *testing.T) {
+	request := experiment.LegExecutionRequest{
+		HarnessProfile:      experiment.HarnessProfileAdaptiveBusinessV2,
+		ProductRepairRounds: 1,
+		InteractionPlan: experiment.InteractionPlan{Steps: []experiment.InteractionStep{
+			{StepID: "surface_ready"},
+			{StepID: "continued_stability"},
+		}},
+	}
+	parent := model.RecordingResultPackage{
+		CloudJobID: "job-repair-parent",
+		FailureDiagnostic: &model.ScriptFailureDiagnostic{
+			FailedNodeID: "business_stage_product_repair_submit",
+			Error:        model.AgentError{Code: "browser_agent_target_not_resolved"},
+		},
+	}
+	state := &orchestrator.CascadeState{
+		DesktopCloudRun: &orchestrator.DesktopCloudRunState{CloudJobID: "job-observe-child"},
+		ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{RepairLineage: &model.ScriptRepairLineage{
+			SourceCloudJobID: "job-repair-parent",
+		}},
+	}
+	if parentJobID, ok := adaptivePreEffectRepairLineageEligible(request, "job-observe-child", state, parent); !ok || parentJobID != "job-repair-parent" {
+		t.Fatalf("pre-effect repair lineage was not recovered: job=%q ok=%v", parentJobID, ok)
+	}
+	if _, ok := adaptivePreEffectRepairLineageEligible(request, "job-unrelated", state, parent); ok {
+		t.Fatal("an unrelated current job was allowed to backtrack repair lineage")
+	}
+	parent.FailureDiagnostic.Error.Code = "outcome_verification_failed"
+	if _, ok := adaptivePreEffectRepairLineageEligible(request, "job-observe-child", state, parent); ok {
+		t.Fatal("a possibly executed repair submit was allowed to replay")
+	}
+	if got := strings.Join(requiredProductRepairScore(request).Missing, ","); got != "surface_ready,continued_stability" {
+		t.Fatalf("causal repair score order = %q", got)
+	}
+}
+
 func TestCheckpointHasConfirmedTargetSubmitRequiresBoundConfirmedEffect(t *testing.T) {
 	if checkpointHasConfirmedTargetSubmit(nil) {
 		t.Fatal("nil checkpoint was treated as committed")

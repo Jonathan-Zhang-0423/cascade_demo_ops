@@ -30,7 +30,7 @@ func (s *Service) prepareAdaptiveSameEntityProductRepair(ctx context.Context, pr
 		return ProductRunPrepareResult{}, errors.New("same-entity repair requires a materialized source result")
 	}
 	if result.Status == model.RecordingResultStatusFailed {
-		if _, repairable := adaptiveFailedCapabilityScore(request, result); !repairable {
+		if _, repairable := adaptiveFailedCapabilityScore(request, result); !repairable && !adaptiveSameEntityRepairPackageRetryable(request, result) {
 			return ProductRunPrepareResult{}, errors.New("same-entity repair requires a completed result or a verified interaction-stage failure")
 		}
 	}
