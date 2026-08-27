@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserExplicitFailureAdmitsTerminal, browserRecordingSize, browserVisibleTextShowsExplicitBusinessFailure, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleSnapshotBusy, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactionStateSimilarity, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairInputSemantic, runtimeProductRepairTargetScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, booleanControlState, browserExplicitFailureAdmitsTerminal, browserRecordingSize, browserVisibleTextShowsExplicitBusinessFailure, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleSnapshotBusy, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactionStateSimilarity, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairInputSemantic, runtimeProductRepairTargetScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, visibleApprovedBooleanConfigurationLabel, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -1175,7 +1175,7 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     }));
   });
 
-  it("binds a visible component label when its authoritative native checkbox is hidden", async () => {
+	it("binds a visible component label when its authoritative native checkbox is hidden", async () => {
 		const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
 		const hiddenInput = { isChecked: async () => true };
 		const label = {
@@ -1215,6 +1215,83 @@ describe("browser agent App-evidence-bound selector semantics", () => {
 			candidate_count: 1,
 			outcome: "resolved",
 		}));
+	});
+
+	it("binds an approved custom checkbox button and reads its post-click state", async () => {
+		const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+		let checked = true;
+		const button = {
+			isVisible: async () => true,
+			isDisabled: async () => false,
+			isChecked: async () => undefined,
+			locator: () => ({ count: async () => 0 }),
+			getAttribute: async () => null,
+			click: async () => { checked = !checked; },
+			evaluate: async (callback: (...args: any[]) => unknown) => {
+				const source = String(callback);
+				if (source.includes("tagName")) return checked;
+				if (source.includes("primary")) return { localText: "计划", primary: true };
+				return "计划";
+			},
+		};
+		const page = {
+			getByRole: () => absent,
+			getByTestId: () => absent,
+			getByLabel: () => absent,
+			getByText: () => absent,
+			locator: (selector: string) => selector === 'button[type="button"], button:not([type])'
+				? { count: async () => 1, nth: () => button }
+				: absent,
+		};
+		const attempts: BrowserTargetResolutionAttempt[] = [];
+		const stage = {
+			id: "stage_mode",
+			stage_kind: "mode_selection",
+			order: 2,
+			node_id: "configure_mode",
+			target_contract: {
+				semantic_id: "mode_control",
+				allowed_roles: ["checkbox", "switch", "radio"],
+				allowed_names: ["计划", "Plan"],
+				destructive: false,
+			},
+			interactions: [{ kind: "click", parameters: { action_recipe: "configure_boolean", desired_checked: "false" }, non_destructive: true }],
+		};
+
+		const resolved = await resolveTarget(page, stage, stage.interactions[0], false, attempts);
+		expect(resolved.strategy).toBe("runtime_boolean_configuration");
+		expect(await booleanControlState(resolved.locator)).toBe(true);
+		await resolved.locator.click();
+		expect(await booleanControlState(resolved.locator)).toBe(false);
+		expect(await visibleApprovedBooleanConfigurationLabel(page, stage)).toBe(true);
+	});
+
+	it("does not verify configuration-control absence while an approved custom button remains visible", async () => {
+		const absent = { count: async () => 0 };
+		const button = {
+			isVisible: async () => true,
+			evaluate: async () => "Plan",
+		};
+		const page = {
+			locator: (selector: string) => selector === 'button[type="button"], button:not([type])'
+				? { count: async () => 1, nth: () => button }
+				: absent,
+		};
+		const stage = {
+			id: "stage_mode",
+			stage_kind: "mode_selection",
+			order: 2,
+			node_id: "configure_mode",
+			target_contract: {
+				semantic_id: "mode_control",
+				allowed_roles: ["checkbox", "switch", "radio"],
+				allowed_names: ["计划", "Plan"],
+				destructive: false,
+			},
+			interactions: [{ kind: "click", parameters: { action_recipe: "configure_boolean", desired_checked: "false" }, non_destructive: true }],
+		};
+
+		expect(await visibleApprovedBooleanConfigurationLabel(page, stage)).toBe(true);
 	});
 
   it("rejects ambiguous unnamed boolean controls even when both local labels match", async () => {

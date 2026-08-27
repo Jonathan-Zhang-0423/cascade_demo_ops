@@ -1708,7 +1708,7 @@ async function runtimeContinuationConfirmationValue(page: any, interaction: Brow
 	return /\p{Script=Han}/u.test(visibleText) ? "确认，继续执行。" : "Confirm and continue.";
 }
 
-async function booleanControlState(locator: any): Promise<boolean | undefined> {
+export async function booleanControlState(locator: any): Promise<boolean | undefined> {
 	const checked = await locator.isChecked?.().catch(() => undefined);
 	if (typeof checked === "boolean") return checked;
 	// Component libraries commonly hide the native input and expose a visible
@@ -1737,7 +1737,25 @@ async function booleanControlState(locator: any): Promise<boolean | undefined> {
 			: (element?.control?.matches?.('input[type="checkbox"], input[type="radio"]')
 				? element.control
 				: element?.querySelector?.('input[type="checkbox"], input[type="radio"]'));
-		return native && typeof native.checked === "boolean" ? native.checked : undefined;
+		if (native && typeof native.checked === "boolean") return native.checked;
+		// Some design systems implement a checkbox as a text button plus one
+		// small bordered indicator. Admit it only when that binary structure is
+		// unmistakable; ordinary primary/action buttons have no such indicator.
+		if (String(element?.tagName || "").toLowerCase() !== "button") return undefined;
+		const view = element?.ownerDocument?.defaultView;
+		const indicators = Array.from(element?.children || []).filter((child: any) => {
+			const bounds = child?.getBoundingClientRect?.();
+			if (!bounds || bounds.width < 8 || bounds.width > 48 || bounds.height < 8 || bounds.height > 48) return false;
+			if (Math.abs(bounds.width - bounds.height) > 6) return false;
+			const style = view?.getComputedStyle?.(child);
+			const bordered = Number.parseFloat(String(style?.borderTopWidth || "0")) > 0
+				|| /(?:^|\s)border(?:-|\s|$)/.test(String(child?.className || ""));
+			const localText = String(child?.innerText || child?.textContent || "").replace(/\s+/g, " ").trim();
+			return bordered && localText === "";
+		});
+		if (indicators.length !== 1) return undefined;
+		const marker = (indicators[0] as any)?.querySelector?.('svg, [data-icon], [class*="check" i], [class*="tick" i]');
+		return Boolean(marker);
 	}).catch(() => undefined);
 	if (typeof associatedNativeState === "boolean") return associatedNativeState;
 	return undefined;
@@ -1752,21 +1770,23 @@ async function waitForBooleanControlState(locator: any, desired: boolean, timeou
 	return false;
 }
 
-async function visibleApprovedBooleanConfigurationLabel(page: any, stage: BrowserAgentWorkerStage): Promise<boolean> {
+export async function visibleApprovedBooleanConfigurationLabel(page: any, stage: BrowserAgentWorkerStage): Promise<boolean> {
 	const allowedNames = (stage.target_contract.allowed_names || []).map(normalizeElementName).filter(Boolean);
 	if (allowedNames.length === 0) return false;
-	const labels = page.locator('label');
-	const count = Math.min(await withTimeout(labels.count(), targetProbeTimeoutMS, 0), 32);
-	for (let index = 0; index < count; index += 1) {
-		const label = labels.nth(index);
-		if (!await withTimeout(label.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
-		const localText = normalizeElementName(await withTimeout(
-			label.evaluate((element: any) => String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 240)),
-			targetProbeTimeoutMS,
-			"",
-		));
-		if (forbiddenName(localText, stage.target_contract.forbidden_names || [])) continue;
-		if (allowedNames.some((name) => localText === name || localText.includes(name))) return true;
+	for (const selector of ['label', 'button[type="button"], button:not([type])', '[role="checkbox"], [role="switch"], [role="radio"]']) {
+		const labels = page.locator(selector);
+		const count = Math.min(await withTimeout(labels.count(), targetProbeTimeoutMS, 0), 32);
+		for (let index = 0; index < count; index += 1) {
+			const label = labels.nth(index);
+			if (!await withTimeout(label.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
+			const localText = normalizeElementName(await withTimeout(
+				label.evaluate((element: any) => String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 240)),
+				targetProbeTimeoutMS,
+				"",
+			));
+			if (forbiddenName(localText, stage.target_contract.forbidden_names || [])) continue;
+			if (allowedNames.some((name) => localText === name || localText.includes(name))) return true;
+		}
 	}
 	return false;
 }
@@ -1852,6 +1872,36 @@ async function runtimeBooleanConfigurationTarget(
 				transition_feasibility: 1,
 			});
 			candidates.push({ locator: label, score });
+		}
+	}
+	// Custom checkbox buttons are admitted only when they have an approved
+	// semantic name and expose a deterministic square-indicator state. This is
+	// separate from the generic button resolver, so a submit or primary action
+	// can never satisfy a mode-configuration step.
+	if (candidates.length === 0) {
+		const buttons = page.locator('button[type="button"], button:not([type])');
+		const buttonCount = Math.min(await withTimeout(buttons.count(), targetProbeTimeoutMS, 0), 32);
+		for (let index = 0; index < buttonCount; index += 1) {
+			const button = buttons.nth(index);
+			if (!await withTimeout(button.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
+			if (await withTimeout(button.isDisabled?.(), targetProbeTimeoutMS, true)) continue;
+			if (await booleanControlState(button) === undefined) continue;
+			const metadata = await withTimeout(button.evaluate((element: any) => ({
+				localText: String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 240),
+				primary: Boolean(element.closest?.('form, [role="dialog"], dialog, [aria-modal="true"], main, article, section, [role="main"], [role="region"]')),
+			})), targetProbeTimeoutMS, { localText: "", primary: false });
+			if (forbiddenName(metadata.localText, stage.target_contract.forbidden_names || [])) continue;
+			const normalizedContext = normalizeElementName(metadata.localText);
+			const semantic = allowedNames.some((name) => normalizedContext === name || normalizedContext.includes(name)) ? 1 : 0;
+			if (semantic <= 0) continue;
+			const score = adaptiveTargetCandidateScore({
+				role_state: 1,
+				semantic,
+				container_context: metadata.primary ? 1 : .4,
+				uniqueness: 0,
+				transition_feasibility: 1,
+			});
+			candidates.push({ locator: button, score });
 		}
 	}
 	for (const candidate of candidates) candidate.score += candidates.length === 1 ? .15 : 0;
