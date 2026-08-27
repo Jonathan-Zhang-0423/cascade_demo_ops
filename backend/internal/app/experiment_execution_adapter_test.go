@@ -157,6 +157,19 @@ func TestExperimentDirectBindingRoundTripAndRuntimeMetadataStayInProcessOnly(t *
 	}
 }
 
+func TestExperimentRuntimeMetadataAllowsBoundProductRepairOnly(t *testing.T) {
+	for _, key := range []string{"experiment_run_id", "same_entity_product_repair", "product_repair_round"} {
+		if !allowedExperimentRuntimeMetadataKey(key) {
+			t.Fatalf("required experiment runtime metadata %q was rejected", key)
+		}
+	}
+	for _, key := range []string{"create_another_project", "target_selector", "credential_value", ""} {
+		if allowedExperimentRuntimeMetadataKey(key) {
+			t.Fatalf("unsupported experiment runtime metadata %q was accepted", key)
+		}
+	}
+}
+
 func TestCompileExperimentInteractionContractsPreservesExecutableProofSemantics(t *testing.T) {
 	loaded, err := experiment.LoadDefinition("../../../experiments", "2048-v2")
 	if err != nil {

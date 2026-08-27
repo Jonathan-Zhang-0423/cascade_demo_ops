@@ -464,13 +464,8 @@ func bindExperimentRuntimeMetadata(build ClientExecutionPackageBuild, phase stri
 	if phase != "" {
 		pkg.Metadata["recovery_injection_phase"] = phase
 	}
-	allowed := map[string]bool{
-		"experiment_run_id": true, "experiment_leg_id": true, "observation_plan": true,
-		"interaction_plan": true, "visual_call_budget": true, "expected_product_summary": true,
-		"harness_profile": true, "reconciles_direct_job": true,
-	}
 	for key, value := range metadata {
-		if !allowed[key] {
+		if !allowedExperimentRuntimeMetadataKey(key) {
 			return ClientExecutionPackageBuild{}, fmt.Errorf("unsupported experiment runtime metadata %q", key)
 		}
 		pkg.Metadata[key] = value
@@ -499,6 +494,17 @@ func bindExperimentRuntimeMetadata(build ClientExecutionPackageBuild, phase stri
 	build.PackageDigestSHA256 = digest
 	build.SizeReport = packageSizeReportForPackage(pkg)
 	return build, nil
+}
+
+func allowedExperimentRuntimeMetadataKey(key string) bool {
+	switch strings.TrimSpace(key) {
+	case "experiment_run_id", "experiment_leg_id", "observation_plan", "interaction_plan",
+		"visual_call_budget", "expected_product_summary", "harness_profile", "reconciles_direct_job",
+		"same_entity_product_repair", "product_repair_round":
+		return true
+	default:
+		return false
+	}
 }
 
 func bindDirectExecutionPackageOrigin(build ClientExecutionPackageBuild, installationID string) (ClientExecutionPackageBuild, error) {
