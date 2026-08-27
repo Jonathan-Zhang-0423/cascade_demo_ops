@@ -149,6 +149,14 @@ func TestDirectJobCancelInterruptsRegisteredWorkerAndIsIdempotent(t *testing.T) 
 	if err != nil || job.Status.Status != "canceled" {
 		t.Fatalf("gateway job=%+v err=%v", job, err)
 	}
+	control := httptest.NewRequest(http.MethodGet, "/v1/worker/jobs/"+receipt.JobID+"/control", nil)
+	control.RemoteAddr = "127.0.0.1:54321"
+	control.Header.Set("Authorization", "Bearer worker")
+	controlResponse := httptest.NewRecorder()
+	server.WorkerHandler().ServeHTTP(controlResponse, control)
+	if controlResponse.Code != http.StatusOK || !bytes.Contains(controlResponse.Body.Bytes(), []byte(`"cancel_requested":true`)) {
+		t.Fatalf("worker control status=%d body=%s", controlResponse.Code, controlResponse.Body.String())
+	}
 	response = encryptedDirectTestPost(t, server, lease, "/v1/direct/jobs/"+receipt.JobID+"/cancel", "job_cancel", request, "cancel-running-job-again")
 	if response.Code != http.StatusOK {
 		t.Fatalf("idempotent cancel status=%d body=%s", response.Code, response.Body.String())

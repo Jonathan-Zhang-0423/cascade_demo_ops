@@ -579,6 +579,7 @@ func (s *DirectHTTPServer) workerAPI() http.Handler {
 	mux.HandleFunc("POST /v1/worker/jobs/{job_id}/result", s.handleWorkerResult)
 	mux.HandleFunc("PUT /v1/worker/jobs/{job_id}/result", s.handleWorkerResult)
 	mux.HandleFunc("POST /v1/worker/jobs/{job_id}/release", s.handleWorkerRelease)
+	mux.HandleFunc("GET /v1/worker/jobs/{job_id}/control", s.handleWorkerControl)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isLoopbackRequest(r) {
 			s.directError(w, http.StatusForbidden, "loopback_required", "worker API requires loopback")
@@ -589,6 +590,20 @@ func (s *DirectHTTPServer) workerAPI() http.Handler {
 			return
 		}
 		mux.ServeHTTP(w, r)
+	})
+}
+
+func (s *DirectHTTPServer) handleWorkerControl(w http.ResponseWriter, r *http.Request) {
+	job, err := s.gateway.WorkerJob(r.PathValue("job_id"))
+	if err != nil {
+		s.directError(w, directStatus(err), directCode(err), err.Error())
+		return
+	}
+	s.directJSON(w, http.StatusOK, map[string]any{
+		"protocol_version": direct.WorkerProtocolVersion,
+		"job_id":           job.Status.JobID,
+		"status":           job.Status.Status,
+		"cancel_requested": job.Status.Status == "canceled",
 	})
 }
 

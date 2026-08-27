@@ -181,6 +181,7 @@ func (w *worker) claim(ctx context.Context) (directtransport.WorkerJob, bool, er
 func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 	ctx, cancel := context.WithTimeout(parent, w.runTimeout)
 	defer cancel()
+	go w.monitorCancellation(ctx, job.JobID, cancel)
 	completed := false
 	defer func() {
 		if !completed {
@@ -207,6 +208,10 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 	clearCredentialMap(credentials)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "execution failed job=", safeID(job.JobID), "class=browser_agent_execution_failed")
+		return
+	}
+	if ctx.Err() != nil {
+		fmt.Fprintln(os.Stdout, "job execution context ended; skipping finalization job=", safeID(job.JobID))
 		return
 	}
 	// A service restart cancels the process-level context. The browser runtime
@@ -245,6 +250,48 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 	}
 	completed = true
 	fmt.Fprintln(os.Stdout, "job completed job=", safeID(job.JobID), "artifacts=", len(files))
+}
+
+func (w *worker) monitorCancellation(ctx context.Context, jobID string, cancel context.CancelFunc) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			queryCtx, queryCancel := context.WithTimeout(ctx, 5*time.Second)
+			requested, err := w.cancellationRequested(queryCtx, jobID)
+			queryCancel()
+			if err == nil && requested {
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+func (w *worker) cancellationRequested(ctx context.Context, jobID string) (bool, error) {
+	response, err := w.request(ctx, http.MethodGet, "/v1/worker/jobs/"+url.PathEscape(jobID)+"/control", nil, nil)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return false, responseError(response)
+	}
+	var value struct {
+		ProtocolVersion string `json:"protocol_version"`
+		JobID           string `json:"job_id"`
+		CancelRequested bool   `json:"cancel_requested"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<10)).Decode(&value); err != nil {
+		return false, err
+	}
+	if value.ProtocolVersion != model.DirectWorkerProtocolVersion || value.JobID != jobID {
+		return false, errors.New("worker control response binding mismatch")
+	}
+	return value.CancelRequested, nil
 }
 
 func persistPreparedWorkerResult(jobRoot string, result model.RecordingResultPackage) error {

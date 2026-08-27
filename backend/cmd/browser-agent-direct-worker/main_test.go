@@ -67,6 +67,26 @@ func TestWorkerClaimRejectsProtocolMismatch(t *testing.T) {
 	}
 }
 
+func TestWorkerCancellationRequestIsBoundToJob(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/worker/jobs/job_cancel/control" || request.Header.Get("Authorization") != "Bearer worker-test-token" {
+			http.Error(response, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{
+			"protocol_version": model.DirectWorkerProtocolVersion,
+			"job_id":           "job_cancel",
+			"cancel_requested": true,
+		})
+	}))
+	t.Cleanup(server.Close)
+	w := &worker{client: server.Client(), baseURL: server.URL, token: "worker-test-token"}
+	requested, err := w.cancellationRequested(context.Background(), "job_cancel")
+	if err != nil || !requested {
+		t.Fatalf("cancellation request was not observed: requested=%t err=%v", requested, err)
+	}
+}
+
 func TestRecoverOrphanedStageEventLogUploadsOnce(t *testing.T) {
 	root := t.TempDir()
 	jobID := "job_interrupted"
