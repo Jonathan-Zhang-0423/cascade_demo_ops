@@ -82,6 +82,7 @@ func (s *Service) prepareAdaptiveSameEntityProductRepair(ctx context.Context, pr
 	if err != nil {
 		return ProductRunPrepareResult{}, err
 	}
+	markAdaptiveRepairInteractionContracts(next.ProjectContext.Inputs.InteractionContracts)
 	if next.ProjectIntelligence.RunIntentScope == nil {
 		next.ProjectIntelligence.RunIntentScope = &model.RunIntentScope{ID: "same_entity_repair_scope_" + projectID, ProjectID: projectID, SchemaVersion: model.ProjectIntelligencePackSchemaVersion}
 	}
@@ -137,6 +138,20 @@ func (s *Service) prepareAdaptiveSameEntityProductRepair(ctx context.Context, pr
 		return ProductRunPrepareResult{}, err
 	}
 	return ProductRunPrepareResult{State: compactStateForPrepareResponse(next, &build), Build: &build}, nil
+}
+
+func markAdaptiveRepairInteractionContracts(contracts []model.InteractionContract) {
+	for index := range contracts {
+		contract := &contracts[index]
+		if contract.ReplayPolicy != model.InteractionReplayObserveOnly || contract.ActionKind != model.GraphActionInspect {
+			continue
+		}
+		if contract.Parameters == nil {
+			contract.Parameters = map[string]any{}
+		}
+		contract.Parameters["require_repair_idle_transition"] = true
+		return
+	}
 }
 
 func selectAdaptiveBoundEntityURL(targetURL string, project *model.ProjectContext, candidates []string) string {

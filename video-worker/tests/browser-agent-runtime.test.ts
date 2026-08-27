@@ -31,7 +31,11 @@ describe("browser visual polling terminal evidence", () => {
 		expect(browserVisualTerminalPolicy({
 			id: "surface", order: 1, node_id: "surface", target_contract: { semantic_id: "surface", destructive: false },
 			interactions: [{ kind: "inspect", parameters: { require_visual_terminal_confirmation: true, refresh_after_ms: 300_000 } }],
-		})).toEqual({ requireVisualTerminal: true, refreshAfterMS: 300_000, postRefreshObserveMS: 60_000 });
+		})).toEqual({ requireVisualTerminal: true, requireRepairIdleTransition: false, refreshAfterMS: 300_000, postRefreshObserveMS: 60_000 });
+		expect(browserVisualTerminalPolicy({
+			id: "repair-surface", order: 1, node_id: "repair-surface", target_contract: { semantic_id: "surface", destructive: false },
+			interactions: [{ kind: "inspect", parameters: { require_visual_terminal_confirmation: true, require_repair_idle_transition: true } }],
+		}).requireRepairIdleTransition).toBe(true);
 	});
 
 	it("hands a visible product surface to deterministic interaction proof", () => {
@@ -54,6 +58,8 @@ describe("browser visual polling terminal evidence", () => {
 		expect(businessLifecycleSnapshotBusy({ lifecycleTexts: ["Action running"] })).toBe(true);
 		expect(businessLifecycleSnapshotBusy({ lifecycleTexts: ["5/5 已完成"], bodyText: "历史消息：正在构建，请稍候" })).toBe(false);
 		expect(businessLifecycleSnapshotBusy({ indeterminateProgress: true })).toBe(true);
+		expect(businessLifecycleSnapshotBusy({ activeStopControl: true })).toBe(false);
+		expect(businessLifecycleSnapshotBusy({ activeStopControl: true }, true)).toBe(true);
 	});
 
 	it("recognizes explicit visible runtime failures without matching planning prose", () => {

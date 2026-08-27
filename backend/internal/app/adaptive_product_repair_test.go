@@ -5,7 +5,20 @@ import (
 	"testing"
 
 	"cascade-demoops/backend/internal/experiment"
+	"cascade-demoops/backend/internal/model"
 )
+
+func TestAdaptiveProductRepairRequiresAsyncRepairToBecomeIdleBeforeProof(t *testing.T) {
+	contracts := []model.InteractionContract{
+		{ReplayPolicy: model.InteractionReplayIdempotentWrite, ActionKind: model.GraphActionClick},
+		{ReplayPolicy: model.InteractionReplayObserveOnly, ActionKind: model.GraphActionInspect},
+		{ReplayPolicy: model.InteractionReplayObserveOnly, ActionKind: model.GraphActionInspect},
+	}
+	markAdaptiveRepairInteractionContracts(contracts)
+	if contracts[0].Parameters != nil || contracts[1].Parameters["require_repair_idle_transition"] != true || contracts[2].Parameters != nil {
+		t.Fatalf("repair idle policy was not scoped to the first passive product proof: %+v", contracts)
+	}
+}
 
 func TestAdaptiveProductRepairPromptUsesEarliestFailedCapabilityAndPublicVisualDirection(t *testing.T) {
 	spec := experiment.ProductSpec{VisualDirection: experiment.VisualDirection{Theme: "深色霓虹界面"}, ObservableAcceptance: []experiment.AcceptanceCriterion{

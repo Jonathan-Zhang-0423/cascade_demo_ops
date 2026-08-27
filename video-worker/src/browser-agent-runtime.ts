@@ -2356,7 +2356,7 @@ export function browserVisualRefreshDue(startedAtMS: number, nowMS: number, refr
 	return !refreshed && refreshAfterMS > 0 && nowMS - startedAtMS >= refreshAfterMS;
 }
 
-export function browserVisualTerminalPolicy(stage: BrowserAgentWorkerStage): { requireVisualTerminal: boolean; refreshAfterMS: number; postRefreshObserveMS: number } {
+export function browserVisualTerminalPolicy(stage: BrowserAgentWorkerStage): { requireVisualTerminal: boolean; requireRepairIdleTransition: boolean; refreshAfterMS: number; postRefreshObserveMS: number } {
 	// Compatible RPC/package paths may carry the approved parameters on the
 	// immutable interaction even when the duplicated stage contract is omitted.
 	// Both representations express the same approved policy.
@@ -2364,6 +2364,7 @@ export function browserVisualTerminalPolicy(stage: BrowserAgentWorkerStage): { r
 		|| stage.interactions.find((interaction) => interaction.parameters)?.parameters;
 	return {
 		requireVisualTerminal: parameters?.require_visual_terminal_confirmation === true,
+		requireRepairIdleTransition: parameters?.require_repair_idle_transition === true,
 		refreshAfterMS: Math.max(0, Math.trunc(Number(parameters?.refresh_after_ms) || 0)),
 		postRefreshObserveMS: Math.max(0, Math.min(3 * 60_000, Math.trunc(Number(parameters?.post_refresh_observe_ms) || 60_000))),
 	};
@@ -2459,7 +2460,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	if (!baseConfig) return waitForPlayableSurface(session.page, timeout);
 	const config = { ...baseConfig, maxCalls: Math.min(baseConfig.maxCalls, session.visualMaxCalls) };
 	const idleTimeoutMS = interactiveSurfacePollTimeout(timeout);
-	const { requireVisualTerminal, refreshAfterMS, postRefreshObserveMS } = browserVisualTerminalPolicy(stage);
+	const { requireVisualTerminal, requireRepairIdleTransition, refreshAfterMS, postRefreshObserveMS } = browserVisualTerminalPolicy(stage);
 	const { heartbeatLimit } = browserVisualObservationAllocation(config.maxCalls, requireVisualTerminal);
 	const startedAtMS = Date.now();
 	let lastProgressAtMS = startedAtMS;
@@ -2484,7 +2485,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 		}
 		if (requireVisualTerminal && browserVisualRefreshDue(lastProgressAtMS, Date.now(), refreshAfterMS, refreshed)) {
 			refreshed = true;
-			const busyBeforeRefresh = await pageStillBusy(session.page);
+			const busyBeforeRefresh = await pageStillBusy(session.page, requireRepairIdleTransition);
 			if (browserVisualRefreshShouldReload(busyBeforeRefresh) && !await refreshAndRestoreObservedEntry(session)) {
 				return { surface: false, score: false, controls: false };
 			}
@@ -2503,7 +2504,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			deadline = Math.min(deadline, Date.now() + postRefreshObserveMS);
 			nextCaptureAt = Date.now();
 		}
-		const busyNow = await pageStillBusy(session.page);
+		const busyNow = await pageStillBusy(session.page, requireRepairIdleTransition);
 		if (busyNow) sawBusy = true;
 		const target = await interactiveSurfaceTargetOnce(session.page);
 		const explicitFailure = !busyNow && !target && await pageShowsExplicitBusinessFailure(session.page);
@@ -3537,7 +3538,7 @@ function suggestedEntryWaitCondition(stage: BrowserAgentWorkerStage): string | u
   return `wait_after_entry_at_least_${Math.min(15_000, current + 1_000)}ms`;
 }
 
-async function pageStillBusy(page: any): Promise<boolean> {
+async function pageStillBusy(page: any, treatActiveStopAsBusy = false): Promise<boolean> {
   const snapshot = await page.evaluate(() => {
     const pageDocument = (globalThis as any).document;
     const documentBusy = pageDocument.readyState !== "complete";
@@ -3551,19 +3552,25 @@ async function pageStillBusy(page: any): Promise<boolean> {
 	const lifecycleNodes = Array.from(pageDocument.querySelectorAll?.('progress,[role="progressbar"],[role="status"],[aria-live],button,[role="button"],[data-status],[data-state],[class*="progress" i],[class*="status" i],[class*="loading" i]') || []).slice(-160) as any[];
 	const lifecycleTexts: string[] = [];
 	let indeterminateProgress = false;
+	let activeStopControl = false;
 	for (const element of lifecycleNodes) {
       const text = visibleText(element);
-		if (text) lifecycleTexts.push(text.slice(0, 1_000));
+		if (text) {
+			lifecycleTexts.push(text.slice(0, 1_000));
+			const role = String(element.getAttribute?.("role") || "").toLowerCase();
+			const tag = String(element.tagName || "").toLowerCase();
+			if ((tag === "button" || role === "button") && /^(?:stop|停止|终止|中止)$/.test(text.replace(/\s+/g, " ").trim())) activeStopControl = true;
+		}
 		else if (element.matches?.('progress:not([value]),[role="progressbar"]')) indeterminateProgress = true;
 	}
-	return { documentBusy, ariaBusy, indeterminateProgress, lifecycleTexts };
+	return { documentBusy, ariaBusy, indeterminateProgress, activeStopControl, lifecycleTexts };
   }).catch(() => undefined);
-	return businessLifecycleSnapshotBusy(snapshot);
+	return businessLifecycleSnapshotBusy(snapshot, treatActiveStopAsBusy);
 }
 
-export function businessLifecycleSnapshotBusy(snapshot: { documentBusy?: boolean; ariaBusy?: boolean; indeterminateProgress?: boolean; lifecycleTexts?: string[]; bodyText?: string } | undefined): boolean {
+export function businessLifecycleSnapshotBusy(snapshot: { documentBusy?: boolean; ariaBusy?: boolean; indeterminateProgress?: boolean; activeStopControl?: boolean; lifecycleTexts?: string[]; bodyText?: string } | undefined, treatActiveStopAsBusy = false): boolean {
 	if (!snapshot) return false;
-	return Boolean(snapshot.documentBusy || snapshot.ariaBusy || snapshot.indeterminateProgress
+	return Boolean(snapshot.documentBusy || snapshot.ariaBusy || snapshot.indeterminateProgress || (treatActiveStopAsBusy && snapshot.activeStopControl)
 		|| (snapshot.lifecycleTexts || []).some((value) => businessLifecycleTextBusy(value)));
 }
 
