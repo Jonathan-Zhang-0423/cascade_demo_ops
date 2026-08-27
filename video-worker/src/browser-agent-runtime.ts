@@ -1288,29 +1288,42 @@ async function executeInteraction(
     return;
   }
   if (interaction.kind === "gesture") {
-    if (String(interaction.parameters?.viewport || "") === "mobile") await session.page.setViewportSize({ width: 390, height: 844 });
-    const target = await focusLargestPlayableSurface(session.page, Math.min(timeout, 5_000), interaction.target);
-    const box = await target?.digestTarget?.boundingBox?.().catch(() => undefined);
-    if (!target || !box) throw new Error(`browser_agent_gesture_surface_not_resolved: ${stage.node_id}`);
-    const direction = String(interaction.parameters?.swipe_direction || "");
-    const start = { x: box.x + box.width * .65, y: box.y + box.height * .55 };
-    const delta = Math.max(60, Math.min(box.width, box.height) * .35);
-    const end = { x: start.x + (direction === "right" ? delta : direction === "left" ? -delta : 0), y: start.y + (direction === "down" ? delta : direction === "up" ? -delta : 0) };
-    if (!["left", "right", "up", "down"].includes(direction)) throw new Error(`browser_agent_gesture_direction_not_approved: ${stage.node_id}`);
+    let target = await focusLargestPlayableSurface(session.page, Math.min(timeout, 5_000), interaction.target);
+    if (!target) throw new Error(`browser_agent_gesture_surface_not_resolved: ${stage.node_id}`);
     const before = await visualDigest(session.page, target.digestTarget);
-    const cdp = await session.context.newCDPSession?.(session.page).catch(() => undefined);
-    if (cdp) {
-      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: start.x, y: start.y }] });
-      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: end.x, y: end.y }] });
-      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-      await cdp.detach?.().catch(() => undefined);
-    } else {
-      await target.digestTarget.dispatchEvent("pointerdown", { pointerType: "touch", clientX: start.x, clientY: start.y });
-      await target.digestTarget.dispatchEvent("pointermove", { pointerType: "touch", clientX: end.x, clientY: end.y });
-      await target.digestTarget.dispatchEvent("pointerup", { pointerType: "touch", clientX: end.x, clientY: end.y });
+    const restoreViewport = String(interaction.parameters?.viewport || "") === "mobile"
+      ? await applyMobileSurfaceViewport(session.page, target)
+      : async () => undefined;
+    try {
+      // Resizing the embedded product frame changes its body geometry. Resolve
+      // it again without resizing the whole host application, which can hide
+      // the preview panel entirely at a phone-sized outer viewport.
+      target = await focusLargestPlayableSurface(session.page, Math.min(timeout, 5_000), interaction.target) || target;
+      const box = await target.digestTarget?.boundingBox?.().catch(() => undefined);
+      if (!box) throw new Error(`browser_agent_gesture_surface_not_resolved: ${stage.node_id}`);
+      const direction = String(interaction.parameters?.swipe_direction || "");
+      const start = { x: box.x + box.width * .65, y: box.y + box.height * .55 };
+      const delta = Math.max(60, Math.min(box.width, box.height) * .35);
+      const end = { x: start.x + (direction === "right" ? delta : direction === "left" ? -delta : 0), y: start.y + (direction === "down" ? delta : direction === "up" ? -delta : 0) };
+      if (!["left", "right", "up", "down"].includes(direction)) throw new Error(`browser_agent_gesture_direction_not_approved: ${stage.node_id}`);
+      const cdp = await session.context.newCDPSession?.(session.page).catch(() => undefined);
+      if (cdp) {
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: start.x, y: start.y }] });
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: end.x, y: end.y }] });
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        await cdp.detach?.().catch(() => undefined);
+      } else {
+        await target.digestTarget.dispatchEvent("pointerdown", { pointerType: "touch", clientX: start.x, clientY: start.y });
+        await target.digestTarget.dispatchEvent("pointermove", { pointerType: "touch", clientX: end.x, clientY: end.y });
+        await target.digestTarget.dispatchEvent("pointerup", { pointerType: "touch", clientX: end.x, clientY: end.y });
+      }
+      await session.page.waitForTimeout(500);
+    } finally {
+      await restoreViewport();
+      await session.page.waitForTimeout(250);
     }
-    await session.page.waitForTimeout(500);
-    const changed = before !== await visualDigest(session.page, target.digestTarget);
+    const refreshed = await interactiveSurfaceTargetOnce(session.page);
+    const changed = before !== await visualDigest(session.page, refreshed?.digestTarget || target.digestTarget);
     session.latestFrameChange = changed;
     const gestureProof = { inputModality: "touch" };
     session.interactionProofByNodeID.set(stage.node_id, gestureProof);
@@ -3902,7 +3915,7 @@ async function visualDigest(page: any, locator?: any): Promise<string> {
 
 type PlayableSurfaceEvidence = { surface: boolean; score: boolean; controls: boolean };
 type InteractiveSurfaceEvidence = { surface: boolean; stateful: boolean; focusable: boolean };
-type PlayableSurfaceTarget = InteractiveSurfaceEvidence & { digestTarget: any; keyboardTarget: any };
+type PlayableSurfaceTarget = InteractiveSurfaceEvidence & { digestTarget: any; keyboardTarget: any; ownerFrame: any };
 
 export function classifyInteractiveSurfaceFrame(surface: boolean, stateful: boolean, focusable: boolean): InteractiveSurfaceEvidence {
   return { surface, stateful: surface && stateful, focusable: surface && focusable };
@@ -3943,7 +3956,7 @@ async function interactiveSurfaceTargetOnce(page: any): Promise<PlayableSurfaceT
       const focusable = selector.includes("tabindex") || selector.includes("application") || selector.includes("contenteditable") || selector.includes("canvas") || selector.includes("iframe") || selector.includes("grid");
       const evidence = classifyInteractiveSurfaceFrame(surfaceVisible, stateful, focusable);
       if (evidence.surface && evidence.stateful) {
-		candidates.push({ ...evidence, digestTarget: locator, keyboardTarget: body || locator, area: Number(box?.width || 0) * Number(box?.height || 0) });
+		candidates.push({ ...evidence, digestTarget: locator, keyboardTarget: body || locator, ownerFrame: frame, area: Number(box?.width || 0) * Number(box?.height || 0) });
       }
     }
     const embeddedFrame = typeof page.mainFrame === "function" ? frame !== page.mainFrame() : frames.length > 1 && frameIndex > 0;
@@ -3961,7 +3974,7 @@ async function interactiveSurfaceTargetOnce(page: any): Promise<PlayableSurfaceT
         return { interactiveCount: visible, width: Number(rect?.width || 0), height: Number(rect?.height || 0) };
       }).catch(() => ({ interactiveCount: 0, width: 0, height: 0 }));
       const evidence = classifyDOMInteractiveSurface(profile.interactiveCount, profile.width, profile.height);
-		if (evidence.surface) candidates.push({ ...evidence, digestTarget: body, keyboardTarget: body, area: profile.width * profile.height });
+		if (evidence.surface) candidates.push({ ...evidence, digestTarget: body, keyboardTarget: body, ownerFrame: frame, area: profile.width * profile.height });
     }
   }
 	candidates.sort((left, right) => right.area - left.area);
@@ -3991,6 +4004,34 @@ async function focusLargestPlayableSurface(page: any, timeout: number, target?: 
   await playable.digestTarget.click({ timeout }).catch(() => undefined);
   await page.waitForTimeout(150);
   return playable;
+}
+
+async function applyMobileSurfaceViewport(page: any, target: PlayableSurfaceTarget): Promise<() => Promise<void>> {
+  const mainFrame = typeof page.mainFrame === "function" ? page.mainFrame() : undefined;
+  if (target.ownerFrame && mainFrame && target.ownerFrame !== mainFrame && typeof target.ownerFrame.frameElement === "function") {
+    const frameElement = await target.ownerFrame.frameElement().catch(() => undefined);
+    if (frameElement) {
+      const originalStyle = await frameElement.getAttribute?.("style").catch(() => null);
+      await frameElement.evaluate((element: any) => {
+        element.style.setProperty("width", "390px", "important");
+        element.style.setProperty("max-width", "390px", "important");
+        element.style.setProperty("height", "844px", "important");
+        element.style.setProperty("max-height", "844px", "important");
+      });
+      await page.waitForTimeout?.(250);
+      return async () => {
+        await frameElement.evaluate((element: any, style: string | null) => {
+          if (style === null) element.removeAttribute("style");
+          else element.setAttribute("style", style);
+        }, originalStyle).catch(() => undefined);
+      };
+    }
+  }
+  const originalViewport = typeof page.viewportSize === "function" ? page.viewportSize() : undefined;
+  await page.setViewportSize({ width: 390, height: 844 });
+  return async () => {
+    if (originalViewport) await page.setViewportSize(originalViewport).catch(() => undefined);
+  };
 }
 
 async function waitForPlayableSurface(page: any, timeout: number): Promise<{ surface: boolean; score: boolean; controls: boolean }> {
