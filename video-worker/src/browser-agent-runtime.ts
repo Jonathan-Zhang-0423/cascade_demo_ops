@@ -775,11 +775,7 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
   if (resolved && action && String(action.parameters?.action_recipe || "") === "configure_boolean") {
     const actual = await booleanControlState(resolved.locator);
     const desired = booleanParameter(action.parameters, "desired_checked", false);
-    assertions.push({
-      kind: "configuration_satisfied",
-      passed: actual !== undefined && actual === desired,
-      actual: actual === undefined ? "boolean_state_unavailable" : (actual === desired ? "desired_state_observed" : "configuration_action_required"),
-    });
+    assertions.push(booleanConfigurationAssertion(actual, desired, "observe"));
   }
   return {
     observation: await observation(session.page, "actual_browser_observation", assertions, targetGeometry, resolutionAttempts),
@@ -900,6 +896,41 @@ export function resolutionAssertions(strategy: string | undefined, failure: stri
   return [{ kind: "page_observed", passed: true, actual: currentURL }];
 }
 
+export function booleanConfigurationAssertion(
+  actual: boolean | undefined,
+  desired: boolean,
+  phase: "observe" | "result",
+): { kind: string; passed: boolean; actual: string } {
+  if (actual === undefined) {
+    return {
+      kind: "configuration_state_available",
+      passed: false,
+      actual: "boolean_state_unavailable",
+    };
+  }
+  if (actual === desired) {
+    return {
+      kind: "configuration_satisfied",
+      passed: true,
+      actual: "desired_state_observed",
+    };
+  }
+  if (phase === "observe") {
+    // A pre-action mismatch is the reason to execute this idempotent write,
+    // not a failed outcome assertion. The result phase verifies the effect.
+    return {
+      kind: "configuration_action_required",
+      passed: true,
+      actual: "approved_configuration_transition_required",
+    };
+  }
+  return {
+    kind: "configuration_satisfied",
+    passed: false,
+    actual: "desired_state_not_observed",
+  };
+}
+
 export async function executeBrowserAgentStage(request: BrowserAgentStageRequest): Promise<BrowserAgentStageResult> {
   const session = requiredSession(request.session_id);
   validateStage(request.stage);
@@ -922,6 +953,7 @@ export async function executeBrowserAgentStage(request: BrowserAgentStageRequest
       targetGeometry = actionEvidence.geometry;
       targetArtifacts.push(actionEvidence.artifact);
       targetEvidence.push(screenshotEvidence(actionEvidence.artifact, request.stage, "动作目标几何证据"));
+      assertions.push(...actionEvidence.assertions);
     }
     assertions.push({ kind: `action_${interaction.kind}_completed`, passed: true, actual: request.stage.target_contract.semantic_id });
   }
@@ -1231,7 +1263,7 @@ async function executeInteraction(
   interaction: BrowserAgentInteraction,
   secretValues: Record<string, string>,
   resolutionAttempts: BrowserTargetResolutionAttempt[] = [],
-): Promise<{ geometry: BrowserTargetGeometry; artifact: ArtifactRef } | undefined> {
+): Promise<{ geometry: BrowserTargetGeometry; artifact: ArtifactRef; assertions: Array<{ kind: string; passed: boolean; actual?: string }> } | undefined> {
   if (interaction.non_destructive !== true || stage.target_contract.destructive) throw new Error("browser_agent_destructive_action_denied");
   const timeout = numericParameter(interaction.parameters, "timeout_ms", actionTimeoutMS, 250, 60_000);
   if (interaction.kind === "navigate") {
@@ -1373,6 +1405,7 @@ async function executeInteraction(
   session.targetGeometryByArtifactID.set(targetArtifact.id, targetGeometry);
 	const trackVisualChange = interactionRequiresVisualChangeEvidence(stage, interaction.kind);
 	const visualDigestBefore = trackVisualChange ? await pageVisualDigest(session.page) : "";
+  const interactionAssertions: Array<{ kind: string; passed: boolean; actual?: string }> = [];
   if (interaction.kind === "click") {
 	const recipe = String(interaction.parameters?.action_recipe || "");
 	if (recipe === "configure_boolean") {
@@ -1385,6 +1418,7 @@ async function executeInteraction(
 				throw new Error(`browser_agent_boolean_configuration_not_applied: ${stage.node_id}`);
 			}
 		}
+		interactionAssertions.push(booleanConfigurationAssertion(await booleanControlState(resolved.locator), desired, "result"));
 	} else if (recipe === "continue_execution" && resolved.strategy === "runtime_execution_confirmation_input") {
 		const value = await runtimeContinuationConfirmationValue(session.page, interaction);
 		await resolved.locator.fill(value, { timeout });
@@ -1426,7 +1460,7 @@ async function executeInteraction(
 	if (trackVisualChange) {
 		session.visualChangeByNodeID.set(stage.node_id, visualDigestBefore !== await pageVisualDigest(session.page));
 	}
-  return { geometry: targetGeometry, artifact: targetArtifact };
+  return { geometry: targetGeometry, artifact: targetArtifact, assertions: interactionAssertions };
 }
 
 export function interactionRequiresVisualChangeEvidence(stage: BrowserAgentWorkerStage, interactionKind: string): boolean {

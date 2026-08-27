@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, booleanControlState, browserExplicitFailureAdmitsTerminal, browserRecordingSize, browserVisibleTextShowsExplicitBusinessFailure, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleSnapshotBusy, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactionStateSimilarity, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairInputSemantic, runtimeProductRepairTargetScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, visibleApprovedBooleanConfigurationLabel, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, booleanConfigurationAssertion, booleanControlState, browserExplicitFailureAdmitsTerminal, browserRecordingSize, browserVisibleTextShowsExplicitBusinessFailure, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleSnapshotBusy, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactionStateSimilarity, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairInputSemantic, runtimeProductRepairTargetScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, visibleApprovedBooleanConfigurationLabel, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -1134,6 +1134,29 @@ describe("browser agent App-evidence-bound selector semantics", () => {
 
     await expect(resolveTarget(page, stage, stage.interactions[0], false, attempts)).rejects.toThrow("browser_agent_target_not_resolved");
     expect(attempts.some((attempt) => attempt.strategy === "active_modal_unique_primary_action")).toBe(false);
+  });
+
+  it("treats a pre-action boolean mismatch as executable evidence and validates the result separately", () => {
+    expect(booleanConfigurationAssertion(true, false, "observe")).toEqual({
+      kind: "configuration_action_required",
+      passed: true,
+      actual: "approved_configuration_transition_required",
+    });
+    expect(booleanConfigurationAssertion(false, false, "observe")).toEqual({
+      kind: "configuration_satisfied",
+      passed: true,
+      actual: "desired_state_observed",
+    });
+    expect(booleanConfigurationAssertion(false, false, "result")).toEqual({
+      kind: "configuration_satisfied",
+      passed: true,
+      actual: "desired_state_observed",
+    });
+    expect(booleanConfigurationAssertion(true, false, "result")).toEqual({
+      kind: "configuration_satisfied",
+      passed: false,
+      actual: "desired_state_not_observed",
+    });
   });
 
   it("binds one unnamed boolean control from its approved local label context", async () => {
