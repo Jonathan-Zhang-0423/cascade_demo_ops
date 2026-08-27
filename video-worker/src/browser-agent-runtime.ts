@@ -1588,7 +1588,7 @@ async function firstRuntimeExecutionContinuationLocator(page: any, stage: Browse
 
 export function runtimeContinuationConfirmationPrompt(value: string): boolean {
 	const normalized = String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
-	return /确认后.{0,24}(?:开始|继续|执行|构建|生成)|(?:是否|这).{0,18}(?:正确|可以|符合).{0,18}(?:确认|继续)|(?:你觉得|这个|上述).{0,24}(?:方向|方案|规划).{0,12}(?:对吗|可以吗|合适吗)|有没有.{0,28}(?:调整|补充|强调|特别).{0,24}(?:要求|细节|风格|内容)|confirm.{0,40}(?:continue|proceed|start|build|generate)|(?:does this|is this).{0,40}(?:right|correct|okay|ok)/.test(normalized);
+	return /确认后.{0,24}(?:开始|继续|执行|构建|生成)|(?:是否|可否|是不是).{0,36}(?:正确|可以|符合|满意|合适|可行).{0,36}(?:如果|若).{0,24}(?:开始|继续|执行|构建|生成)|(?:是否|这).{0,18}(?:正确|可以|符合).{0,18}(?:确认|继续)|(?:你觉得|这个|上述).{0,24}(?:方向|方案|规划).{0,12}(?:对吗|可以吗|合适吗)|有没有.{0,28}(?:调整|补充|强调|特别).{0,24}(?:要求|细节|风格|内容)|confirm.{0,40}(?:continue|proceed|start|build|generate)|(?:does this|is this).{0,48}(?:right|correct|okay|ok|meet|match).{0,48}(?:if so|then|start|continue|proceed|build|generate)/.test(normalized);
 }
 
 async function runtimeExecutionConfirmationInputLocator(page: any, stage: BrowserAgentWorkerStage): Promise<any | undefined> {

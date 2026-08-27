@@ -377,8 +377,11 @@ describe("runtime execution continuation", () => {
 	it("recognizes an explicit conversational confirmation request without product keywords", () => {
 		expect(runtimeContinuationConfirmationPrompt("这听起来对吗？确认后我将开始详细构建计划。")).toBe(true);
 		expect(runtimeContinuationConfirmationPrompt("你觉得这个方向对吗？有没有特别想要强调的交互细节或视觉风格？")).toBe(true);
+		expect(runtimeContinuationConfirmationPrompt("这个方案是否符合你的预期？如果是，我可以立即开始构建。")).toBe(true);
 		expect(runtimeContinuationConfirmationPrompt("Does this look right? Confirm to continue building.")).toBe(true);
+		expect(runtimeContinuationConfirmationPrompt("Does this plan meet your expectations? If so, I can start building now.")).toBe(true);
 		expect(runtimeContinuationConfirmationPrompt("The preview is still generating.")).toBe(false);
+		expect(runtimeContinuationConfirmationPrompt("该项目符合响应式布局要求，正在构建中。")).toBe(false);
 	});
 
 	it("does not mistake relative timestamps for business progress", () => {
