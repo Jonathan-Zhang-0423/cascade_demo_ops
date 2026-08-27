@@ -249,6 +249,20 @@ func TestDirectHTTPClientAllowsExplicitDevelopmentCAOnly(t *testing.T) {
 	}
 }
 
+func TestDirectHTTPClientDoesNotInheritDesktopProxy(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	service := &Service{}
+	client, err := service.directHTTPClient(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil {
+		t.Fatal("Direct Gateway client inherited a desktop HTTP proxy")
+	}
+}
+
 func TestAppDirectTransportRejectsStaleApprovalBeforeLeaseAllocation(t *testing.T) {
 	service, err := NewService(config.AppRuntimeConfig{DataRoot: t.TempDir(), ArtifactRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}, store.NewMemoryStateStore())
 	if err != nil {
