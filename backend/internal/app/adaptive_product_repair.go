@@ -39,7 +39,7 @@ func (s *Service) prepareAdaptiveSameEntityProductRepair(ctx context.Context, pr
 	if entityURL == "" {
 		return ProductRunPrepareResult{}, errors.New("same-entity repair has no observed entity entry URL")
 	}
-	repairPrompt := adaptiveProductRepairPrompt(request.ProductSpec, score.Missing)
+	repairPrompt := adaptiveProductRepairPrompt(request.ProductSpec, request.InteractionPlan, score.Missing)
 	if repairPrompt == "" {
 		return ProductRunPrepareResult{}, errors.New("same-entity repair could not derive a public product request")
 	}
@@ -119,8 +119,11 @@ func (s *Service) prepareAdaptiveSameEntityProductRepair(ctx context.Context, pr
 	return ProductRunPrepareResult{State: compactStateForPrepareResponse(next, &build), Build: &build}, nil
 }
 
-func adaptiveProductRepairPrompt(spec experiment.ProductSpec, missing []string) string {
+func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.InteractionPlan, missing []string) string {
 	statements := map[string]string{}
+	for _, step := range plan.Steps {
+		statements[strings.TrimSpace(step.StepID)] = strings.TrimSpace(step.SemanticIntent)
+	}
 	for _, criterion := range spec.ObservableAcceptance {
 		if criterion.Required {
 			statements[criterion.ID] = strings.TrimSpace(criterion.Statement)
@@ -134,21 +137,23 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, missing []string) 
 	for _, id := range missing {
 		if value := statements[strings.TrimSpace(id)]; value != "" && !seen[value] {
 			selected, seen[value] = append(selected, value), true
+			break
 		}
 	}
 	if len(selected) == 0 {
 		for _, criterion := range spec.ObservableAcceptance {
 			if criterion.Required && strings.TrimSpace(criterion.Statement) != "" && !seen[criterion.Statement] {
 				selected, seen[criterion.Statement] = append(selected, strings.TrimSpace(criterion.Statement)), true
+				break
 			}
 		}
 	}
 	if len(selected) == 0 {
 		return ""
 	}
-	value := "请继续完成并修复当前项目，使以下要求能够实际使用：" + strings.Join(selected, "；") + "。保留已有内容，直接更新当前项目。"
-	if len([]rune(value)) > 280 {
-		value = string([]rune(value)[:279]) + "。"
+	value := "请修复当前项目：" + strings.TrimRight(selected[0], "。；; ") + "必须能实际工作。保留已有内容，直接更新当前项目。"
+	if len([]rune(value)) > 140 {
+		value = string([]rune(value)[:139]) + "。"
 	}
 	return value
 }

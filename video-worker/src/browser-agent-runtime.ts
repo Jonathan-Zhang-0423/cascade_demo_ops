@@ -1735,6 +1735,12 @@ export function runtimeProductRepairTargetScore(input: {
 	});
 }
 
+export function runtimeProductRepairInputSemantic(name: string, tag: string): number {
+	const normalized = String(name || "").trim().toLowerCase();
+	if (/message|prompt|request|instruction|describe|需求|描述|要求|消息|修改|修复|补充|告诉|方案|构建|指令|输入/.test(normalized)) return 1;
+	return String(tag || "").trim().toLowerCase() === "textarea" ? .8 : .6;
+}
+
 async function runtimeProductRepairInputCandidates(page: any): Promise<Array<{ locator: any; score: number }>> {
 	const locator = page.locator('textarea, [contenteditable="true"], input:not([type]), input[type="text"]');
 	const count = Math.min(await locator.count().catch(() => 0), 32);
@@ -1753,7 +1759,7 @@ async function runtimeProductRepairInputCandidates(page: any): Promise<Array<{ l
 			};
 		}).catch(() => ({ type: "", name: "", tag: "", editable: false, primary: false }));
 		if (!metadata.editable || /search|email|password|phone|tel|url|搜索|邮箱|邮件|密码|电话/.test(`${metadata.type} ${metadata.name}`.toLowerCase())) continue;
-		const semantic = /message|prompt|request|instruction|describe|需求|描述|要求|消息|修改|修复|补充|告诉/.test(metadata.name.toLowerCase()) ? 1 : (metadata.tag === "textarea" ? .8 : .6);
+		const semantic = runtimeProductRepairInputSemantic(metadata.name, metadata.tag);
 		candidates.push({ locator: item, score: runtimeProductRepairTargetScore({ roleState: 1, semantic, containerContext: metadata.primary ? 1 : .4, uniqueness: 0, transitionFeasibility: 1 }) });
 	}
 	for (const candidate of candidates) {

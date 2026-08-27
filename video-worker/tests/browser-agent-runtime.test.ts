@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserRecordingSize, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairTargetScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, browserRecordingSize, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairInputSemantic, runtimeProductRepairTargetScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -106,6 +106,14 @@ describe("same-entity product repair target confidence", () => {
 		expect(unique).toBe(1);
 		expect(ambiguous).toBeLessThan(.85);
 		expect(adaptiveTargetCandidateExecutable(unique, ambiguous)).toBe(true);
+	});
+
+	it("recognizes a unique detached build composer as a high-confidence repair input", () => {
+		const semantic = runtimeProductRepairInputSemantic("按 Enter 开始构建你的方案...", "div");
+		const detachedComposer = runtimeProductRepairTargetScore({ roleState: 1, semantic, containerContext: .4, uniqueness: 0, transitionFeasibility: 1 }) + .15;
+		expect(semantic).toBe(1);
+		expect(detachedComposer).toBeCloseTo(.88);
+		expect(adaptiveTargetCandidateExecutable(detachedComposer)).toBe(true);
 	});
 });
 
