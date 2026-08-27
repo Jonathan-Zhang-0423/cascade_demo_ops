@@ -98,6 +98,23 @@ func TestBrowserVisualObservationDoesNotFailOnIncompletePage(t *testing.T) {
 	}
 }
 
+func TestBrowserVisualObservationFailsCompletedPlaceholderContradiction(t *testing.T) {
+	result, err := normalizeBrowserVisualObservation(browserVisualObservationModelOutput{
+		Decision: "failed", Confidence: .97, Summary: "The platform says the task completed but still renders its default welcome state.",
+		VisibleEvidence: []string{
+			"The activity panel visibly says task completed and verified.",
+			"The preview still shows a generic Welcome placeholder and no requested product surface.",
+		},
+		BlockingReason: "Terminal product mismatch",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision != "failed" || result.BlockingReason == "" {
+		t.Fatalf("completed placeholder contradiction was not terminal: %+v", result)
+	}
+}
+
 func TestBrowserVisualGateDefersInteractionAndPolishToLayeredProof(t *testing.T) {
 	for _, prompt := range []string{browserVisualGateSystemPrompt, browserVisualLineGateSystemPrompt} {
 		if !strings.Contains(prompt, "screenshot cannot prove or disprove interactivity") || !strings.Contains(prompt, "Do not score visual polish") || !strings.Contains(prompt, "initial data states") {
@@ -105,6 +122,9 @@ func TestBrowserVisualGateDefersInteractionAndPolishToLayeredProof(t *testing.T)
 		}
 		if !strings.Contains(prompt, "at least two concrete matching identity, status, data, or control elements") {
 			t.Fatalf("visual Gate prompt lost its site-neutral core surface threshold: %q", prompt)
+		}
+		if !strings.Contains(prompt, "same screenshot") || !strings.Contains(prompt, "generic placeholder") {
+			t.Fatalf("visual Gate prompt lost terminal placeholder contradiction handling: %q", prompt)
 		}
 	}
 }
