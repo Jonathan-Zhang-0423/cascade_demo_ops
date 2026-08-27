@@ -391,6 +391,14 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 				continue
 			}
 			if !observed.TargetResolved && stage.StageKind == model.BusinessStageKindModeSelection {
+				if !runtimeAssertionPassed(observed.Observation, "configuration_control_absence_verified") {
+					decision.Kind, decision.Confidence, decision.Reason = model.HarnessDecisionDefer, 0.95, "a requested mode control is visibly present but its boolean state could not be resolved"
+					if err := appendEventDetails(stage, model.StageExecutionEventConfidenceDeferred, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil); err != nil {
+						return result, err
+					}
+					_ = appendEvent(stage, model.StageExecutionEventStageFailed, &observed.Observation, observed.EvidenceRefs)
+					return result, newRuntimeExecutionError("browser_agent_mode_configuration_unresolved", errors.New("visible mode control was not resolved; refusing to submit in an unverified mode"))
+				}
 				decision.Kind, decision.Confidence, decision.Reason = model.HarnessDecisionSkip, 0.9, "optional configuration control is absent; no primary action is guessed"
 				if err := appendEventDetails(stage, model.StageExecutionEventStepSatisfied, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil); err != nil {
 					return result, err

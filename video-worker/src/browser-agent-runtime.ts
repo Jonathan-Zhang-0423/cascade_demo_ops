@@ -764,6 +764,14 @@ export async function observeBrowserAgentStage(request: BrowserAgentStageRequest
   }
   const evidence = screenshotEvidence(artifact, request.stage, "执行前页面观察");
   const assertions = resolutionAssertions(resolved?.strategy, resolutionFailure, safeURL(session.page.url()));
+  if (!resolved && action && String(action.parameters?.action_recipe || "") === "configure_boolean") {
+	const approvedModeLabelVisible = await visibleApprovedBooleanConfigurationLabel(session.page, request.stage);
+	assertions.push({
+		kind: "configuration_control_absence_verified",
+		passed: !approvedModeLabelVisible,
+		actual: approvedModeLabelVisible ? "approved_mode_label_visible_but_unresolved" : "no_approved_mode_label_visible",
+	});
+  }
   if (resolved && action && String(action.parameters?.action_recipe || "") === "configure_boolean") {
     const actual = await booleanControlState(resolved.locator);
     const desired = booleanParameter(action.parameters, "desired_checked", false);
@@ -1741,6 +1749,25 @@ async function waitForBooleanControlState(locator: any, desired: boolean, timeou
 		if (await booleanControlState(locator) === desired) return true;
 		await new Promise((resolve) => setTimeout(resolve, 50));
 	} while (Date.now() < deadline);
+	return false;
+}
+
+async function visibleApprovedBooleanConfigurationLabel(page: any, stage: BrowserAgentWorkerStage): Promise<boolean> {
+	const allowedNames = (stage.target_contract.allowed_names || []).map(normalizeElementName).filter(Boolean);
+	if (allowedNames.length === 0) return false;
+	const labels = page.locator('label');
+	const count = Math.min(await withTimeout(labels.count(), targetProbeTimeoutMS, 0), 32);
+	for (let index = 0; index < count; index += 1) {
+		const label = labels.nth(index);
+		if (!await withTimeout(label.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
+		const localText = normalizeElementName(await withTimeout(
+			label.evaluate((element: any) => String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 240)),
+			targetProbeTimeoutMS,
+			"",
+		));
+		if (forbiddenName(localText, stage.target_contract.forbidden_names || [])) continue;
+		if (allowedNames.some((name) => localText === name || localText.includes(name))) return true;
+	}
 	return false;
 }
 

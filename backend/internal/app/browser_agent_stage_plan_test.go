@@ -106,6 +106,35 @@ func TestAdaptiveHarnessPersistsOptionalModeSkipWhenControlIsAbsent(t *testing.T
 	}
 }
 
+func TestAdaptiveHarnessBlocksSubmitWhenVisibleModeControlCannotBeResolved(t *testing.T) {
+	stage := BrowserAgentRuntimeStage{
+		ID: "stage_unresolved_visible_mode", Order: 1, NodeID: "node_unresolved_visible_mode",
+		StageKind: model.BusinessStageKindModeSelection, EntryRoute: "https://product.example/app",
+		TargetContract: model.BrowserAgentTargetContract{SemanticID: "direct_mode", Destructive: false, Confidence: .9},
+		Interactions: []model.BrowserAgentInteraction{{Kind: model.GraphActionClick, NonDestructive: true, Parameters: map[string]any{
+			"action_recipe": "configure_boolean", "desired_checked": "false", "optional_when_target_absent": "true",
+		}}},
+	}
+	plan := BrowserAgentRuntimePlan{
+		RunID: "run_unresolved_visible_mode", SourcePackageID: "pkg_unresolved_visible_mode",
+		SourceBundleHashSHA256: "bundle_unresolved_visible_mode", PolicyHashSHA256: "policy_unresolved_visible_mode",
+		HarnessProfile: model.AdaptiveBusinessHarnessProfileV2, Stages: []BrowserAgentRuntimeStage{stage},
+	}
+	observer := unresolvedVisibleModeObserver{}
+	executor := &countingStageExecutor{}
+	sink, err := newStageEventAuditLog(t.TempDir(), "job_unresolved_visible_mode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := newBrowserAgentStageOrchestrator(contractBrowserAgentPolicyGuard{}).Run(context.Background(), plan, observer, executor, sink)
+	if err == nil || err.Error() != "visible mode control was not resolved; refusing to submit in an unverified mode" {
+		t.Fatalf("visible unresolved mode must block before submit: err=%v", err)
+	}
+	if result.AuditError != nil || executor.calls != 0 {
+		t.Fatalf("visible unresolved mode must perform zero actions: calls=%d audit=%v", executor.calls, result.AuditError)
+	}
+}
+
 func TestAdaptiveHarnessSkipsModeActionWhenDesiredStateIsAlreadyObserved(t *testing.T) {
 	stage := BrowserAgentRuntimeStage{
 		ID: "stage_configured_mode", Order: 1, NodeID: "node_configured_mode",
@@ -254,9 +283,28 @@ func (unresolvedOptionalModeObserver) ObserveStage(_ context.Context, _ BrowserA
 	return BrowserAgentStageObservation{
 		Observation: model.RuntimeObservation{
 			Source: model.RuntimeObservationActualBrowser, URL: "https://product.example/app",
-			Assertions: []model.RuntimeAssertion{{Kind: "target_resolved", Passed: false, Actual: "no optional configuration control"}},
+			Assertions: []model.RuntimeAssertion{
+				{Kind: "target_resolved", Passed: false, Actual: "no optional configuration control"},
+				{Kind: "configuration_control_absence_verified", Passed: true, Actual: "no_approved_mode_label_visible"},
+			},
 		},
 		EvidenceRefs:   []model.EvidenceRef{{ID: "optional_mode_page", Kind: model.EvidenceKindWebScreenshot, Confidence: 1}},
+		TargetResolved: false,
+	}, nil
+}
+
+type unresolvedVisibleModeObserver struct{}
+
+func (unresolvedVisibleModeObserver) ObserveStage(_ context.Context, _ BrowserAgentRuntimePlan, _ BrowserAgentRuntimeStage) (BrowserAgentStageObservation, error) {
+	return BrowserAgentStageObservation{
+		Observation: model.RuntimeObservation{
+			Source: model.RuntimeObservationActualBrowser, URL: "https://product.example/app",
+			Assertions: []model.RuntimeAssertion{
+				{Kind: "target_resolved", Passed: false, Actual: "boolean target unresolved"},
+				{Kind: "configuration_control_absence_verified", Passed: false, Actual: "approved_mode_label_visible_but_unresolved"},
+			},
+		},
+		EvidenceRefs: []model.EvidenceRef{{ID: "visible_mode_page", Kind: model.EvidenceKindWebScreenshot, Confidence: 1}},
 		TargetResolved: false,
 	}, nil
 }
