@@ -1792,6 +1792,13 @@ async function runtimeProductRepairSubmitTarget(page: any, stage: BrowserAgentWo
 	let container = input.locator("xpath=ancestor::form[1]");
 	if (await container.count().catch(() => 0) !== 1) container = input.locator("xpath=ancestor::*[self::main or self::article or self::section or @role='region'][1]");
 	if (await container.count().catch(() => 0) !== 1) {
+		// Compact chat composers are often a plain div rather than a form or
+		// landmark. Bind the nearest ancestor that actually owns an actionable
+		// control; this stays local to the already high-confidence unique input
+		// and avoids searching unrelated page-level primary buttons.
+		container = input.locator("xpath=ancestor::*[.//button or .//*[@role='button']][1]");
+	}
+	if (await container.count().catch(() => 0) !== 1) {
 		attempts.push(targetResolutionAttempt("runtime_product_repair_submit", 0, false, false, false, "no_candidates"));
 		return undefined;
 	}
@@ -1801,8 +1808,11 @@ async function runtimeProductRepairSubmitTarget(page: any, stage: BrowserAgentWo
 	for (let index = 0; index < count; index += 1) {
 		const item = buttons.nth(index);
 		if (!await item.isVisible().catch(() => false) || !await item.isEnabled().catch(() => false)) continue;
-		const name = String(await item.getAttribute("aria-label").catch(() => "") || await item.innerText().catch(() => "")).trim();
-		if (structuralAbortActionName(name)) continue;
+		const name = String(await item.getAttribute("aria-label").catch(() => "") || await item.getAttribute("title").catch(() => "") || await item.innerText().catch(() => "")).trim();
+		// An icon-only control can legitimately be the sole action beside the
+		// unique composer. Reject named abort actions, but let uniqueness and the
+		// local composer context carry an unnamed button's confidence score.
+		if (name && structuralAbortActionName(name)) continue;
 		const semantic = /send|submit|apply|update|run|start|发送|提交|应用|更新|执行|开始/.test(name.toLowerCase()) ? 1 : .7;
 		candidates.push({ locator: item, score: runtimeProductRepairTargetScore({ roleState: 1, semantic, containerContext: 1, uniqueness: 0, transitionFeasibility: 1 }) });
 	}

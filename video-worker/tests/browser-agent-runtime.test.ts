@@ -115,6 +115,67 @@ describe("same-entity product repair target confidence", () => {
 		expect(detachedComposer).toBeCloseTo(.88);
 		expect(adaptiveTargetCandidateExecutable(detachedComposer)).toBe(true);
 	});
+
+	it("resolves an icon-only submit next to a selector-free repair composer", async () => {
+		const empty = {
+			count: async () => 0,
+			first() { return this; },
+			isVisible: async () => false,
+		};
+		const button = {
+			isVisible: async () => true,
+			isEnabled: async () => true,
+			getAttribute: async () => null,
+			innerText: async () => "",
+		};
+		const buttons = {
+			count: async () => 1,
+			nth: () => button,
+		};
+		const actionContainer = {
+			count: async () => 1,
+			locator: (selector: string) => selector === 'button, [role="button"]' ? buttons : empty,
+		};
+		const input = {
+			isVisible: async () => true,
+			isEnabled: async () => true,
+			evaluate: async (callback: (element: any) => unknown) => callback({
+				tagName: "TEXTAREA",
+				isContentEditable: false,
+				getAttribute: (name: string) => name === "placeholder" ? "Describe the requested update" : null,
+				closest: () => ({}),
+			}),
+			locator: (selector: string) => selector.includes(".//button") ? actionContainer : empty,
+		};
+		const inputs = { count: async () => 1, nth: () => input };
+		const page = {
+			getByRole: () => empty,
+			getByLabel: () => empty,
+			getByText: () => empty,
+			locator: (selector: string) => selector === 'textarea, [contenteditable="true"], input:not([type]), input[type="text"]' ? inputs : empty,
+		};
+		const interaction = {
+			kind: "click",
+			parameters: { action_recipe: "product_repair_submit" },
+			target: { label: "Apply product repair", text: "Apply product repair" },
+			non_destructive: true,
+		} as any;
+		const resolved = await resolveTarget(page, {
+			id: "repair_submit",
+			order: 1,
+			node_id: "product_repair_submit",
+			target_contract: {
+				semantic_id: "product_repair_submit",
+				allowed_roles: ["button", "link"],
+				allowed_names: ["Apply product repair"],
+				destructive: false,
+			},
+			interactions: [interaction],
+			validations: [],
+		} as any, interaction, false);
+		expect(resolved.strategy).toBe("runtime_product_repair_submit");
+		expect(resolved.locator).toBe(button);
+	});
 });
 
 describe("closed-loop narrative chapter coverage", () => {
