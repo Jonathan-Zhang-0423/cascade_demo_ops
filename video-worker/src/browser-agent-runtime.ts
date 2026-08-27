@@ -2481,7 +2481,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 		if (target) {
 			const busyNow = await pageStillBusy(session.page);
 			if (busyNow) sawBusy = true;
-			if (!busyNow && await pageShowsCompletedPlaceholderContradiction(session.page, target.digestTarget)) {
+			if (await pageShowsCompletedPlaceholderContradiction(session.page, target.digestTarget)) {
 				// A finished/successful lifecycle claim and an unmistakable builder
 				// placeholder in the runtime surface are two independent structural
 				// facts. Route a same-entity product repair instead of spending
