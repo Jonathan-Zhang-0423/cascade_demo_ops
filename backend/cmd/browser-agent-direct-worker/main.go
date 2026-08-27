@@ -185,9 +185,9 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 	completed := false
 	defer func() {
 		if !completed {
-			releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer releaseCancel()
-			_ = w.release(releaseCtx, job.JobID, "worker_interrupted")
+			if err := w.releaseInterruptedJob(job.JobID); err != nil {
+				fmt.Fprintln(os.Stderr, "post-release stage-event recovery incomplete:", redactError(err))
+			}
 		}
 	}()
 	credentials := map[string]model.DirectCredentialValue{}
@@ -250,6 +250,22 @@ func (w *worker) runJob(parent context.Context, job directtransport.WorkerJob) {
 	}
 	completed = true
 	fmt.Fprintln(os.Stdout, "job completed job=", safeID(job.JobID), "artifacts=", len(files))
+}
+
+func (w *worker) releaseInterruptedJob(jobID string) error {
+	releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	err := w.release(releaseCtx, jobID, "worker_interrupted")
+	releaseCancel()
+	if err != nil {
+		return err
+	}
+	// The Gateway accepts bounded stage-log recovery only after the release
+	// moves this credential-gated job back to awaiting_credentials. Publish it
+	// immediately so the App can build an observe-only reconciliation package
+	// without restarting this Worker or replaying the interrupted package.
+	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer recoveryCancel()
+	return w.recoverOrphanedStageEventLogs(recoveryCtx)
 }
 
 func (w *worker) monitorCancellation(ctx context.Context, jobID string, cancel context.CancelFunc) {

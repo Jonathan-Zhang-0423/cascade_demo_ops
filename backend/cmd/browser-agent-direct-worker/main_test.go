@@ -124,6 +124,44 @@ func TestRecoverOrphanedStageEventLogUploadsOnce(t *testing.T) {
 	}
 }
 
+func TestInterruptedJobPublishesStageLogImmediatelyAfterRelease(t *testing.T) {
+	root := t.TempDir()
+	jobID := "job_release_recovery"
+	recording := filepath.Join(root, "jobs", jobID, "recording")
+	if err := os.MkdirAll(recording, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("{\"event_type\":\"stage_completed\"}\n")
+	if err := os.WriteFile(filepath.Join(recording, "browser-agent-stage-events.jsonl"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	released, uploaded := false, false
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodPost && request.URL.Path == "/v1/worker/jobs/"+jobID+"/release":
+			released = true
+			response.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodPut && request.URL.Path == "/v1/worker/jobs/"+jobID+"/artifacts/stage_event_log_"+jobID:
+			if !released || request.Header.Get("X-Artifact-Recovery") != "stage-event-log-v1" {
+				http.Error(response, "stage log uploaded before release", http.StatusConflict)
+				return
+			}
+			uploaded = true
+			response.WriteHeader(http.StatusCreated)
+		default:
+			http.Error(response, "unexpected request", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(server.Close)
+	w := &worker{client: server.Client(), baseURL: server.URL, token: "worker-test-token", outputRoot: root}
+	if err := w.releaseInterruptedJob(jobID); err != nil {
+		t.Fatal(err)
+	}
+	if !released || !uploaded {
+		t.Fatalf("interrupted recovery was incomplete: released=%t uploaded=%t", released, uploaded)
+	}
+}
+
 func TestPrioritizeRecoveryArtifactsPutsStageEventsFirst(t *testing.T) {
 	files := []app.DirectWorkerArtifactFile{
 		{Artifact: model.ArtifactRef{ID: "video", Kind: "raw_recording"}},
