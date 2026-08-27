@@ -365,6 +365,11 @@ func TestAdaptiveWaitFailureKeepsObservedStateReconciliationRaceClosed(t *testin
 	if adaptiveWaitResultNeedsReconciliation(request, status, &experiment.AdapterError{Code: "explicit_terminal_build_failure"}) {
 		t.Fatal("an explicit terminal failure was incorrectly routed into observed-state reconciliation")
 	}
+	status.Status = "awaiting_credentials"
+	recovered := &experiment.AdapterError{Code: "observed_state_reconciliation_ready", State: experiment.RunStateWaitingExternal, Retryable: true}
+	if !adaptiveWaitResultNeedsReconciliation(request, status, recovered) {
+		t.Fatal("a released v2 observation with recovered stage evidence would replay its credential-gated package")
+	}
 	request.HarnessProfile = "legacy"
 	if adaptiveWaitResultNeedsReconciliation(request, status, deferred) {
 		t.Fatal("legacy execution semantics changed")

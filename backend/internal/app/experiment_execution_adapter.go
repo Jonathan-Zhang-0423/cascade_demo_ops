@@ -221,11 +221,15 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 // read and waitForDirectResult. Preserve the same observed-state repair route
 // in that race window instead of surfacing a confidence prompt to the user.
 func adaptiveWaitResultNeedsReconciliation(request experiment.LegExecutionRequest, status model.DirectJobStatus, err error) bool {
-	if !isAdaptiveExperimentHarness(request.HarnessProfile) || status.Status != "failed" || err == nil {
+	if !isAdaptiveExperimentHarness(request.HarnessProfile) || err == nil {
 		return false
 	}
 	var adapterErr *experiment.AdapterError
-	return errors.As(err, &adapterErr) && adapterErr.Code == "confidence_deferred"
+	if !errors.As(err, &adapterErr) {
+		return false
+	}
+	return status.Status == "failed" && adapterErr.Code == "confidence_deferred" ||
+		status.Status == "awaiting_credentials" && adapterErr.Code == "observed_state_reconciliation_ready"
 }
 
 func adaptiveRetryableRuntimeFailure(code string) bool {
@@ -920,8 +924,8 @@ func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context,
 		case "canceled", "expired":
 			return status, &experiment.AdapterError{Code: firstNonEmptyString(status.BlockingErrorCode, "explicit_terminal_build_failure"), Phase: "terminal_failed", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: []string{jobID}}
 		case "awaiting_credentials":
-			if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 && directStatusHasRecoveredStageLog(status) {
-				return status, &experiment.AdapterError{Code: "observed_state_reconciliation_ready", Phase: "reconcile_observed_state", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: []string{jobID}}
+			if isAdaptiveExperimentHarness(request.HarnessProfile) && directStatusHasRecoveredStageLog(status) {
+				return status, &experiment.AdapterError{Code: "observed_state_reconciliation_ready", Phase: "reconcile_observed_state", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{jobID}}
 			}
 			if _, err := a.service.ReuploadDirectCredential(ctx, projectID, jobID); err != nil {
 				return status, &experiment.AdapterError{Code: "credential_restore_failed", Phase: "waiting_input", State: experiment.RunStateWaitingInput, Retryable: true, Cause: err}
