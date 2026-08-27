@@ -427,6 +427,22 @@ func TestAdaptiveV2RetriesOnlySameEntityRepairFailuresBeforeSubmitEffect(t *test
 	}
 }
 
+func TestCountBoundEntityProductRepairSubmitsIgnoresDriftAndPreEffectFailures(t *testing.T) {
+	passedSubmit := []model.StepResult{{NodeID: "business_stage_submit_product_repair", Status: "passed"}}
+	results := []model.RecordingResultPackage{
+		{CloudJobID: "job-bound", StepResults: passedSubmit, FailureDiagnostic: &model.ScriptFailureDiagnostic{CurrentURL: "https://example.test/entity/one?view=preview"}},
+		{CloudJobID: "job-drift", StepResults: passedSubmit, FailureDiagnostic: &model.ScriptFailureDiagnostic{CurrentURL: "https://example.test/workspace"}},
+		{CloudJobID: "job-pre-effect", StepResults: []model.StepResult{{NodeID: "business_stage_submit_product_repair", Status: "failed"}}, FailureDiagnostic: &model.ScriptFailureDiagnostic{CurrentURL: "https://example.test/entity/one"}},
+		{CloudJobID: "job-bound", StepResults: passedSubmit, FailureDiagnostic: &model.ScriptFailureDiagnostic{CurrentURL: "https://example.test/entity/one"}},
+	}
+	if got := countBoundEntityProductRepairSubmits("https://example.test/entity/one", results); got != 1 {
+		t.Fatalf("bound committed product repair submits = %d, want 1", got)
+	}
+	if got := countBoundEntityProductRepairSubmits("not-a-url", results); got != 0 {
+		t.Fatalf("invalid bound entity URL counted %d repairs", got)
+	}
+}
+
 func TestAdaptiveV2BacktracksObserveOnlyLineageWhenRepairSubmitNeverStarted(t *testing.T) {
 	request := experiment.LegExecutionRequest{
 		HarnessProfile:      experiment.HarnessProfileAdaptiveBusinessV2,

@@ -306,7 +306,7 @@ func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Con
 		}
 		if parentJobID, ok := a.adaptivePreEffectRepairLineageSource(ctx, request, projectID, sourceJobID); ok {
 			history := a.restoreClosedLoopCaptureHistory(ctx, projectID, parentJobID)
-			return a.executeSameEntityProductRepairRound(ctx, request, projectID, parentJobID, requiredProductRepairScore(request), history, request.ProductRepairRounds, true, emit)
+			return a.executeSameEntityProductRepairRound(ctx, request, projectID, parentJobID, requiredProductRepairScore(request), history, request.ProductRepairRounds, "pre_effect", emit)
 		}
 	}
 	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "reconcile_observed_state", Summary: "失败诊断显示业务已进入后继实体；正在生成只观察续接包", EvidenceRefs: []string{sourceJobID}}); err != nil {
@@ -437,7 +437,7 @@ func adaptiveSameEntityRepairPackageRetryable(request experiment.LegExecutionReq
 
 func (a *appExperimentExecutionAdapter) retryAdaptiveSameEntityRepairInput(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, emit func(experiment.LegExecutionUpdate) error) error {
 	history := a.restoreClosedLoopCaptureHistory(ctx, projectID, sourceJobID)
-	return a.executeSameEntityProductRepairRound(ctx, request, projectID, sourceJobID, requiredProductRepairScore(request), history, request.ProductRepairRounds, true, emit)
+	return a.executeSameEntityProductRepairRound(ctx, request, projectID, sourceJobID, requiredProductRepairScore(request), history, request.ProductRepairRounds, "pre_effect", emit)
 }
 
 func withRuntimeConfirmedTargetSubmit(request experiment.LegExecutionRequest, resultEntryRef string) experiment.LegExecutionRequest {
@@ -659,6 +659,13 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 				return err
 			}
 			if request.ProductRepairRounds >= 3 {
+				boundAttempts := a.boundEntityProductRepairSubmitCount(ctx, projectID, result)
+				if boundAttempts > 0 && boundAttempts < 3 {
+					if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "product_repair", Summary: "先前修复未在绑定实体形成可验证结果；正在使用剩余的同实体修复额度", EvidenceRefs: evidenceRefs}); err != nil {
+						return err
+					}
+					return a.executeSameEntityProductRepairRound(ctx, request, projectID, jobID, score, history, boundAttempts+1, "unfulfilled_result", emit)
+				}
 				return &experiment.AdapterError{Code: "product_repair_budget_exhausted", Phase: "product_verification", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: evidenceRefs}
 			}
 			directive := model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "surface-validation", FailureClass: "required_product_criteria_failed", TargetModule: "execution-capture", Action: "submit_product_repair", ArtifactRefs: []string{scoreEvidence}, Attempt: request.ProductRepairRounds + 1, MaxAttempts: 3, ResumePhase: "product_verification"}
@@ -806,11 +813,57 @@ func (a *appExperimentExecutionAdapter) restoreClosedLoopCaptureHistory(ctx cont
 	return result
 }
 
-func (a *appExperimentExecutionAdapter) executeSameEntityProductRepair(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, score model.CapabilityScore, history []closedLoopCaptureBatch, emit func(experiment.LegExecutionUpdate) error) error {
-	return a.executeSameEntityProductRepairRound(ctx, request, projectID, sourceJobID, score, history, request.ProductRepairRounds+1, false, emit)
+func (a *appExperimentExecutionAdapter) boundEntityProductRepairSubmitCount(ctx context.Context, projectID string, current model.RecordingResultPackage) int {
+	state, err := a.service.states.Load(ctx, projectID)
+	if err != nil || state.ProjectContext == nil || state.DesktopCloudRun == nil {
+		return 0
+	}
+	results := make([]model.RecordingResultPackage, 0, len(state.DesktopCloudRun.RepairHistory)+1)
+	for _, audit := range state.DesktopCloudRun.RepairHistory {
+		if audit.ResultPackage != nil {
+			results = append(results, *audit.ResultPackage)
+		}
+	}
+	results = append(results, current)
+	return countBoundEntityProductRepairSubmits(state.ProjectContext.ProductURL, results)
 }
 
-func (a *appExperimentExecutionAdapter) executeSameEntityProductRepairRound(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, score model.CapabilityScore, history []closedLoopCaptureBatch, round int, preEffectRecovery bool, emit func(experiment.LegExecutionUpdate) error) error {
+func countBoundEntityProductRepairSubmits(boundEntityURL string, results []model.RecordingResultPackage) int {
+	bound, err := url.Parse(strings.TrimSpace(boundEntityURL))
+	if err != nil || bound.Scheme == "" || bound.Host == "" {
+		return 0
+	}
+	seen := map[string]bool{}
+	count := 0
+	for _, result := range results {
+		jobID := strings.TrimSpace(result.CloudJobID)
+		if jobID == "" || seen[jobID] || result.FailureDiagnostic == nil {
+			continue
+		}
+		currentURL, parseErr := url.Parse(strings.TrimSpace(result.FailureDiagnostic.CurrentURL))
+		if parseErr != nil || !sameURLWithoutQuery(bound, currentURL) {
+			continue
+		}
+		submitted := false
+		for _, step := range result.StepResults {
+			if strings.TrimSpace(step.NodeID) == "business_stage_submit_product_repair" && strings.EqualFold(strings.TrimSpace(step.Status), "passed") {
+				submitted = true
+				break
+			}
+		}
+		if submitted {
+			seen[jobID] = true
+			count++
+		}
+	}
+	return count
+}
+
+func (a *appExperimentExecutionAdapter) executeSameEntityProductRepair(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, score model.CapabilityScore, history []closedLoopCaptureBatch, emit func(experiment.LegExecutionUpdate) error) error {
+	return a.executeSameEntityProductRepairRound(ctx, request, projectID, sourceJobID, score, history, request.ProductRepairRounds+1, "", emit)
+}
+
+func (a *appExperimentExecutionAdapter) executeSameEntityProductRepairRound(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, score model.CapabilityScore, history []closedLoopCaptureBatch, round int, retryMode string, emit func(experiment.LegExecutionUpdate) error) error {
 	prepareRequest := request
 	prepareRequest.ProductRepairRounds = max(0, round-1)
 	prepared, err := a.service.prepareAdaptiveSameEntityProductRepair(ctx, projectID, sourceJobID, prepareRequest, score)
@@ -818,8 +871,8 @@ func (a *appExperimentExecutionAdapter) executeSameEntityProductRepairRound(ctx 
 		return &experiment.AdapterError{Code: "same_entity_product_repair_package_failed", Phase: "product_repair", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: closedLoopHistoryArtifactIDs(history), Cause: err}
 	}
 	key := fmt.Sprintf("product-repair-%s-%s-%d", safePathSegment(request.RunID), safePathSegment(request.LegID), round)
-	if preEffectRecovery {
-		key += fmt.Sprintf("-pre-effect-%d", request.BrowserAttempt)
+	if retryMode != "" {
+		key += fmt.Sprintf("-%s-%d", safePathSegment(retryMode), request.BrowserAttempt)
 	}
 	upload, err := a.service.UploadDirectExecutionPackage(ctx, projectID, DirectTransportUploadRequest{
 		OrgID: defaultDesktopOrgID, PackageDigestSHA256: prepared.Build.PackageDigestSHA256,
@@ -841,8 +894,10 @@ func (a *appExperimentExecutionAdapter) executeSameEntityProductRepairRound(ctx 
 		return err
 	}
 	summary := fmt.Sprintf("正在同一项目中执行第 %d 轮自动修复；不会创建第二个项目", round)
-	if preEffectRecovery {
+	if retryMode == "pre_effect" {
 		summary = fmt.Sprintf("第 %d 轮修复的提交 effect 尚未发生；已恢复其幂等输入并重新解析局部提交控件", round)
+	} else if retryMode == "unfulfilled_result" {
+		summary = fmt.Sprintf("第 %d 轮修复未在绑定实体形成可验证结果；正在基于新的事实证据重新执行", round)
 	}
 	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "product_repair", Summary: summary, EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
 		return err
