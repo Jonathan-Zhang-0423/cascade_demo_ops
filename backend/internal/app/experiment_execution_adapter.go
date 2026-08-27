@@ -334,6 +334,11 @@ func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Con
 		}); err != nil {
 			return err
 		}
+		// The commit above is durable, but ExecuteLeg still holds the request
+		// snapshot captured before reconciliation. Reflect the same confirmed
+		// effect locally so a required acceptance failure later in this very
+		// invocation can enter the bounded product-repair loop immediately.
+		request = withRuntimeConfirmedTargetSubmit(request, entryRef)
 	}
 	phase, summary := "resume_observe_only", "只观察续接任务已启动；不会执行创建或提交"
 	if prepared.PendingContinuation {
@@ -348,6 +353,28 @@ func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Con
 		return err
 	}
 	return a.completeDirectLeg(ctx, request, projectID, jobID, status, true, emit)
+}
+
+func withRuntimeConfirmedTargetSubmit(request experiment.LegExecutionRequest, resultEntryRef string) experiment.LegExecutionRequest {
+	checkpoint := experiment.Checkpoint{ResultEntryRef: strings.TrimSpace(resultEntryRef)}
+	if request.Checkpoint != nil {
+		checkpoint = *request.Checkpoint
+		checkpoint.OnceEffects = append([]experiment.OnceEffectRecord{}, request.Checkpoint.OnceEffects...)
+		checkpoint.SegmentRefs = append([]experiment.ArtifactRef{}, request.Checkpoint.SegmentRefs...)
+		checkpoint.ResultEntryRef = strings.TrimSpace(resultEntryRef)
+	}
+	found := false
+	for index := range checkpoint.OnceEffects {
+		if strings.TrimSpace(checkpoint.OnceEffects[index].EffectID) == "target_submit" {
+			checkpoint.OnceEffects[index].Status = "confirmed"
+			found = true
+		}
+	}
+	if !found {
+		checkpoint.OnceEffects = append(checkpoint.OnceEffects, experiment.OnceEffectRecord{EffectID: "target_submit", Kind: "target_submission", Status: "confirmed"})
+	}
+	request.Checkpoint = &checkpoint
+	return request
 }
 
 func (a *appExperimentExecutionAdapter) latestAdaptiveReconciliationJobID(ctx context.Context, projectID, sourceJobID, harnessProfile string) string {

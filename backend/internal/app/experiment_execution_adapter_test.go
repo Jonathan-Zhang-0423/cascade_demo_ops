@@ -365,6 +365,21 @@ func TestCheckpointHasConfirmedTargetSubmitRequiresBoundConfirmedEffect(t *testi
 	}
 }
 
+func TestWithRuntimeConfirmedTargetSubmitDoesNotMutateInputSnapshot(t *testing.T) {
+	original := &experiment.Checkpoint{
+		ResultEntryRef: "direct:project-one:job-started",
+		OnceEffects:    []experiment.OnceEffectRecord{{EffectID: "target_submit", Status: "started"}},
+	}
+	request := experiment.LegExecutionRequest{Checkpoint: original}
+	updated := withRuntimeConfirmedTargetSubmit(request, "direct:project-one:job-observe")
+	if !checkpointHasConfirmedTargetSubmit(updated.Checkpoint) || updated.Checkpoint.ResultEntryRef != "direct:project-one:job-observe" {
+		t.Fatalf("runtime checkpoint was not advanced: %+v", updated.Checkpoint)
+	}
+	if original.OnceEffects[0].Status != "started" || original.ResultEntryRef != "direct:project-one:job-started" {
+		t.Fatalf("input checkpoint snapshot was mutated: %+v", original)
+	}
+}
+
 func TestAdaptiveTransportWaitDoesNotPreemptWorkerProgressWindow(t *testing.T) {
 	request := experiment.LegExecutionRequest{
 		HarnessProfile:  experiment.HarnessProfileAdaptiveBusinessV1,
