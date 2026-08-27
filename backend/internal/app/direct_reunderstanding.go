@@ -340,6 +340,16 @@ func terminalInteractionVerificationRepairGraph(state *orchestrator.CascadeState
 	if err != nil {
 		return nil, true, err
 	}
+	// Keep the failed verification node before turning the source slot into the
+	// observed-route resume. Some already-trimmed repair packages contain only
+	// that one node. In that case the old implementation replaced the proof with
+	// navigation and then rejected its own one-node graph, making a harmless
+	// Worker interruption impossible to resume.
+	verificationCopy := *graph.Nodes[failedIndex]
+	if verificationCopy.ActionSpec != nil {
+		actionCopy := *verificationCopy.ActionSpec
+		verificationCopy.ActionSpec = &actionCopy
+	}
 
 	resumeIndex := failedIndex
 	for resumeIndex > 0 {
@@ -398,7 +408,11 @@ func terminalInteractionVerificationRepairGraph(state *orchestrator.CascadeState
 		retained = append(retained, node)
 	}
 	if len(retained) < 2 {
-		return nil, true, fmt.Errorf("terminal interaction repair has no verified observation suffix")
+		originalID := verificationCopy.ID
+		resume.ID = originalID + "_resume"
+		resume.Type = model.GraphNodeTypeStart
+		verificationCopy.Type = model.GraphNodeTypeEnd
+		retained = append(retained, &verificationCopy)
 	}
 	retained[len(retained)-1].Type = model.GraphNodeTypeEnd
 	wanted := map[string]bool{}

@@ -155,6 +155,34 @@ func TestAdaptiveSuccessorRepairSkipsMissingSubmitAndKeepsVerificationSuffix(t *
 	}
 }
 
+func TestTerminalInteractionRepairRestoresSingleNodeVerificationSuffix(t *testing.T) {
+	node := &model.GraphNode{
+		ID: "touch_verification", Type: model.GraphNodeTypeEnd, Action: string(model.GraphActionGesture),
+		ActionSpec: &model.GraphAction{Type: model.GraphActionGesture},
+		InteractionContract: &model.InteractionContract{
+			ContractID: "touch_contract", ReplayPolicy: model.InteractionReplayIdempotentWrite,
+		},
+	}
+	state := &orchestrator.CascadeState{
+		ProjectContext: &model.ProjectContext{ProductURL: "https://app.example.com"},
+		WorkflowGraph:  &model.DemoWorkflowGraph{ID: "graph_terminal_interaction_repair_trimmed", Nodes: []*model.GraphNode{node}},
+	}
+	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{
+		FailedNodeID: node.ID, CurrentURL: "https://app.example.com/entity/one",
+	}}
+
+	repaired, eligible, err := terminalInteractionVerificationRepairGraph(state, result, time.Now())
+	if err != nil || !eligible || repaired == nil {
+		t.Fatalf("single-node terminal proof was not recoverable: eligible=%v err=%v", eligible, err)
+	}
+	if len(repaired.Nodes) != 2 || repaired.Nodes[0].ActionSpec.Type != model.GraphActionNavigate || repaired.Nodes[1].ActionSpec.Type != model.GraphActionGesture {
+		t.Fatalf("repair must retain navigation plus the interrupted verification: %+v", repaired.Nodes)
+	}
+	if repaired.Nodes[0].ID == repaired.Nodes[1].ID {
+		t.Fatalf("repair synthesized duplicate node ids: %+v", repaired.Nodes)
+	}
+}
+
 func TestSelectObservedSuccessorURLPrefersConcreteEntityBeforeWorkspaceDrift(t *testing.T) {
 	project := &model.ProjectContext{ProductURL: "https://app.example.com/workspace"}
 	events := []model.StageExecutionEvent{
