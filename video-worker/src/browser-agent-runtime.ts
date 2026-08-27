@@ -2503,6 +2503,9 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			deadline = Math.min(deadline, Date.now() + postRefreshObserveMS);
 			nextCaptureAt = Date.now();
 		}
+		if (await pageShowsExplicitBusinessFailure(session.page)) {
+			return { surface: false, score: false, controls: false };
+		}
 		if (await pageShowsCompletedPlaceholderContradiction(session.page, undefined)) {
 			// Some terminal placeholders expose no focusable runtime target at all,
 			// so classify the parent preview shell before surface discovery.
@@ -2571,6 +2574,25 @@ async function waitForPlayableSurfaceWithVisualObservation(
 		await session.page.waitForTimeout(Math.min(1_000, Math.max(100, deadline - Date.now())));
 	}
 	return { surface: false, score: false, controls: false };
+}
+
+export function browserVisibleTextShowsExplicitBusinessFailure(value: string): boolean {
+	const text = String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+	if (!text) return false;
+	const chineseRuntimeFailure = /(?:构建|生成|编译|部署|运行|代码)(?:过程|任务|项目)?(?:中)?(?:已)?(?:失败|出错|出了点问题|发生错误|遇到问题)(?:[，,:：。！？\s]|$)[^。！？\n]{0,20}(?:请)?(?:重试|重新尝试|稍后再试)/.test(text);
+	const englishRuntimeFailure = /\b(?:build|generation|compile|deployment|runtime|code)\b(?: task| process| project)?(?: has| was)? (?:failed|encountered an error)(?:[.!,:;\s]|$)[^.!?\n]{0,30}\b(?:please )?(?:retry|try again|rerun)\b/.test(text);
+	return chineseRuntimeFailure || englishRuntimeFailure
+		|| /(?:任务已取消|权限(?:已)?拒绝|permission denied|task (?:was )?canceled)/i.test(text);
+}
+
+async function pageShowsExplicitBusinessFailure(page: any): Promise<boolean> {
+	const frames = typeof page.frames === "function" ? page.frames() : [page];
+	for (const frame of frames.slice(0, 16)) {
+		const body = frame.locator?.("body");
+		const text = body?.innerText ? await body.innerText({ timeout: 1_000 }).catch(() => "") : "";
+		if (browserVisibleTextShowsExplicitBusinessFailure(text)) return true;
+	}
+	return false;
 }
 
 async function pageShowsCompletedPlaceholderContradiction(page: any, surface: any): Promise<boolean> {
