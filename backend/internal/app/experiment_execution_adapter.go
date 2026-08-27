@@ -694,14 +694,12 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 			if err := emit(experiment.LegExecutionUpdate{Kind: "capability_scored", Summary: "必需产品交互未通过，已从真实阶段结果生成失败能力报告", EvidenceRefs: []string{scoreEvidence}, CapabilityScore: summary}); err != nil {
 				return err
 			}
-			if request.ProductRepairRounds >= 3 {
-				boundAttempts := a.boundEntityProductRepairSubmitCount(ctx, projectID, result)
-				if boundAttempts > 0 && boundAttempts < 3 {
-					if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "product_repair", Summary: "先前修复未在绑定实体形成可验证结果；正在使用剩余的同实体修复额度", EvidenceRefs: evidenceRefs}); err != nil {
-						return err
-					}
-					return a.executeSameEntityProductRepairRound(ctx, request, projectID, jobID, score, history, boundAttempts+1, "unfulfilled_result", emit)
-				}
+			if adaptiveProductRepairBudgetExhausted(request.ProductRepairRounds) {
+				// ProductRepairRounds is the coordinator's durable attempt budget. A
+				// Worker restart can omit the pre-restart submit stage from the final
+				// package, but it must never reopen a target-side repair that was
+				// already issued. Treat the durable round count as authoritative and
+				// route the execution-package defect to Harness repair instead.
 				return &experiment.AdapterError{Code: "product_repair_budget_exhausted", Phase: "product_verification", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: evidenceRefs}
 			}
 			directive := model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "surface-validation", FailureClass: "required_product_criteria_failed", TargetModule: "execution-capture", Action: "submit_product_repair", ArtifactRefs: []string{scoreEvidence}, Attempt: request.ProductRepairRounds + 1, MaxAttempts: 3, ResumePhase: "product_verification"}
@@ -757,7 +755,7 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 			return err
 		}
 		if !score.CorePassed || !score.EligibleForFilm {
-			if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 && request.ProductRepairRounds < 3 {
+			if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 && !adaptiveProductRepairBudgetExhausted(request.ProductRepairRounds) {
 				directive := model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "surface-validation", FailureClass: "required_product_criteria_failed", TargetModule: "execution-capture", Action: "submit_product_repair", ArtifactRefs: []string{scoreEvidence}, Attempt: request.ProductRepairRounds + 1, MaxAttempts: 3, ResumePhase: "product_verification"}
 				if err := emit(experiment.LegExecutionUpdate{Kind: "repair_directive", Summary: "必需产品能力未通过；只允许在本次绑定实体内提交简短修复要求", EvidenceRefs: []string{scoreEvidence}, RepairDirective: &directive}); err != nil {
 					return err
@@ -821,6 +819,10 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 		return a.runFinalFilm(ctx, request, projectID, result, materializedSessionID, allDownloads, emit)
 	}
 	return nil
+}
+
+func adaptiveProductRepairBudgetExhausted(rounds int) bool {
+	return rounds >= 3
 }
 
 func adaptiveRepairMaterializationArtifacts(artifacts []model.DirectArtifact) []model.DirectArtifact {

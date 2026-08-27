@@ -643,6 +643,19 @@ func TestAdaptiveExplicitReconciliationOutranksExhaustedRepairResult(t *testing.
 	}
 }
 
+func TestAdaptiveProductRepairBudgetCannotReopenAfterWorkerRestart(t *testing.T) {
+	for _, rounds := range []int{0, 1, 2} {
+		if adaptiveProductRepairBudgetExhausted(rounds) {
+			t.Fatalf("repair budget exhausted at round %d", rounds)
+		}
+	}
+	for _, rounds := range []int{3, 4} {
+		if !adaptiveProductRepairBudgetExhausted(rounds) {
+			t.Fatalf("repair budget reopened at round %d", rounds)
+		}
+	}
+}
+
 func TestAdaptiveRuntimeFailureRetryIsLimitedToPreBrowserInfrastructure(t *testing.T) {
 	for _, code := range []string{runtimeErrorVideoWorkerMissing, runtimeErrorNodeMissing, "browser_agent_session_start_failed"} {
 		if !adaptiveRetryableRuntimeFailure(code) {
