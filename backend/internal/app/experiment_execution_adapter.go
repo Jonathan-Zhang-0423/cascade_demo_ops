@@ -292,7 +292,7 @@ func (a *appExperimentExecutionAdapter) retryAdaptiveRuntimeFailure(ctx context.
 }
 
 func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, emit func(experiment.LegExecutionUpdate) error) error {
-	if sourceResult, resultErr := a.service.GetDirectResult(ctx, projectID, sourceJobID); resultErr == nil && adaptiveProductRepairInputValidationRetryable(request, sourceResult) {
+	if sourceResult, resultErr := a.service.GetDirectResult(ctx, projectID, sourceJobID); resultErr == nil && adaptiveSameEntityRepairPackageRetryable(request, sourceResult) {
 		return a.retryAdaptiveSameEntityRepairInput(ctx, request, projectID, sourceJobID, emit)
 	}
 	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "reconcile_observed_state", Summary: "失败诊断显示业务已进入后继实体；正在生成只观察续接包", EvidenceRefs: []string{sourceJobID}}); err != nil {
@@ -358,12 +358,20 @@ func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Con
 	return a.completeDirectLeg(ctx, request, projectID, jobID, status, true, emit)
 }
 
-func adaptiveProductRepairInputValidationRetryable(request experiment.LegExecutionRequest, result model.RecordingResultPackage) bool {
+func adaptiveSameEntityRepairPackageRetryable(request experiment.LegExecutionRequest, result model.RecordingResultPackage) bool {
 	if request.HarnessProfile != experiment.HarnessProfileAdaptiveBusinessV2 || request.ProductRepairRounds < 1 || request.ProductRepairRounds > 3 || result.FailureDiagnostic == nil {
 		return false
 	}
 	diagnostic := result.FailureDiagnostic
-	return diagnostic.Error.Code == "outcome_verification_failed" && strings.Contains(strings.ToLower(strings.TrimSpace(diagnostic.FailedNodeID)), "product_repair_input")
+	failedNode := strings.ToLower(strings.TrimSpace(diagnostic.FailedNodeID))
+	if diagnostic.Error.Code == "outcome_verification_failed" && strings.Contains(failedNode, "product_repair_input") {
+		return true
+	}
+	// Target resolution fails before the submit action starts, so retrying the
+	// same approved repair package cannot duplicate a click. Any failure after
+	// a submit was resolved remains non-replayable and must be reconciled by
+	// observation instead.
+	return diagnostic.Error.Code == "browser_agent_target_not_resolved" && strings.Contains(failedNode, "product_repair_submit")
 }
 
 func (a *appExperimentExecutionAdapter) retryAdaptiveSameEntityRepairInput(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, emit func(experiment.LegExecutionUpdate) error) error {

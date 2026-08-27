@@ -351,32 +351,36 @@ func TestAdaptiveV2ActionProofFailureRoutesToSameEntityProductRepair(t *testing.
 	}
 }
 
-func TestAdaptiveV2RetriesOnlyIdempotentSameEntityRepairInputValidation(t *testing.T) {
+func TestAdaptiveV2RetriesOnlySameEntityRepairFailuresBeforeSubmitEffect(t *testing.T) {
 	request := experiment.LegExecutionRequest{HarnessProfile: experiment.HarnessProfileAdaptiveBusinessV2, ProductRepairRounds: 1}
 	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{
 		FailedNodeID: "business_stage_product_repair_input",
 		Error:        model.AgentError{Code: "outcome_verification_failed"},
 	}}
-	if !adaptiveProductRepairInputValidationRetryable(request, result) {
+	if !adaptiveSameEntityRepairPackageRetryable(request, result) {
 		t.Fatal("same-entity repair input validation was not treated as an idempotent retry")
 	}
 	result.FailureDiagnostic.FailedNodeID = "business_stage_product_repair_submit"
-	if adaptiveProductRepairInputValidationRetryable(request, result) {
-		t.Fatal("a repair submission failure was incorrectly admitted for automatic replay")
+	if adaptiveSameEntityRepairPackageRetryable(request, result) {
+		t.Fatal("a repair submission outcome failure was incorrectly admitted for automatic replay")
+	}
+	result.FailureDiagnostic.Error.Code = "browser_agent_target_not_resolved"
+	if !adaptiveSameEntityRepairPackageRetryable(request, result) {
+		t.Fatal("an unresolved repair submit target did not retry before any effect could occur")
 	}
 	result.FailureDiagnostic.FailedNodeID = "business_stage_product_repair_input"
 	result.FailureDiagnostic.Error.Code = "explicit_terminal_failure"
-	if adaptiveProductRepairInputValidationRetryable(request, result) {
+	if adaptiveSameEntityRepairPackageRetryable(request, result) {
 		t.Fatal("an explicit repair failure was incorrectly admitted for automatic replay")
 	}
 	result.FailureDiagnostic.Error.Code = "outcome_verification_failed"
 	request.ProductRepairRounds = 0
-	if adaptiveProductRepairInputValidationRetryable(request, result) {
+	if adaptiveSameEntityRepairPackageRetryable(request, result) {
 		t.Fatal("an initial build input was mistaken for a same-entity repair")
 	}
 	request.ProductRepairRounds = 1
 	request.HarnessProfile = experiment.HarnessProfileAdaptiveBusinessV1
-	if adaptiveProductRepairInputValidationRetryable(request, result) {
+	if adaptiveSameEntityRepairPackageRetryable(request, result) {
 		t.Fatal("the compatibility harness unexpectedly changed recovery semantics")
 	}
 }
