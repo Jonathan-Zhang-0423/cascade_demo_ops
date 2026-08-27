@@ -1388,7 +1388,11 @@ async function executeInteraction(
 	if (interaction.kind === "click" && String(interaction.parameters?.action_recipe || "") === "activate_control") {
 		const restored = await interactiveStateDigest(session.page);
 		const history = session.interactionStateHistory.slice(0, -1);
-		const restoreProof = { restoreSimilarity: restored && history.includes(restored) ? 1 : 0 };
+		const restoreProof = {
+			restoreSimilarity: restored
+				? history.reduce((best, prior) => Math.max(best, interactionStateSimilarity(restored, prior)), 0)
+				: 0,
+		};
 		session.interactionProofByNodeID.set(stage.node_id, restoreProof);
 		const restoreSession = stringParameter(interaction.parameters, "proof_session_id");
 		if (restoreSession) session.interactionProofBySessionID.set(restoreSession, { ...(session.interactionProofBySessionID.get(restoreSession) || {}), ...restoreProof });
@@ -3777,7 +3781,41 @@ async function interactiveStateDigest(page: any, locator?: any): Promise<string>
     const target = await interactiveSurfaceTargetOnce(page);
     value = await target?.digestTarget?.evaluate?.((element: any) => `${element.innerText || element.textContent || ""}|${element.getAttribute?.("aria-label") || ""}`).catch(() => "") || "";
   }
-  return value ? createHash("sha256").update(String(value).replace(/\s+/g, " ").trim()).digest("hex") : "";
+  // Keep the bounded canonical state for proof-session comparisons. An undo
+  // commonly restores the board and current score while intentionally keeping
+  // a monotonic value such as "best score". Requiring an opaque digest to match
+  // exactly therefore turns a correct restore into a false negative.
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 32_768);
+}
+
+export function interactionStateSimilarity(current: string, prior: string): number {
+  const left = interactionStateTokens(current);
+  const right = interactionStateTokens(prior);
+  if (!left.length || !right.length) return 0;
+  const width = right.length + 1;
+  let previous = Array.from({ length: width }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    const next = new Array<number>(width);
+    next[0] = row;
+    for (let column = 1; column <= right.length; column += 1) {
+      const substitution = left[row - 1] === right[column - 1] ? 0 : 1;
+      next[column] = Math.min(
+        previous[column]! + 1,
+        next[column - 1]! + 1,
+        previous[column - 1]! + substitution,
+      );
+    }
+    previous = next;
+  }
+  return Math.max(0, 1 - previous[right.length]! / Math.max(left.length, right.length));
+}
+
+function interactionStateTokens(value: string): string[] {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .match(/[\p{L}]+|[\p{N}]+/gu)
+    ?.slice(0, 4_096) || [];
 }
 
 export function approvedKeyboardKeys(parameters: Record<string, unknown> | undefined): string[] {
