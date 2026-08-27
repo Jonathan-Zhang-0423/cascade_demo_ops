@@ -329,6 +329,12 @@ func TestAdaptiveV2ActionProofFailureRoutesToSameEntityProductRepair(t *testing.
 	if got := strings.Join(score.Missing, ","); got != "directional_moves,touch" {
 		t.Fatalf("missing required capabilities = %q", got)
 	}
+	result.FailureDiagnostic.Error.Code = "browser_agent_target_not_resolved"
+	score, repairable = adaptiveFailedCapabilityScore(request, result)
+	if !repairable || score.CorePassed || score.CoreScore != 20 {
+		t.Fatalf("a missing required product control did not become a same-entity repair score: repairable=%v score=%+v", repairable, score)
+	}
+	result.FailureDiagnostic.Error.Code = "outcome_verification_failed"
 	result.FailureDiagnostic.FailedNodeID = "business_stage_contract_experiment_interaction_surface_ready"
 	if _, repairable := adaptiveFailedCapabilityScore(request, result); repairable {
 		t.Fatal("passive build uncertainty was incorrectly turned into a product edit")

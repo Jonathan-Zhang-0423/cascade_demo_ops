@@ -117,6 +117,14 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 			}
 			status, statusErr := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
 			if statusErr == nil && status.Status == "failed" && isAdaptiveExperimentHarness(request.HarnessProfile) {
+				if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 && adaptiveRepairableFailedDirectResult(request, status, func() (model.RecordingResultPackage, error) {
+					return a.service.GetDirectResult(ctx, projectID, jobID)
+				}) {
+					// The failed interaction proof is itself successor-entity evidence.
+					// Materialize it, commit the initial submit once, and repair that
+					// entity directly instead of creating an unnecessary observe job.
+					return a.completeDirectLeg(ctx, request, projectID, jobID, status, true, emit)
+				}
 				if adaptiveRetryableRuntimeFailure(status.BlockingErrorCode) {
 					return a.retryAdaptiveRuntimeFailure(ctx, request, projectID, jobID, emit)
 				}
@@ -999,7 +1007,7 @@ func adaptiveFailedCapabilityScore(request experiment.LegExecutionRequest, resul
 		return model.CapabilityScore{}, false
 	}
 	code := strings.TrimSpace(result.FailureDiagnostic.Error.Code)
-	if code != "outcome_verification_failed" && code != "browser_agent_observation_failed" {
+	if code != "outcome_verification_failed" && code != "browser_agent_observation_failed" && code != "browser_agent_target_not_resolved" {
 		return model.CapabilityScore{}, false
 	}
 	failedNodeID := strings.TrimSpace(result.FailureDiagnostic.FailedNodeID)

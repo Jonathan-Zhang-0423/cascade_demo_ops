@@ -224,6 +224,15 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	}
 	repeated := len(priorAttempts) > 0 && priorAttempts[0] > 0
 	subject := strings.TrimRight(selected[0], ".。；; ")
+	// The initial one-line request intentionally stays provider-neutral and
+	// concise. When a real product defect already requires a bounded repair,
+	// carry the frozen public visual direction into that same edit so the
+	// repaired product does not remain functionally correct but visibly off-spec.
+	if !repeated {
+		if theme := strings.TrimRight(strings.TrimSpace(spec.VisualDirection.Theme), ".。；; "); theme != "" {
+			subject += "；视觉统一为" + theme
+		}
+	}
 	prefix, suffix := "请修复当前项目：", "必须能实际工作。保留已有内容，直接更新当前项目。"
 	if repeated {
 		prefix, suffix = "上轮修复后实际预览仍失败。请先复现并检查已加载代码，再修复：", "。完成后在预览中运行确认，保留已有内容。"

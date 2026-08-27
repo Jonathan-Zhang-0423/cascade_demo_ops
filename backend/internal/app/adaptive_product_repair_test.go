@@ -7,8 +7,8 @@ import (
 	"cascade-demoops/backend/internal/experiment"
 )
 
-func TestAdaptiveProductRepairPromptUsesOnlyEarliestFailedCapability(t *testing.T) {
-	spec := experiment.ProductSpec{ObservableAcceptance: []experiment.AcceptanceCriterion{
+func TestAdaptiveProductRepairPromptUsesEarliestFailedCapabilityAndPublicVisualDirection(t *testing.T) {
+	spec := experiment.ProductSpec{VisualDirection: experiment.VisualDirection{Theme: "深色霓虹界面"}, ObservableAcceptance: []experiment.AcceptanceCriterion{
 		{ID: "surface", Statement: "完整产品表面可见", Required: true},
 		{ID: "terminal", Statement: "终局状态可用", Required: true},
 	}}
@@ -18,7 +18,7 @@ func TestAdaptiveProductRepairPromptUsesOnlyEarliestFailedCapability(t *testing.
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"directional_moves", "terminal_scenes"})
-	want := "请修复当前项目：使用两个不同方向键执行实际操作必须能实际工作。保留已有内容，直接更新当前项目。"
+	want := "请修复当前项目：使用两个不同方向键执行实际操作；视觉统一为深色霓虹界面必须能实际工作。保留已有内容，直接更新当前项目。"
 	if got != want {
 		t.Fatalf("repair prompt = %q, want %q", got, want)
 	}
