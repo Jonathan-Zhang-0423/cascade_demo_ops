@@ -2481,6 +2481,13 @@ async function waitForPlayableSurfaceWithVisualObservation(
 		if (target) {
 			const busyNow = await pageStillBusy(session.page);
 			if (busyNow) sawBusy = true;
+			if (!busyNow && await pageShowsCompletedPlaceholderContradiction(session.page, target.digestTarget)) {
+				// A finished/successful lifecycle claim and an unmistakable builder
+				// placeholder in the runtime surface are two independent structural
+				// facts. Route a same-entity product repair instead of spending
+				// another full observation budget or depending on a visual Provider.
+				return { surface: false, score: false, controls: false };
+			}
 			const surfaceDigest = session.resultSurfaceBaselineDigest ? await visualDigest(session.page, target.digestTarget) : "";
 			const surfaceChanged = Boolean(session.resultSurfaceBaselineDigest && surfaceDigest && surfaceDigest !== session.resultSurfaceBaselineDigest);
 			const existing = session.visionVerdictsByNodeID.get(stage.node_id) || [];
@@ -2539,6 +2546,26 @@ async function waitForPlayableSurfaceWithVisualObservation(
 		await session.page.waitForTimeout(Math.min(1_000, Math.max(100, deadline - Date.now())));
 	}
 	return { surface: false, score: false, controls: false };
+}
+
+async function pageShowsCompletedPlaceholderContradiction(page: any, surface: any): Promise<boolean> {
+	const pageText = await page.evaluate(() => String((globalThis as any).document?.body?.innerText || "")).catch(() => "");
+	const surfaceText = await surface?.evaluate?.((element: any) => String(element?.innerText || element?.textContent || "")).catch(() => "") || "";
+	return completedPlaceholderContradiction(pageText, surfaceText);
+}
+
+export function completedPlaceholderContradiction(pageText: string, surfaceText: string): boolean {
+	const lifecycle = String(pageText || "").replace(/\s+/g, " ").toLowerCase();
+	const surface = String(surfaceText || "").replace(/\s+/g, " ").toLowerCase();
+	const completed = [
+		"task completed", "build completed", "completed successfully", "task succeeded", "build succeeded",
+		"任务已完成", "构建已完成", "构建完成", "任务成功", "构建成功", "项目已通过验证",
+	].some((marker) => lifecycle.includes(marker));
+	const unmistakableBuilderPlaceholder = [
+		"start building your project here", "your app will appear here", "your preview will appear here",
+		"start building to see your preview", "preview will appear after", "在此开始构建你的项目", "构建后将在这里显示预览",
+	].some((marker) => surface.includes(marker));
+	return completed && unmistakableBuilderPlaceholder;
 }
 
 export function browserVisualRefreshShouldReload(busy: boolean): boolean {
