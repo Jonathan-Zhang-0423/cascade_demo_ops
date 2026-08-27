@@ -2547,7 +2547,13 @@ async function waitForPlayableSurfaceWithVisualObservation(
 }
 
 async function pageShowsCompletedPlaceholderContradiction(page: any, surface: any): Promise<boolean> {
-	const pageText = await page.evaluate(() => String((globalThis as any).document?.body?.innerText || "")).catch(() => "");
+	const frameTexts: string[] = [];
+	const frames = typeof page.frames === "function" ? page.frames() : [page];
+	for (const frame of frames.slice(0, 16)) {
+		const body = frame.locator?.("body");
+		frameTexts.push(body?.innerText ? await body.innerText({ timeout: 1_000 }).catch(() => "") : "");
+	}
+	const pageText = frameTexts.join(" ");
 	const surfaceText = await surface?.evaluate?.((element: any) => String(element?.innerText || element?.textContent || "")).catch(() => "") || "";
 	// Portals frequently host the preview in an iframe or canvas while the
 	// placeholder copy belongs to the parent preview shell. Include both
