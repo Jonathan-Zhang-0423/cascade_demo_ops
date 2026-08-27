@@ -98,6 +98,33 @@ func TestBrowserVisualObservationDoesNotFailOnIncompletePage(t *testing.T) {
 	}
 }
 
+func TestBrowserVisualObservationNormalizesHighConfidenceSurfaceThreshold(t *testing.T) {
+	result, err := normalizeBrowserVisualObservation(browserVisualObservationModelOutput{
+		Decision: "in_progress", Confidence: .95, Summary: "The requested product surface is rendered.",
+		VisibleEvidence:           []string{"The product identity, data status, and primary controls are visible."},
+		BlockingReason:            "Initial data is empty.",
+		ProductSurfaceVisible:     true,
+		GenerationCoveringSurface: false,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision != "succeeded" || result.BlockingReason != "" {
+		t.Fatalf("high-confidence product surface was not admitted to deterministic interaction proof: %+v", result)
+	}
+
+	result, err = normalizeBrowserVisualObservation(browserVisualObservationModelOutput{
+		Decision: "in_progress", Confidence: .95, Summary: "The requested product is still covered by generation.",
+		ProductSurfaceVisible: true, GenerationCoveringSurface: true,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision != "in_progress" {
+		t.Fatalf("a generation-covered surface was admitted: %+v", result)
+	}
+}
+
 func TestBrowserVisualObservationFailsCompletedPlaceholderContradiction(t *testing.T) {
 	result, err := normalizeBrowserVisualObservation(browserVisualObservationModelOutput{
 		Decision: "failed", Confidence: .97, Summary: "The platform says the task completed but still renders its default welcome state.",

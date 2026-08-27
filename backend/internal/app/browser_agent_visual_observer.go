@@ -391,6 +391,13 @@ func normalizeBrowserVisualObservation(output browserVisualObservationModelOutpu
 	if decision == "failed" && !browserVisualEvidenceShowsTerminalFailure(output.VisibleEvidence) {
 		decision, output.BlockingReason = "in_progress", ""
 	}
+	if (decision == "in_progress" || decision == "unknown") && output.Confidence >= 0.85 && output.ProductSurfaceVisible && !output.GenerationCoveringSurface {
+		// Keep the model's decision consistent with the explicit surface facts it
+		// returned under the same contract. The Worker still requires an
+		// independent stateful runtime target, and the following proof session—not
+		// this admission Gate—decides whether product interactions actually work.
+		decision, output.BlockingReason = "succeeded", ""
+	}
 	if !map[string]bool{"in_progress": true, "succeeded": true, "failed": true, "unknown": true}[decision] || output.Confidence < 0 || output.Confidence > 1 || strings.TrimSpace(output.Summary) == "" {
 		return browserVisualObservationResponse{}, errors.New("invalid browser visual result")
 	}
