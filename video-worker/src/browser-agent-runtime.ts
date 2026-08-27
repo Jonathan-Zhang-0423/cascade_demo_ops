@@ -2503,18 +2503,19 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			deadline = Math.min(deadline, Date.now() + postRefreshObserveMS);
 			nextCaptureAt = Date.now();
 		}
-		if (await pageShowsExplicitBusinessFailure(session.page)) {
+		const busyNow = await pageStillBusy(session.page);
+		if (busyNow) sawBusy = true;
+		const target = await interactiveSurfaceTargetOnce(session.page);
+		const explicitFailure = !busyNow && !target && await pageShowsExplicitBusinessFailure(session.page);
+		if (browserExplicitFailureAdmitsTerminal(explicitFailure, busyNow, Boolean(target))) {
 			return { surface: false, score: false, controls: false };
 		}
-		if (await pageShowsCompletedPlaceholderContradiction(session.page, undefined)) {
+		if (!busyNow && !target && await pageShowsCompletedPlaceholderContradiction(session.page, undefined)) {
 			// Some terminal placeholders expose no focusable runtime target at all,
 			// so classify the parent preview shell before surface discovery.
 			return { surface: false, score: false, controls: false };
 		}
-		const target = await interactiveSurfaceTargetOnce(session.page);
 		if (target) {
-			const busyNow = await pageStillBusy(session.page);
-			if (busyNow) sawBusy = true;
 			const surfaceDigest = session.resultSurfaceBaselineDigest ? await visualDigest(session.page, target.digestTarget) : "";
 			const surfaceChanged = Boolean(session.resultSurfaceBaselineDigest && surfaceDigest && surfaceDigest !== session.resultSurfaceBaselineDigest);
 			const existing = session.visionVerdictsByNodeID.get(stage.node_id) || [];
@@ -2583,6 +2584,10 @@ export function browserVisibleTextShowsExplicitBusinessFailure(value: string): b
 	const englishRuntimeFailure = /\b(?:build|generation|compile|deployment|runtime|code)\b(?: task| process| project)?(?: has| was)? (?:failed|encountered an error)(?:[.!,:;\s]|$)[^.!?\n]{0,30}\b(?:please )?(?:retry|try again|rerun)\b/.test(text);
 	return chineseRuntimeFailure || englishRuntimeFailure
 		|| /(?:任务已取消|权限(?:已)?拒绝|permission denied|task (?:was )?canceled)/i.test(text);
+}
+
+export function browserExplicitFailureAdmitsTerminal(explicitFailure: boolean, busyNow: boolean, interactiveTargetVisible: boolean): boolean {
+	return explicitFailure && !busyNow && !interactiveTargetVisible;
 }
 
 async function pageShowsExplicitBusinessFailure(page: any): Promise<boolean> {
