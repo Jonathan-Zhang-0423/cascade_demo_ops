@@ -443,6 +443,23 @@ func TestCountBoundEntityProductRepairSubmitsIgnoresDriftAndPreEffectFailures(t 
 	}
 }
 
+func TestAdaptiveRepairMaterializationDefersOnlyOversizedTrace(t *testing.T) {
+	artifacts := []model.DirectArtifact{
+		{ArtifactID: "events", Kind: "browser_agent_stage_event_log", SizeBytes: 100 << 20},
+		{ArtifactID: "trace-small", Kind: "browser_trace", SizeBytes: 8 << 20},
+		{ArtifactID: "trace-large", Kind: "browser_trace", SizeBytes: 65 << 20},
+		{ArtifactID: "recording", Kind: "raw_recording", SizeBytes: 500 << 20},
+	}
+	got := adaptiveRepairMaterializationArtifacts(artifacts)
+	ids := make([]string, 0, len(got))
+	for _, artifact := range got {
+		ids = append(ids, artifact.ArtifactID)
+	}
+	if joined := strings.Join(ids, ","); joined != "events,trace-small,recording" {
+		t.Fatalf("repair materialization artifacts = %q", joined)
+	}
+}
+
 func TestAdaptiveV2BacktracksObserveOnlyLineageWhenRepairSubmitNeverStarted(t *testing.T) {
 	request := experiment.LegExecutionRequest{
 		HarnessProfile:      experiment.HarnessProfileAdaptiveBusinessV2,

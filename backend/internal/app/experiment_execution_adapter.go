@@ -647,7 +647,7 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 	}
 	if result.Status == model.RecordingResultStatusFailed {
 		if score, repairable := adaptiveFailedCapabilityScore(request, result); repairable {
-			downloads, downloadErr := a.downloadDirectArtifacts(ctx, projectID, jobID, status.Artifacts)
+			downloads, downloadErr := a.downloadDirectArtifacts(ctx, projectID, jobID, adaptiveRepairMaterializationArtifacts(status.Artifacts))
 			if downloadErr != nil {
 				return &experiment.AdapterError{Code: "artifact_materialization_failed", Phase: "result_materialization", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: downloadErr}
 			}
@@ -785,6 +785,21 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 		return a.runFinalFilm(ctx, request, projectID, result, materializedSessionID, allDownloads, emit)
 	}
 	return nil
+}
+
+func adaptiveRepairMaterializationArtifacts(artifacts []model.DirectArtifact) []model.DirectArtifact {
+	const oversizedIntermediateTraceBytes = 64 << 20
+	result := make([]model.DirectArtifact, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		if artifact.Kind == "browser_trace" && artifact.SizeBytes > oversizedIntermediateTraceBytes {
+			// The authoritative stage log, screenshots and segmented recording are
+			// sufficient to route a bounded product repair. Keep the large Trace in
+			// the remote artifact manifest instead of blocking the live business loop.
+			continue
+		}
+		result = append(result, artifact)
+	}
+	return result
 }
 
 func (a *appExperimentExecutionAdapter) restoreClosedLoopCaptureHistory(ctx context.Context, projectID, currentJobID string) []closedLoopCaptureBatch {
