@@ -2359,11 +2359,12 @@ export function browserVisualFinalObservationDue(input: {
 	if (input.existingCount === 0) return true;
 	const nearDeadline = input.deadlineMS - input.nowMS <= 30_000;
 	const busyTransitionCompleted = input.sawBusy && !input.busyNow;
+	const scheduledIdleFollowup = input.existingCount > 0 && !input.busyNow;
 	const scheduledRefresh = !input.busyNow && (input.refreshAfterMS <= 0 || input.nowMS - input.startedAtMS >= input.refreshAfterMS);
 	// The final reserved call is useful only after the business process has
 	// become idle. Spending it merely because an active build reached a wall
 	// clock boundary leaves no visual confirmation for the actual result.
-	return busyTransitionCompleted || scheduledRefresh || (nearDeadline && !input.busyNow);
+	return busyTransitionCompleted || scheduledIdleFollowup || scheduledRefresh || (nearDeadline && !input.busyNow);
 }
 
 export function browserVisualUnchangedSurfaceObservationDue(existingCount: number, maxCalls: number, nowMS: number, deadlineMS: number): boolean {
@@ -2490,7 +2491,11 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			const surfaceChanged = Boolean(session.resultSurfaceBaselineDigest && surfaceDigest && surfaceDigest !== session.resultSurfaceBaselineDigest);
 			const existing = session.visionVerdictsByNodeID.get(stage.node_id) || [];
 			const unchangedObservationDue = !busyNow && browserVisualUnchangedSurfaceObservationDue(existing.length, config.maxCalls, Date.now(), deadline);
-			if (session.resultSurfaceBaselineDigest && !surfaceChanged && !unchangedObservationDue) {
+			const finalObservationDue = browserVisualFinalObservationDue({
+				existingCount: existing.length, maxCalls: config.maxCalls, nowMS: Date.now(), nextCaptureAtMS: nextCaptureAt,
+				startedAtMS, refreshAfterMS, deadlineMS: deadline, sawBusy, busyNow,
+			});
+			if (session.resultSurfaceBaselineDigest && !surfaceChanged && !unchangedObservationDue && !finalObservationDue) {
 				await session.page.waitForTimeout(Math.min(1_000, Math.max(100, deadline - Date.now())));
 				continue;
 			}
@@ -2515,10 +2520,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			if (!busyNow && latest && browserVisualProductSurfaceAdmitted(latest, target.stateful, target.focusable)) {
 				return { surface: true, score: true, controls: true };
 			}
-			if (browserVisualFinalObservationDue({
-				existingCount: existing.length, maxCalls: config.maxCalls, nowMS: Date.now(), nextCaptureAtMS: nextCaptureAt,
-				startedAtMS, refreshAfterMS, deadlineMS: deadline, sawBusy, busyNow,
-			})) {
+			if (finalObservationDue) {
 				const observed = await captureAndUnderstandVisionPoll(session, stage, config, Math.max(0, Date.now() - session.openedAtMS));
 				// Sparse in-progress polling preserves enough calls for a late result
 				// plus the mandatory independent terminal confirmation.

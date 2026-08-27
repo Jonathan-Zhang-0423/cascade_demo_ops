@@ -72,6 +72,8 @@ describe("browser visual polling terminal evidence", () => {
 		const base = { existingCount: 1, maxCalls: 2, nowMS: 120_000, nextCaptureAtMS: 90_000, startedAtMS: 0, refreshAfterMS: 300_000, deadlineMS: 600_000 };
 		expect(browserVisualFinalObservationDue({ ...base, sawBusy: true, busyNow: true })).toBe(false);
 		expect(browserVisualFinalObservationDue({ ...base, sawBusy: true, busyNow: false })).toBe(true);
+		expect(browserVisualFinalObservationDue({ ...base, sawBusy: false, busyNow: false })).toBe(true);
+		expect(browserVisualFinalObservationDue({ ...base, nowMS: 89_999, sawBusy: false, busyNow: false })).toBe(false);
 		expect(browserVisualFinalObservationDue({ ...base, nowMS: 300_000, sawBusy: false, busyNow: false })).toBe(true);
 		expect(browserVisualFinalObservationDue({ ...base, nowMS: 575_000, sawBusy: false, busyNow: true })).toBe(false);
 		expect(browserVisualUnchangedSurfaceObservationDue(0, 2, 569_999, 600_000)).toBe(false);
