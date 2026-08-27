@@ -1773,7 +1773,14 @@ async function waitForBooleanControlState(locator: any, desired: boolean, timeou
 export async function visibleApprovedBooleanConfigurationLabel(page: any, stage: BrowserAgentWorkerStage): Promise<boolean> {
 	const allowedNames = (stage.target_contract.allowed_names || []).map(normalizeElementName).filter(Boolean);
 	if (allowedNames.length === 0) return false;
-	for (const selector of ['label', 'button[type="button"], button:not([type])', '[role="checkbox"], [role="switch"], [role="radio"]']) {
+	for (const selector of [
+		':is([role="dialog"], dialog, [aria-modal="true"]) label',
+		':is([role="dialog"], dialog, [aria-modal="true"]) button[type="button"], :is([role="dialog"], dialog, [aria-modal="true"]) button:not([type])',
+		':is([role="dialog"], dialog, [aria-modal="true"]) :is([role="checkbox"], [role="switch"], [role="radio"])',
+		'label',
+		'button[type="button"], button:not([type])',
+		'[role="checkbox"], [role="switch"], [role="radio"]',
+	]) {
 		const labels = page.locator(selector);
 		const count = Math.min(await withTimeout(labels.count(), targetProbeTimeoutMS, 0), 32);
 		for (let index = 0; index < count; index += 1) {
@@ -1806,47 +1813,52 @@ async function runtimeBooleanConfigurationTarget(
 	const allowedRoles = new Set((stage.target_contract.allowed_roles || []).map((entry) => entry.trim().toLowerCase()));
 	if (!["checkbox", "switch", "radio"].some((role) => allowedRoles.has(role))) return undefined;
 	const allowedNames = (stage.target_contract.allowed_names || []).map(normalizeElementName).filter(Boolean);
-	const locator = page.locator('input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="switch"], [role="radio"], [aria-checked], button[aria-pressed], [data-state="checked"], [data-state="unchecked"]');
-	const count = Math.min(await withTimeout(locator.count(), targetProbeTimeoutMS, 0), 32);
 	const candidates: Array<{ locator: any; score: number }> = [];
-	for (let index = 0; index < count; index += 1) {
-		const item = locator.nth(index);
-		if (!await withTimeout(item.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
-		if (await withTimeout(item.isDisabled?.(), targetProbeTimeoutMS, true)) continue;
-		if (await booleanControlState(item) === undefined) continue;
-		const metadata = await withTimeout(item.evaluate((element: any) => {
-			const explicitRole = String(element.getAttribute?.("role") || "").toLowerCase();
-			const type = String(element.getAttribute?.("type") || "").toLowerCase();
-			const role = explicitRole || (type === "radio" ? "radio" : (type === "checkbox" ? "checkbox" : (element.hasAttribute?.("aria-pressed") ? "switch" : "checkbox")));
-			const local = element.closest?.("label") || element.parentElement;
-			const localText = String(local?.innerText || local?.textContent || "").replace(/\s+/g, " ").trim().slice(0, 240);
-			return {
-				role,
-				localText,
-				primary: Boolean(element.closest?.('form, [role="dialog"], dialog, [aria-modal="true"], main, article, section, [role="main"], [role="region"]')),
-			};
-		}), targetProbeTimeoutMS, { role: "", localText: "", primary: false });
-		if (!allowedRoles.has(metadata.role) || forbiddenName(metadata.localText, stage.target_contract.forbidden_names || [])) continue;
-		const normalizedContext = normalizeElementName(metadata.localText);
-		const semantic = allowedNames.some((name) => normalizedContext === name || normalizedContext.includes(name)) ? 1 : 0;
-		const score = adaptiveTargetCandidateScore({
-			role_state: 1,
-			semantic,
-			container_context: metadata.primary ? 1 : .4,
-			uniqueness: 0,
-			transition_feasibility: 1,
-		});
-		if (semantic > 0) candidates.push({ locator: item, score });
+	const nativeSelector = 'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="switch"], [role="radio"], [aria-checked], button[aria-pressed], [data-state="checked"], [data-state="unchecked"]';
+	for (const selector of [`:is([role="dialog"], dialog, [aria-modal="true"]) :is(${nativeSelector})`, nativeSelector]) {
+		const locator = page.locator(selector);
+		const count = Math.min(await withTimeout(locator.count(), targetProbeTimeoutMS, 0), 32);
+		for (let index = 0; index < count; index += 1) {
+			const item = locator.nth(index);
+			if (!await withTimeout(item.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
+			if (await withTimeout(item.isDisabled?.(), targetProbeTimeoutMS, true)) continue;
+			if (await booleanControlState(item) === undefined) continue;
+			const metadata = await withTimeout(item.evaluate((element: any) => {
+				const explicitRole = String(element.getAttribute?.("role") || "").toLowerCase();
+				const type = String(element.getAttribute?.("type") || "").toLowerCase();
+				const role = explicitRole || (type === "radio" ? "radio" : (type === "checkbox" ? "checkbox" : (element.hasAttribute?.("aria-pressed") ? "switch" : "checkbox")));
+				const local = element.closest?.("label") || element.parentElement;
+				const localText = String(local?.innerText || local?.textContent || "").replace(/\s+/g, " ").trim().slice(0, 240);
+				return {
+					role,
+					localText,
+					primary: Boolean(element.closest?.('form, [role="dialog"], dialog, [aria-modal="true"], main, article, section, [role="main"], [role="region"]')),
+				};
+			}), targetProbeTimeoutMS, { role: "", localText: "", primary: false });
+			if (!allowedRoles.has(metadata.role) || forbiddenName(metadata.localText, stage.target_contract.forbidden_names || [])) continue;
+			const normalizedContext = normalizeElementName(metadata.localText);
+			const semantic = allowedNames.some((name) => normalizedContext === name || normalizedContext.includes(name)) ? 1 : 0;
+			const score = adaptiveTargetCandidateScore({
+				role_state: 1,
+				semantic,
+				container_context: metadata.primary ? 1 : .4,
+				uniqueness: 0,
+				transition_feasibility: 1,
+			});
+			if (semantic > 0) candidates.push({ locator: item, score });
+		}
+		if (candidates.length > 0) break;
 	}
 	// If the native input is intentionally hidden, bind its one visible label.
 	// This remains a boolean-control path: the label must own exactly one native
 	// checkbox/radio, expose a readable approved local label, and provide the
 	// visible click geometry. It is not a generic text or primary-button fallback.
 	if (candidates.length === 0) {
-		const labels = page.locator('label');
-		const labelCount = Math.min(await withTimeout(labels.count(), targetProbeTimeoutMS, 0), 32);
-		for (let index = 0; index < labelCount; index += 1) {
-			const label = labels.nth(index);
+		for (const selector of [':is([role="dialog"], dialog, [aria-modal="true"]) label', 'label']) {
+			const labels = page.locator(selector);
+			const labelCount = Math.min(await withTimeout(labels.count(), targetProbeTimeoutMS, 0), 32);
+			for (let index = 0; index < labelCount; index += 1) {
+				const label = labels.nth(index);
 			if (!await withTimeout(label.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
 			if (await booleanControlState(label) === undefined) continue;
 			const metadata = await withTimeout(label.evaluate((element: any) => {
@@ -1872,6 +1884,8 @@ async function runtimeBooleanConfigurationTarget(
 				transition_feasibility: 1,
 			});
 			candidates.push({ locator: label, score });
+			}
+			if (candidates.length > 0) break;
 		}
 	}
 	// Custom checkbox buttons are admitted only when they have an approved
@@ -1879,10 +1893,14 @@ async function runtimeBooleanConfigurationTarget(
 	// separate from the generic button resolver, so a submit or primary action
 	// can never satisfy a mode-configuration step.
 	if (candidates.length === 0) {
-		const buttons = page.locator('button[type="button"], button:not([type])');
-		const buttonCount = Math.min(await withTimeout(buttons.count(), targetProbeTimeoutMS, 0), 32);
-		for (let index = 0; index < buttonCount; index += 1) {
-			const button = buttons.nth(index);
+		for (const selector of [
+			':is([role="dialog"], dialog, [aria-modal="true"]) button[type="button"], :is([role="dialog"], dialog, [aria-modal="true"]) button:not([type])',
+			'button[type="button"], button:not([type])',
+		]) {
+			const buttons = page.locator(selector);
+			const buttonCount = Math.min(await withTimeout(buttons.count(), targetProbeTimeoutMS, 0), 32);
+			for (let index = 0; index < buttonCount; index += 1) {
+				const button = buttons.nth(index);
 			if (!await withTimeout(button.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
 			if (await withTimeout(button.isDisabled?.(), targetProbeTimeoutMS, true)) continue;
 			if (await booleanControlState(button) === undefined) continue;
@@ -1902,6 +1920,8 @@ async function runtimeBooleanConfigurationTarget(
 				transition_feasibility: 1,
 			});
 			candidates.push({ locator: button, score });
+			}
+			if (candidates.length > 0) break;
 		}
 	}
 	for (const candidate of candidates) candidate.score += candidates.length === 1 ? .15 : 0;

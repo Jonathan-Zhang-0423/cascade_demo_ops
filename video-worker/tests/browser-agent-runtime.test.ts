@@ -1217,7 +1217,7 @@ describe("browser agent App-evidence-bound selector semantics", () => {
 		}));
 	});
 
-	it("binds an approved custom checkbox button and reads its post-click state", async () => {
+	it("prioritizes an approved custom checkbox button in the active dialog beyond the global probe cap", async () => {
 		const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
 		let checked = true;
 		const button = {
@@ -1239,9 +1239,11 @@ describe("browser agent App-evidence-bound selector semantics", () => {
 			getByTestId: () => absent,
 			getByLabel: () => absent,
 			getByText: () => absent,
-			locator: (selector: string) => selector === 'button[type="button"], button:not([type])'
+			locator: (selector: string) => selector.startsWith(':is([role="dialog"') && selector.includes('button[type="button"]')
 				? { count: async () => 1, nth: () => button }
-				: absent,
+				: selector === 'button[type="button"], button:not([type])'
+					? { count: async () => 64, nth: () => ({ isVisible: async () => true, isDisabled: async () => false }) }
+					: absent,
 		};
 		const attempts: BrowserTargetResolutionAttempt[] = [];
 		const stage = {
