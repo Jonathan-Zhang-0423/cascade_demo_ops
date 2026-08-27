@@ -53,3 +53,27 @@ func TestAdaptiveProductRepairPromptRepairsFoundationalSurfaceBeforeAlphabeticSt
 		t.Fatalf("repair prompt did not choose the causal surface criterion: %q", got)
 	}
 }
+
+func TestAdaptiveProductRepairPromptEscalatesRepeatedFailureToRuntimeVerification(t *testing.T) {
+	spec := experiment.ProductSpec{ObservableAcceptance: []experiment.AcceptanceCriterion{
+		{ID: "initial_surface", Statement: "初始业务内容完整渲染并包含可操作状态", Required: true},
+	}}
+	plan := experiment.InteractionPlan{Steps: []experiment.InteractionStep{
+		{StepID: "surface_ready", SemanticIntent: "确认主要交互区域可见"},
+	}}
+
+	got := adaptiveProductRepairPrompt(spec, plan, []string{"surface_ready"}, 1)
+	for _, required := range []string{"上轮修复后仍未通过实际预览", "检查真实加载代码", "预览中运行确认", "初始业务内容完整渲染"} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("repeated repair prompt lost %q: %q", required, got)
+		}
+	}
+	for _, internal := range []string{"Harness", "selector", "schema", "expected_outcome", "observed_state"} {
+		if strings.Contains(got, internal) {
+			t.Fatalf("repeated repair prompt leaked internal term %q: %q", internal, got)
+		}
+	}
+	if len([]rune(got)) > 140 {
+		t.Fatalf("repeated repair prompt is too long: %d %q", len([]rune(got)), got)
+	}
+}

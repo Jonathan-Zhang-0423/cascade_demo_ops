@@ -59,7 +59,7 @@ func (s *Service) prepareAdaptiveSameEntityProductRepair(ctx context.Context, pr
 	if entityURL == "" {
 		return ProductRunPrepareResult{}, errors.New("same-entity repair has no observed entity entry URL")
 	}
-	repairPrompt := adaptiveProductRepairPrompt(request.ProductSpec, request.InteractionPlan, score.Missing)
+	repairPrompt := adaptiveProductRepairPrompt(request.ProductSpec, request.InteractionPlan, score.Missing, request.ProductRepairRounds)
 	if repairPrompt == "" {
 		return ProductRunPrepareResult{}, errors.New("same-entity repair could not derive a public product request")
 	}
@@ -159,7 +159,7 @@ func selectAdaptiveBoundEntityURL(targetURL string, project *model.ProjectContex
 	return best
 }
 
-func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.InteractionPlan, missing []string) string {
+func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.InteractionPlan, missing []string, priorAttempts ...int) string {
 	statements := map[string]string{}
 	for _, step := range plan.Steps {
 		statements[strings.TrimSpace(step.StepID)] = strings.TrimSpace(step.SemanticIntent)
@@ -222,7 +222,11 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	if len(selected) == 0 {
 		return ""
 	}
+	repeated := len(priorAttempts) > 0 && priorAttempts[0] > 0
 	value := "请修复当前项目：" + strings.TrimRight(selected[0], "。；; ") + "必须能实际工作。保留已有内容，直接更新当前项目。"
+	if repeated {
+		value = "上轮修复后仍未通过实际预览。请先复现并检查真实加载代码，再修复：" + strings.TrimRight(selected[0], "。；; ") + "。修复后在预览中运行确认，保留已有内容。"
+	}
 	if len([]rune(value)) > 140 {
 		value = string([]rune(value)[:139]) + "。"
 	}
