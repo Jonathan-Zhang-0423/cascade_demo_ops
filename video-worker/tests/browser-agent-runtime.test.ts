@@ -339,6 +339,22 @@ describe("browser agent navigation policy", () => {
     }, "https://app.example.com/results/runtime-42", "https://app.example.com/results/runtime-42")).toBeUndefined();
   });
 
+	it("re-enters a more-specific bound entity after authentication returns to the workspace", () => {
+		expect(stageExecutionTargetURL({
+			id: "stage-repair", order: 2, node_id: "repair", entry_route: "/project/runtime-42",
+			url: "https://app.example.com/project/runtime-42", target_contract: { semantic_id: "repair", destructive: false },
+			interactions: [{ kind: "fill", non_destructive: true }],
+		}, "https://app.example.com/app", "https://app.example.com/app")).toBe("https://app.example.com/project/runtime-42");
+	});
+
+	it("does not preserve a different equally-specific entity route", () => {
+		expect(stageExecutionTargetURL({
+			id: "stage-bound", order: 3, node_id: "bound", entry_route: "/project/runtime-42",
+			url: "https://app.example.com/project/runtime-42", target_contract: { semantic_id: "bound", destructive: false },
+			interactions: [{ kind: "inspect", non_destructive: true }],
+		}, "https://app.example.com/project/runtime-old", "https://app.example.com/project/runtime-old")).toBe("https://app.example.com/project/runtime-42");
+	});
+
   it("honors explicit navigation even after a verified route transition", () => {
     expect(stageExecutionTargetURL({
       id: "stage-return", order: 4, node_id: "return", entry_route: "/app",

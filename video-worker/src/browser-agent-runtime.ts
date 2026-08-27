@@ -3232,16 +3232,30 @@ function clearTaskSecrets(values: Record<string, BrowserAgentTaskSecret>): void 
 
 export function stageExecutionTargetURL(stage: BrowserAgentWorkerStage, currentURL: string, continuationURL?: string): string | undefined {
   const explicitNavigation = stage.interactions.some((interaction) => interaction.kind === "navigate");
-  if (!explicitNavigation && continuationURL && currentURL !== "about:blank") {
-    try {
-      if (new URL(currentURL).origin === new URL(continuationURL).origin) return undefined;
-    } catch {
-      // Invalid URLs are handled by the normal target and policy validation.
-    }
-  }
   const target = String(stage.url || stage.route || stage.entry_route || "").trim();
   if (!target) return undefined;
-  return absoluteTargetURL(target, currentURL, stage.url);
+	const absoluteTarget = absoluteTargetURL(target, currentURL, stage.url);
+	if (!explicitNavigation && continuationURL && currentURL !== "about:blank") {
+		try {
+			const current = new URL(currentURL);
+			const continuation = new URL(continuationURL);
+			const approvedTarget = new URL(absoluteTarget);
+			if (current.origin === continuation.origin && current.origin === approvedTarget.origin) {
+				const currentPath = normalizeRoutePath(current.pathname);
+				const targetPath = normalizeRoutePath(approvedTarget.pathname);
+				if (currentPath === targetPath) return undefined;
+				const currentDepth = currentPath.split("/").filter(Boolean).length;
+				const targetDepth = targetPath.split("/").filter(Boolean).length;
+				// Preserve a concrete successor when a later generic stage still names
+				// the workspace entry.  A more-specific or equally-specific different
+				// target is an intentional bound-entity route and must be reached.
+				if (currentDepth > targetDepth) return undefined;
+			}
+		} catch {
+			// Invalid URLs are handled by the normal target and policy validation.
+		}
+	}
+  return absoluteTarget;
 }
 
 async function ensureStageExecutionRoute(session: BrowserAgentSession, stage: BrowserAgentWorkerStage): Promise<void> {
