@@ -369,6 +369,10 @@ func TestAdaptiveV2RetriesOnlySameEntityRepairFailuresBeforeSubmitEffect(t *test
 		t.Fatal("an unresolved repair submit target did not retry before any effect could occur")
 	}
 	result.FailureDiagnostic.FailedNodeID = "business_stage_product_repair_input"
+	if !adaptiveSameEntityRepairPackageRetryable(request, result) {
+		t.Fatal("an unresolved repair input did not retry before any effect could occur")
+	}
+	result.FailureDiagnostic.FailedNodeID = "business_stage_product_repair_input"
 	result.FailureDiagnostic.Error.Code = "explicit_terminal_failure"
 	if adaptiveSameEntityRepairPackageRetryable(request, result) {
 		t.Fatal("an explicit repair failure was incorrectly admitted for automatic replay")

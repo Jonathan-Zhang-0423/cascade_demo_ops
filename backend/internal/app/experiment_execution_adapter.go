@@ -423,43 +423,13 @@ func adaptiveSameEntityRepairPackageRetryable(request experiment.LegExecutionReq
 	// same approved repair package cannot duplicate a click. Any failure after
 	// a submit was resolved remains non-replayable and must be reconciled by
 	// observation instead.
-	return diagnostic.Error.Code == "browser_agent_target_not_resolved" && strings.Contains(failedNode, "product_repair_submit")
+	return diagnostic.Error.Code == "browser_agent_target_not_resolved" &&
+		(strings.Contains(failedNode, "product_repair_input") || strings.Contains(failedNode, "product_repair_submit"))
 }
 
 func (a *appExperimentExecutionAdapter) retryAdaptiveSameEntityRepairInput(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, emit func(experiment.LegExecutionUpdate) error) error {
-	build, err := a.service.BuildClientExecutionPackage(ctx, projectID, defaultDesktopOrgID)
-	if err != nil || build.Package.ConfidenceSummary == nil {
-		return &experiment.AdapterError{Code: "product_repair_validation_package_unavailable", Phase: "product_repair", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{sourceJobID}, Cause: err}
-	}
-	key := fmt.Sprintf("product-repair-validation-retry-%s-%s-%d-%d", safePathSegment(request.RunID), safePathSegment(request.LegID), request.ProductRepairRounds, request.BrowserAttempt)
-	upload, err := a.service.UploadDirectExecutionPackage(ctx, projectID, DirectTransportUploadRequest{
-		OrgID: defaultDesktopOrgID, PackageDigestSHA256: build.PackageDigestSHA256,
-		ApprovalSubjectDigestSHA256: build.ApprovalSubjectDigestSHA256,
-		ConfidenceAssessmentHash:    build.Package.ConfidenceSummary.AssessmentHash,
-		RiskConfirmed:               true, IdempotencyKey: key,
-		RuntimeMetadata: map[string]any{
-			"experiment_run_id": request.RunID, "experiment_leg_id": request.LegID, "harness_profile": request.HarnessProfile,
-			"same_entity_product_repair": true, "product_repair_round": request.ProductRepairRounds,
-			"observation_plan": request.ObservationPlan, "interaction_plan": request.InteractionPlan,
-			"visual_call_budget": request.VisualCallBudget, "expected_product_summary": experimentProductEvidenceSummary(request.ProductSpec),
-			"reconciles_direct_job": sourceJobID,
-		},
-	})
-	if err != nil {
-		return &experiment.AdapterError{Code: "product_repair_validation_retry_upload_failed", Phase: "product_repair", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{sourceJobID}, Cause: err}
-	}
-	jobID := upload.Receipt.JobID
-	if err := emit(experiment.LegExecutionUpdate{Kind: "checkpoint_result_entry", ResultEntryRef: "direct:" + projectID + ":" + jobID, EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
-		return err
-	}
-	if err := emit(experiment.LegExecutionUpdate{Kind: "phase", Phase: "product_repair", Summary: fmt.Sprintf("同一项目第 %d 轮修复输入已按幂等策略恢复；修复轮次不增加", request.ProductRepairRounds), EvidenceRefs: []string{sourceJobID, jobID}}); err != nil {
-		return err
-	}
-	status, err := a.waitForDirectResult(ctx, projectID, jobID, request, emit)
-	if err != nil {
-		return err
-	}
-	return a.completeDirectLeg(ctx, request, projectID, jobID, status, false, emit)
+	history := a.restoreClosedLoopCaptureHistory(ctx, projectID, sourceJobID)
+	return a.executeSameEntityProductRepairRound(ctx, request, projectID, sourceJobID, requiredProductRepairScore(request), history, request.ProductRepairRounds, true, emit)
 }
 
 func withRuntimeConfirmedTargetSubmit(request experiment.LegExecutionRequest, resultEntryRef string) experiment.LegExecutionRequest {

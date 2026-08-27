@@ -35,7 +35,27 @@ func (s *Service) prepareAdaptiveSameEntityProductRepair(ctx context.Context, pr
 		}
 	}
 	observed := s.adaptiveObservedSuccessorEvidence(ctx, projectID, state, result)
-	entityURL := strings.TrimSpace(observed.URL)
+	entityCandidates := []string{observed.URL}
+	// A failed recovery package may have drifted to the workspace before its
+	// first product-repair action.  Preserve the concrete entity observed by an
+	// earlier verified result instead of compiling the next repair against that
+	// shallower shell.  RepairHistory is part of the same run lineage; it does
+	// not discover or attach an unrelated project.
+	for _, audit := range state.DesktopCloudRun.RepairHistory {
+		if audit.ResultPackage == nil {
+			continue
+		}
+		currentURL := ""
+		if audit.ResultPackage.FailureDiagnostic != nil {
+			currentURL = strings.TrimSpace(audit.ResultPackage.FailureDiagnostic.CurrentURL)
+			entityCandidates = append(entityCandidates, currentURL)
+		}
+		if audit.ResultPackage.StageEventLogRef != nil && currentURL == "" {
+			historical := s.adaptiveObservedSuccessorEvidence(ctx, projectID, state, *audit.ResultPackage)
+			entityCandidates = append(entityCandidates, historical.URL)
+		}
+	}
+	entityURL := selectAdaptiveBoundEntityURL(request.TargetURL, state.ProjectContext, entityCandidates)
 	if entityURL == "" {
 		return ProductRunPrepareResult{}, errors.New("same-entity repair has no observed entity entry URL")
 	}
@@ -117,6 +137,26 @@ func (s *Service) prepareAdaptiveSameEntityProductRepair(ctx context.Context, pr
 		return ProductRunPrepareResult{}, err
 	}
 	return ProductRunPrepareResult{State: compactStateForPrepareResponse(next, &build), Build: &build}, nil
+}
+
+func selectAdaptiveBoundEntityURL(targetURL string, project *model.ProjectContext, candidates []string) string {
+	if project == nil {
+		return ""
+	}
+	base := *project
+	if strings.TrimSpace(targetURL) != "" {
+		base.ProductURL = strings.TrimSpace(targetURL)
+	}
+	best, bestScore := "", -1
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		score := observedSuccessorURLScore(&base, candidate)
+		if candidate == "" || score < 0 || score <= bestScore {
+			continue
+		}
+		best, bestScore = candidate, score
+	}
+	return best
 }
 
 func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.InteractionPlan, missing []string) string {

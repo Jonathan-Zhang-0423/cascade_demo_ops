@@ -715,9 +715,13 @@ func observedSuccessorURLScore(project *model.ProjectContext, candidate string) 
 		return -1
 	}
 	segments := len(strings.FieldsFunc(strings.Trim(target.Path, "/"), func(r rune) bool { return r == '/' }))
-	score := segments * 10
+	// Route specificity is the strongest site-neutral signal that an async
+	// workflow reached a concrete entity rather than drifting back to its
+	// workspace.  A changed route remains useful, but it must never outweigh a
+	// regression from an already-observed entity route to a shallower shell.
+	score := segments * 100
 	if !sameURLWithoutQuery(target, base) {
-		score += 100
+		score += 10
 	}
 	return score
 }

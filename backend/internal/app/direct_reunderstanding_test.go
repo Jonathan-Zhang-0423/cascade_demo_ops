@@ -167,6 +167,29 @@ func TestSelectObservedSuccessorURLPrefersConcreteEntityBeforeWorkspaceDrift(t *
 	}
 }
 
+func TestSelectObservedSuccessorURLDoesNotRegressWhenProjectContextAlreadyNamesEntity(t *testing.T) {
+	entityURL := "https://app.example.com/entity/runtime-42"
+	project := &model.ProjectContext{ProductURL: entityURL}
+	events := []model.StageExecutionEvent{
+		{Sequence: 10, Observation: &model.RuntimeObservation{URL: entityURL}},
+		{Sequence: 20, Observation: &model.RuntimeObservation{URL: "https://app.example.com/workspace"}},
+	}
+	if got := selectObservedSuccessorURL(project, entityURL, events); got != entityURL {
+		t.Fatalf("an authenticated workspace redirect replaced the bound entity: %q", got)
+	}
+}
+
+func TestSelectAdaptiveBoundEntityURLRecoversConcreteHistoryAfterWorkspaceDrift(t *testing.T) {
+	project := &model.ProjectContext{ProductURL: "https://app.example.com/workspace"}
+	got := selectAdaptiveBoundEntityURL(project.ProductURL, project, []string{
+		"https://app.example.com/workspace",
+		"https://app.example.com/entity/runtime-42",
+	})
+	if got != "https://app.example.com/entity/runtime-42" {
+		t.Fatalf("historical bound entity was not recovered: %q", got)
+	}
+}
+
 func TestInsertPendingAdaptiveContinuationRestoresOnlySkippedUnstartedEffect(t *testing.T) {
 	started := &model.GraphNode{ID: "continue_one", Type: model.GraphNodeTypeAction, ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "continue_execution"}}}
 	pending := &model.GraphNode{ID: "continue_two", Type: model.GraphNodeTypeAction, PageRef: "https://app.example.com/workspace", ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "continue_execution"}}, InteractionContract: &model.InteractionContract{SchemaVersion: model.InteractionContractSchemaVersion, ContractID: "pending", ReplayPolicy: model.InteractionReplayOnceEffect}}
