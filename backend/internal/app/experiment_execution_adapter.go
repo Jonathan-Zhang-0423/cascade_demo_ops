@@ -797,10 +797,29 @@ func adaptiveFailedCapabilityScore(request experiment.LegExecutionRequest, resul
 		}
 		results = append(results, model.CapabilityResult{ID: step.StepID, Layer: layer, Score: weight, Passed: passed[step.StepID], Evidence: resultEvidenceRefs(result)})
 	}
-	if !foundFailed || failedIsPassive || len(results) == 0 {
+	// A passive observation is normally inconclusive and must never cause a
+	// product edit. Once the run has a confirmed target-submit effect, however,
+	// a required product criterion that still fails on the bound entity is no
+	// longer pre-submit uncertainty: it is a verified acceptance failure. This
+	// distinction lets the v2 closed loop repair the same entity after its full
+	// observation window without weakening v1 or replaying the once-effect.
+	passiveFailureIsBoundAcceptance := failedIsPassive && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 && checkpointHasConfirmedTargetSubmit(request.Checkpoint)
+	if !foundFailed || (failedIsPassive && !passiveFailureIsBoundAcceptance) || len(results) == 0 {
 		return model.CapabilityScore{}, false
 	}
 	return model.ScoreCapabilities(results), true
+}
+
+func checkpointHasConfirmedTargetSubmit(checkpoint *experiment.Checkpoint) bool {
+	if checkpoint == nil || strings.TrimSpace(checkpoint.ResultEntryRef) == "" {
+		return false
+	}
+	for _, effect := range checkpoint.OnceEffects {
+		if strings.TrimSpace(effect.EffectID) == "target_submit" && strings.EqualFold(strings.TrimSpace(effect.Status), "confirmed") {
+			return true
+		}
+	}
+	return false
 }
 
 func readAdaptiveCapabilityScore(downloads []CloudDeliverableDownloadResult) (*model.CapabilityScore, string, error) {

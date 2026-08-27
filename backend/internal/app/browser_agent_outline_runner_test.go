@@ -812,7 +812,13 @@ func (stubBrowserAgentRenderService) Render(_ context.Context, request executor.
 }
 
 func (stubBrowserAgentRenderService) ProbeMedia(_ context.Context, request executor.MediaProbeRequest) (executor.MediaProbeResult, error) {
-	return executor.MediaProbeResult{Path: request.Path, Format: "mov,mp4", DurationMS: 1000, VideoCodec: "h264", Width: 2560, Height: 1440, FPS: 30, PixelFormat: "yuv420p", FFProbeAvailable: true}, nil
+	// The browser evidence master is captured with the canonical 2K viewport,
+	// while its encoded recording evidence is normalized to the 1080p profile.
+	width, height := 2560, 1440
+	if filepath.Base(request.Path) == "recording.webm" {
+		width, height = 1920, 1080
+	}
+	return executor.MediaProbeResult{Path: request.Path, Format: "mov,mp4", DurationMS: 1000, VideoCodec: "h264", Width: width, Height: height, FPS: 30, PixelFormat: "yuv420p", FFProbeAvailable: true}, nil
 }
 
 func (s *stubBrowserAgentWorkerSession) Abort() error { return nil }

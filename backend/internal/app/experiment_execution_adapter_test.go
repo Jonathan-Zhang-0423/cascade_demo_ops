@@ -320,6 +320,36 @@ func TestAdaptiveV2ActionProofFailureRoutesToSameEntityProductRepair(t *testing.
 	if _, repairable := adaptiveFailedCapabilityScore(request, result); repairable {
 		t.Fatal("passive build uncertainty was incorrectly turned into a product edit")
 	}
+	result.StepResults = nil
+	request.Checkpoint = &experiment.Checkpoint{
+		ResultEntryRef: "direct:project-one:job-original",
+		OnceEffects:    []experiment.OnceEffectRecord{{EffectID: "target_submit", Status: "confirmed"}},
+	}
+	score, repairable = adaptiveFailedCapabilityScore(request, result)
+	if !repairable || score.CorePassed || score.EligibleForFilm || score.CoreScore != 0 {
+		t.Fatalf("bound required-surface failure did not become a same-entity repair score: repairable=%v score=%+v", repairable, score)
+	}
+	if got := strings.Join(score.Missing, ","); got != "directional_moves,surface_ready,touch" {
+		t.Fatalf("bound surface failure missing capabilities = %q", got)
+	}
+	request.HarnessProfile = experiment.HarnessProfileAdaptiveBusinessV1
+	if _, repairable := adaptiveFailedCapabilityScore(request, result); repairable {
+		t.Fatal("v1 passive observation compatibility changed")
+	}
+}
+
+func TestCheckpointHasConfirmedTargetSubmitRequiresBoundConfirmedEffect(t *testing.T) {
+	if checkpointHasConfirmedTargetSubmit(nil) {
+		t.Fatal("nil checkpoint was treated as committed")
+	}
+	checkpoint := &experiment.Checkpoint{ResultEntryRef: "direct:project-one:job-one", OnceEffects: []experiment.OnceEffectRecord{{EffectID: "target_submit", Status: "started"}}}
+	if checkpointHasConfirmedTargetSubmit(checkpoint) {
+		t.Fatal("started target effect was treated as confirmed")
+	}
+	checkpoint.OnceEffects[0].Status = "confirmed"
+	if !checkpointHasConfirmedTargetSubmit(checkpoint) {
+		t.Fatal("confirmed bound target effect was not recognized")
+	}
 }
 
 func TestAdaptiveTransportWaitDoesNotPreemptWorkerProgressWindow(t *testing.T) {
