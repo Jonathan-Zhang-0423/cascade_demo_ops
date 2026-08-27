@@ -2101,7 +2101,19 @@ async function resolveUniqueVisibleContractTarget(locator: any, strategy: string
   }
   const allowedNames = (contract.allowed_names || []).map(normalizeElementName).filter(Boolean);
   const normalizedActual = normalizeElementName(semantics.name);
-  const nameAllowed = allowedNames.length === 0 || allowedNames.some((name) => name === normalizedActual || normalizeElementName(normalizedApprovedTargetName(name)) === normalizedActual);
+  const exactNameAllowed = allowedNames.some((name) => name === normalizedActual || normalizeElementName(normalizedApprovedTargetName(name)) === normalizedActual);
+  // A control may expose a concise visible label while its accessible name
+  // appends a harmless explanation (for example, visible `撤销` with
+  // `aria-label="撤销上一步"`). The exact-text Locator already proves the
+  // approved visible identity and the role/forbidden-name checks still apply.
+  // Admit only that bounded runtime alias; broader role/name discovery remains
+  // exact and duplicate controls remain ambiguous across every frame.
+  const boundedVisibleTextAlias = strategy === "interaction_text" && allowedNames.some((name) => (
+    name.length > 0
+    && normalizedActual.startsWith(name)
+    && normalizedActual.length <= name.length + 16
+  ));
+  const nameAllowed = allowedNames.length === 0 || exactNameAllowed || boundedVisibleTextAlias;
   if (!nameAllowed) {
     attempts.push(targetResolutionAttempt(strategy, count, true, true, false, "name_mismatch", true, false));
     return undefined;

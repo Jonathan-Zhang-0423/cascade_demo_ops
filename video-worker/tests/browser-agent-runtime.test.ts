@@ -868,6 +868,53 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     }));
   });
 
+  it("accepts an exact visible label with a bounded accessible-name explanation", async () => {
+    const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+    const undo = {
+      count: async () => 1,
+      first: () => ({ isVisible: async () => true, evaluate: async () => ({ role: "button", name: "撤销上一步" }) }),
+    };
+    const mainFrame = {};
+    const previewFrame = {
+      getByRole: () => absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: (text: string) => text === "撤销" ? undo : absent,
+    };
+    const page = {
+      mainFrame: () => mainFrame,
+      frames: () => [mainFrame, previewFrame],
+      getByRole: () => absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+      locator: () => absent,
+    };
+    const attempts: BrowserTargetResolutionAttempt[] = [];
+    const stage = {
+      id: "stage_undo",
+      order: 1,
+      node_id: "undo",
+      target_contract: {
+        semantic_id: "restore_previous_state_control",
+        allowed_roles: ["button"],
+        allowed_names: ["撤销", "Undo"],
+        forbidden_names: ["删除"],
+        destructive: false,
+      },
+      interactions: [{ kind: "click", target: { text: "撤销" }, non_destructive: true }],
+    };
+
+    const resolved = await resolveTarget(page, stage, stage.interactions[0], false, attempts);
+    expect(resolved.strategy).toBe("interaction_text");
+    expect(attempts).toContainEqual(expect.objectContaining({
+      strategy: "interaction_text",
+      role_allowed: true,
+      name_allowed: true,
+      outcome: "resolved",
+    }));
+  });
+
   it("fails closed on an ambiguous exact App CSS target and records the bounded attempt", async () => {
     const ambiguous = {
       count: async () => 2,
