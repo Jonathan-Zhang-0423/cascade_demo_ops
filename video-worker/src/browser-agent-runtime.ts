@@ -1423,6 +1423,7 @@ export function recoveredScreenshotMetadata(
 export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, interaction: BrowserAgentInteraction, allowSelectorAlternatives: boolean, attempts: BrowserTargetResolutionAttempt[] = []): Promise<ResolvedTarget> {
 	const candidates: Array<{ strategy: string; locator: any; evidenceBoundAlternative?: { kind: string; value: string } }> = [];
 	const contract = stage.target_contract;
+	const runtimeScopes = runtimeTargetScopes(page);
 	const preferred = stage.preferred_selector_alternative;
 	if (preferred) {
 		const locator = locatorFromAlternative(page, preferred.kind, preferred.value);
@@ -1441,23 +1442,47 @@ export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, i
 	}
   for (const role of contract.allowed_roles || []) {
     for (const name of contract.allowed_names || []) {
-      candidates.push({ strategy: `role:${role}+approved_name`, locator: page.getByRole(role, { name, exact: true }) });
+		const strategy = `role:${role}+approved_name`;
+		const resolved = await resolveUniqueVisibleContractTargetAcrossScopes(
+			runtimeScopes.map((scope) => scope.getByRole(role, { name, exact: true })),
+			strategy,
+			contract,
+			attempts,
+		);
+		if (resolved) return resolved;
       const normalizedName = normalizedApprovedTargetName(name);
       if (normalizedName && normalizeElementName(normalizedName) !== normalizeElementName(name)) {
-        candidates.push({ strategy: `role:${role}+normalized_approved_name`, locator: page.getByRole(role, { name: normalizedName, exact: true }) });
+			const normalizedStrategy = `role:${role}+normalized_approved_name`;
+			const normalizedResolved = await resolveUniqueVisibleContractTargetAcrossScopes(
+				runtimeScopes.map((scope) => scope.getByRole(role, { name: normalizedName, exact: true })),
+				normalizedStrategy,
+				contract,
+				attempts,
+			);
+			if (normalizedResolved) return normalizedResolved;
       }
     }
   }
   const components = (stage.components || []).filter((component) => !contract.component_ref || component.component_ref === contract.component_ref);
   for (const component of components) {
-    if (component.role && component.name) candidates.push({ strategy: "component_role_name", locator: page.getByRole(component.role, { name: component.name, exact: true }) });
-    if (component.test_id) candidates.push({ strategy: "component_testid", locator: page.getByTestId(component.test_id) });
-    if (component.label) candidates.push({ strategy: "component_label", locator: page.getByLabel(component.label, { exact: true }) });
+		const scopedCandidates: Array<{ strategy: string; locators: any[] }> = [];
+		if (component.role && component.name) scopedCandidates.push({ strategy: "component_role_name", locators: runtimeScopes.map((scope) => scope.getByRole(component.role, { name: component.name, exact: true })) });
+		if (component.test_id) scopedCandidates.push({ strategy: "component_testid", locators: runtimeScopes.map((scope) => scope.getByTestId(component.test_id)) });
+		if (component.label) scopedCandidates.push({ strategy: "component_label", locators: runtimeScopes.map((scope) => scope.getByLabel(component.label, { exact: true })) });
+		for (const candidate of scopedCandidates) {
+			const resolved = await resolveUniqueVisibleContractTargetAcrossScopes(candidate.locators, candidate.strategy, contract, attempts);
+			if (resolved) return resolved;
+		}
   }
-  if (interaction.target?.role && interaction.target.text) candidates.push({ strategy: "interaction_role_text", locator: page.getByRole(interaction.target.role, { name: interaction.target.text, exact: true }) });
-  if (interaction.target?.test_id) candidates.push({ strategy: "interaction_testid", locator: page.getByTestId(interaction.target.test_id) });
-  if (interaction.target?.label) candidates.push({ strategy: "interaction_label", locator: page.getByLabel(interaction.target.label, { exact: true }) });
-  if (interaction.target?.text) candidates.push({ strategy: "interaction_text", locator: page.getByText(interaction.target.text, { exact: true }) });
+	const interactionScopedCandidates: Array<{ strategy: string; locators: any[] }> = [];
+	if (interaction.target?.role && interaction.target.text) interactionScopedCandidates.push({ strategy: "interaction_role_text", locators: runtimeScopes.map((scope) => scope.getByRole(interaction.target!.role, { name: interaction.target!.text, exact: true })) });
+	if (interaction.target?.test_id) interactionScopedCandidates.push({ strategy: "interaction_testid", locators: runtimeScopes.map((scope) => scope.getByTestId(interaction.target!.test_id)) });
+	if (interaction.target?.label) interactionScopedCandidates.push({ strategy: "interaction_label", locators: runtimeScopes.map((scope) => scope.getByLabel(interaction.target!.label, { exact: true })) });
+	if (interaction.target?.text) interactionScopedCandidates.push({ strategy: "interaction_text", locators: runtimeScopes.map((scope) => scope.getByText(interaction.target!.text, { exact: true })) });
+	for (const candidate of interactionScopedCandidates) {
+		const resolved = await resolveUniqueVisibleContractTargetAcrossScopes(candidate.locators, candidate.strategy, contract, attempts);
+		if (resolved) return resolved;
+	}
   for (const component of components) {
     if (allowSelectorAlternatives) for (const alternative of component.selector_alternatives || []) {
       const locator = locatorFromAlternative(page, alternative.kind, alternative.value);
@@ -1531,6 +1556,37 @@ export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, i
 		seen.add("runtime_execution_continuation");
 	}
   throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=${[...seen].join(",") || "none"}`);
+}
+
+function runtimeTargetScopes(page: any): any[] {
+	const scopes = [page];
+	const mainFrame = typeof page?.mainFrame === "function" ? page.mainFrame() : undefined;
+	const frames = typeof page?.frames === "function" ? page.frames() : [];
+	for (const frame of frames || []) {
+		// Playwright's Page locator methods already address the main frame. Keep
+		// only child frames here so the same DOM is not counted twice.
+		if (!frame || frame === mainFrame || scopes.includes(frame)) continue;
+		scopes.push(frame);
+	}
+	return scopes;
+}
+
+async function resolveUniqueVisibleContractTargetAcrossScopes(
+	locators: any[],
+	strategy: string,
+	contract: BrowserAgentTargetContract,
+	attempts: BrowserTargetResolutionAttempt[] = [],
+): Promise<ResolvedTarget | undefined> {
+	if (locators.length <= 1) return resolveUniqueVisibleContractTarget(locators[0], strategy, contract, attempts);
+	const counts: number[] = [];
+	for (const locator of locators) counts.push(await withTimeout(locator.count(), targetProbeTimeoutMS, 0));
+	const total = counts.reduce((sum, count) => sum + Math.max(0, count), 0);
+	if (total !== 1) {
+		attempts.push(targetResolutionAttempt(strategy, total, false, false, false, total === 0 ? "no_candidates" : "ambiguous"));
+		return undefined;
+	}
+	const index = counts.findIndex((count) => count === 1);
+	return resolveUniqueVisibleContractTarget(locators[index], strategy, contract, attempts);
 }
 
 export function runtimeExecutionContinuationScore(label: string, role: string, inPrimaryContainer: boolean, uniqueSemanticCandidate: boolean): number {

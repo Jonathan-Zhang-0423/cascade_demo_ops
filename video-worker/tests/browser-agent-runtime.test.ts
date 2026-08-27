@@ -780,6 +780,94 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     expect(JSON.stringify(attempts)).not.toContain("New Project");
   });
 
+  it("resolves an exact approved control inside the runtime preview frame", async () => {
+    const absent = {
+      count: async () => 0,
+      first: () => ({ isVisible: async () => false }),
+    };
+    const undo = {
+      count: async () => 1,
+      first: () => ({ isVisible: async () => true, evaluate: async () => ({ role: "button", name: "撤销" }) }),
+    };
+    const mainFrame = {};
+    const previewFrame = {
+      getByRole: (role: string, options: { name: string }) => role === "button" && options.name === "撤销" ? undo : absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+    };
+    const page = {
+      mainFrame: () => mainFrame,
+      frames: () => [mainFrame, previewFrame],
+      getByRole: () => absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+      locator: () => absent,
+    };
+    const attempts: BrowserTargetResolutionAttempt[] = [];
+    const stage = {
+      id: "stage_undo",
+      order: 1,
+      node_id: "undo",
+      target_contract: {
+        semantic_id: "restore_previous_state_control",
+        allowed_roles: ["button"],
+        allowed_names: ["撤销", "Undo"],
+        destructive: false,
+      },
+      interactions: [{ kind: "click", target: { role: "button", text: "撤销" }, non_destructive: true }],
+    };
+
+    const resolved = await resolveTarget(page, stage, stage.interactions[0], false, attempts);
+    expect(resolved.strategy).toBe("role:button+approved_name");
+    expect(attempts).toContainEqual(expect.objectContaining({ candidate_count: 1, outcome: "resolved" }));
+  });
+
+  it("rejects duplicate approved controls across the page and a preview frame", async () => {
+    const live = {
+      count: async () => 1,
+      first: () => ({ isVisible: async () => true, evaluate: async () => ({ role: "button", name: "Undo" }) }),
+    };
+    const absent = { count: async () => 0, first: () => ({ isVisible: async () => false }) };
+    const mainFrame = {};
+    const previewFrame = {
+      getByRole: (_role: string, options: { name: string }) => options.name === "Undo" ? live : absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+    };
+    const page = {
+      mainFrame: () => mainFrame,
+      frames: () => [mainFrame, previewFrame],
+      getByRole: (_role: string, options: { name: string }) => options.name === "Undo" ? live : absent,
+      getByTestId: () => absent,
+      getByLabel: () => absent,
+      getByText: () => absent,
+      locator: () => absent,
+    };
+    const attempts: BrowserTargetResolutionAttempt[] = [];
+    const stage = {
+      id: "stage_undo",
+      order: 1,
+      node_id: "undo",
+      target_contract: {
+        semantic_id: "restore_previous_state_control",
+        allowed_roles: ["button"],
+        allowed_names: ["Undo"],
+        destructive: false,
+      },
+      interactions: [{ kind: "click", target: { role: "button", text: "Undo" }, non_destructive: true }],
+    };
+
+    await expect(resolveTarget(page, stage, stage.interactions[0], false, attempts)).rejects.toThrow("browser_agent_target_not_resolved");
+    expect(attempts).toContainEqual(expect.objectContaining({
+      strategy: "role:button+approved_name",
+      candidate_count: 2,
+      outcome: "ambiguous",
+    }));
+  });
+
   it("fails closed on an ambiguous exact App CSS target and records the bounded attempt", async () => {
     const ambiguous = {
       count: async () => 2,
