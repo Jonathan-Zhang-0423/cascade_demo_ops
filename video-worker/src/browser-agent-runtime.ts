@@ -979,6 +979,7 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   const artifacts: ArtifactRef[] = [];
   let recordingPath: string | undefined;
   let browserCloseConfirmed = false;
+  const closeBudgets = browserSessionCloseBudgets(Date.now() - session.openedAtMS);
   const recordingPathPromise = session.video?.path().catch(() => undefined);
   try {
     if (session.traceActive) await settleWithin(session.context.tracing.stop({ path: session.tracePath }), 8_000);
@@ -988,8 +989,12 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
     // close the browser process itself so the already-recorded WebM and stage
     // evidence can be finalized instead of discarding the whole result.
     const contextClose = session.context.close().then(() => true).catch(() => false);
-    const contextClosed = await valueWithin(contextClose, 90_000, false);
-    browserCloseConfirmed = await valueWithin(session.browser.close().then(() => true).catch(() => false), contextClosed ? 60_000 : 120_000, false);
+    const contextClosed = await valueWithin(contextClose, closeBudgets.contextMS, false);
+    browserCloseConfirmed = await valueWithin(
+      session.browser.close().then(() => true).catch(() => false),
+      contextClosed ? closeBudgets.browserAfterContextMS : closeBudgets.browserAfterTimeoutMS,
+      false,
+    );
     if (!browserCloseConfirmed) {
       // Continue to the stable-file check below. The worker process teardown
       // may already have stopped the encoder even when Playwright did not
@@ -1007,7 +1012,7 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
     // browser acknowledgement, as the source of truth and require sustained
     // quiescence before segmenting it. A long capture can need several minutes
     // to drain on a small Worker host.
-    const stable = await waitForFileStable(recordingPath, 3, 1_000, 900_000, 60_000);
+    const stable = await waitForFileStable(recordingPath, 3, 1_000, closeBudgets.recordingStableMaxMS, closeBudgets.recordingStableGraceMS);
     if (!stable) throw new Error("browser_agent_recording_not_stable");
     const segmentEntries = (await readdir(session.outputDir).catch(() => [] as string[])).filter((entry) => /^recording-segment-\d+\.webm$/i.test(entry));
 		const fullPath = path.join(session.outputDir, `recording-full-${String(segmentEntries.length + 1).padStart(3, "0")}.webm`);
@@ -1094,6 +1099,23 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
     artifacts,
     runtime_versions: { runner: "playwright-browser-agent", browser: session.engine },
   };
+}
+
+export function browserSessionCloseBudgets(elapsedMS: number): {
+	contextMS: number;
+	browserAfterContextMS: number;
+	browserAfterTimeoutMS: number;
+	recordingStableMaxMS: number;
+	recordingStableGraceMS: number;
+} {
+	// Short protocol checks and ordinary failed attempts should never inherit
+	// the drain allowance intended for a multi-minute evidence recording. A
+	// long capture keeps the conservative budget because Playwright's encoder
+	// can still be flushing a substantial image2pipe backlog.
+	if (Math.max(0, Number(elapsedMS) || 0) < 2 * 60_000) {
+		return { contextMS: 1_500, browserAfterContextMS: 1_500, browserAfterTimeoutMS: 3_000, recordingStableMaxMS: 15_000, recordingStableGraceMS: 0 };
+	}
+	return { contextMS: 90_000, browserAfterContextMS: 60_000, browserAfterTimeoutMS: 120_000, recordingStableMaxMS: 900_000, recordingStableGraceMS: 60_000 };
 }
 
 export function narrativeChapterForStage(stage: BrowserAgentWorkerStage): string | undefined {
@@ -2355,6 +2377,21 @@ export function adaptiveObservationDeadline(startedAtMS: number, lastProgressAtM
 	return Math.min(absoluteDeadline, lastProgressAtMS + boundedIdle + boundedPostRefresh);
 }
 
+export function adaptiveObservationProgressDeadline(
+	currentDeadlineMS: number,
+	startedAtMS: number,
+	lastProgressAtMS: number,
+	idleTimeoutMS: number,
+	postRefreshObserveMS: number,
+	hardRefreshed: boolean,
+): number {
+	// The one allowed hard refresh begins a fixed final observation window.
+	// Reload-induced DOM/ARIA changes are transport noise, not business
+	// progress, and must never reopen the full build waiting budget.
+	if (hardRefreshed) return currentDeadlineMS;
+	return adaptiveObservationDeadline(startedAtMS, lastProgressAtMS, idleTimeoutMS, postRefreshObserveMS);
+}
+
 export function browserVisualHardRefreshDue(startedAtMS: number, nowMS: number, observationBudgetMS: number, refreshed: boolean): boolean {
 	return !refreshed && nowMS - startedAtMS >= interactiveSurfacePollTimeout(observationBudgetMS);
 }
@@ -2413,8 +2450,8 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			const nextDigest = await businessProgressDigest(session.page);
 			if (nextDigest && progressDigest && nextDigest !== progressDigest) {
 				lastProgressAtMS = Date.now();
-				deadline = adaptiveObservationDeadline(startedAtMS, lastProgressAtMS, idleTimeoutMS, postRefreshObserveMS);
-				refreshed = false;
+				deadline = adaptiveObservationProgressDeadline(deadline, startedAtMS, lastProgressAtMS, idleTimeoutMS, postRefreshObserveMS, hardRefreshed);
+				if (!hardRefreshed) refreshed = false;
 			}
 			if (nextDigest) progressDigest = nextDigest;
 			nextProgressProbeAtMS = Date.now() + 5_000;
