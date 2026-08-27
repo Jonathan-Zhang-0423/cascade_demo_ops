@@ -1291,6 +1291,46 @@ describe("browser agent required validations", () => {
     }]);
   });
 
+  it("verifies the exact visible text written to a contenteditable composer", async () => {
+    const composer = {
+      first: () => ({
+        inputValue: async () => undefined,
+        evaluate: async () => "请修复当前项目：初始化棋盘必须能实际工作。保留已有内容，直接更新当前项目。",
+      }),
+    };
+    const assertions = await evaluateRequiredValidations({
+      locator: () => composer,
+    }, {
+      id: "stage_repair_fill",
+      order: 1,
+      node_id: "product_repair_input",
+      target_contract: {
+        semantic_id: "product_repair_input",
+        allowed_roles: ["textbox"],
+        allowed_names: ["产品修复输入"],
+        destructive: false,
+      },
+      interactions: [{
+        kind: "fill",
+        target: { selector: "[contenteditable='true']" },
+        value: "请修复当前项目：初始化棋盘必须能实际工作。保留已有内容，直接更新当前项目。",
+        non_destructive: true,
+      }],
+      validations: [{
+        id: "repair_value",
+        kind: "value_equals",
+        target: { selector: "[contenteditable='true']" },
+        expected: "请修复当前项目：初始化棋盘必须能实际工作。保留已有内容，直接更新当前项目。",
+        required: true,
+      }],
+    });
+    expect(assertions).toEqual([{
+      kind: "required_value_equals:repair_value",
+      passed: true,
+      actual: "matched",
+    }]);
+  });
+
   it("does not accept a mismatched value or a non-evidence-bound fill selector", async () => {
     const current = {
       count: async () => 1,

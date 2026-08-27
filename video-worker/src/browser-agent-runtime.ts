@@ -2165,7 +2165,7 @@ export async function evaluateRequiredValidations(
         actual = passed ? "matched" : "not_matched";
       } else if (validation.kind === "value_equals") {
         const expected = scalarExpected(validation);
-        const value = await locatorForValidation(page, validation).first().inputValue({ timeout }).catch(() => undefined);
+        const value = await readableEditableValue(locatorForValidation(page, validation).first(), timeout);
         passed = value !== undefined && String(value) === String(expected ?? "");
         actual = passed ? "matched" : "not_matched";
         if (!passed && await structuralInputValueEquals(page, stage, expected, timeout)) {
@@ -2787,8 +2787,24 @@ async function evidenceBoundFormControlOutcomeVerified(page: any, stage: Browser
     interaction.kind,
   );
   if (!resolved) return false;
-  const value = await resolved.locator.inputValue({ timeout: actionTimeoutMS }).catch(() => undefined);
+  const value = await readableEditableValue(resolved.locator, actionTimeoutMS);
   return value !== undefined && String(value) === String(interaction.value);
+}
+
+async function readableEditableValue(locator: any, timeout: number): Promise<string | undefined> {
+  const inputValue = typeof locator?.inputValue === "function"
+    ? await locator.inputValue({ timeout }).catch(() => undefined)
+    : undefined;
+  if (inputValue !== undefined) return String(inputValue);
+  if (typeof locator?.evaluate !== "function") return undefined;
+  return locator.evaluate((element: any) => {
+    const nativeValue = element?.value;
+    if (typeof nativeValue === "string") return nativeValue;
+    const editable = element?.isContentEditable === true
+      || String(element?.getAttribute?.("contenteditable") || "").toLowerCase() === "true";
+    if (!editable) return undefined;
+    return String(element?.innerText ?? element?.textContent ?? "");
+  }, undefined, { timeout }).catch(() => undefined);
 }
 
 function expectedPostClickRouteVerified(page: any, stage: BrowserAgentWorkerStage, validation: BrowserAgentValidation): boolean {
