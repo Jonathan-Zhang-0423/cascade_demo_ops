@@ -134,10 +134,41 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	}
 	selected := []string{}
 	seen := map[string]bool{}
+	missingSet := map[string]bool{}
 	for _, id := range missing {
-		if value := statements[strings.TrimSpace(id)]; value != "" && !seen[value] {
-			selected, seen[value] = append(selected, value), true
-			break
+		missingSet[strings.TrimSpace(id)] = true
+	}
+	// The score's missing list is normalized for reporting and may therefore
+	// be alphabetic rather than causal. Follow the declared interaction plan
+	// order so foundational surface readiness is repaired before stability or
+	// advanced controls. When the product surface itself is missing, use the
+	// first public observable criterion: it is more concrete than the generic
+	// harness phrase "surface ready" and remains product-spec driven.
+	if missingSet["surface_ready"] {
+		for _, criterion := range spec.ObservableAcceptance {
+			value := strings.TrimSpace(criterion.Statement)
+			if criterion.Required && value != "" {
+				selected, seen[value] = append(selected, value), true
+				break
+			}
+		}
+	}
+	if len(selected) == 0 {
+		for _, step := range plan.Steps {
+			id := strings.TrimSpace(step.StepID)
+			value := strings.TrimSpace(step.SemanticIntent)
+			if missingSet[id] && value != "" && !seen[value] {
+				selected, seen[value] = append(selected, value), true
+				break
+			}
+		}
+	}
+	if len(selected) == 0 {
+		for _, id := range missing {
+			if value := statements[strings.TrimSpace(id)]; value != "" && !seen[value] {
+				selected, seen[value] = append(selected, value), true
+				break
+			}
 		}
 	}
 	if len(selected) == 0 {

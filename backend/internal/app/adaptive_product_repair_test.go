@@ -37,3 +37,19 @@ func TestAdaptiveProductRepairPromptFallsBackToOneRequiredCriterion(t *testing.T
 		t.Fatalf("fallback prompt was not bounded to one criterion: %q", got)
 	}
 }
+
+func TestAdaptiveProductRepairPromptRepairsFoundationalSurfaceBeforeAlphabeticStability(t *testing.T) {
+	spec := experiment.ProductSpec{ObservableAcceptance: []experiment.AcceptanceCriterion{
+		{ID: "initial_surface", Statement: "初始业务内容完整渲染并包含可操作状态", Required: true},
+		{ID: "advanced_state", Statement: "高级状态可切换", Required: true},
+	}}
+	plan := experiment.InteractionPlan{Steps: []experiment.InteractionStep{
+		{StepID: "surface_ready", SemanticIntent: "确认主要交互区域可见"},
+		{StepID: "continued_stability", SemanticIntent: "确认连续操作后稳定"},
+	}}
+
+	got := adaptiveProductRepairPrompt(spec, plan, []string{"continued_stability", "surface_ready"})
+	if !strings.Contains(got, "初始业务内容完整渲染并包含可操作状态") || strings.Contains(got, "连续操作后稳定") {
+		t.Fatalf("repair prompt did not choose the causal surface criterion: %q", got)
+	}
+}
