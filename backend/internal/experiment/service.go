@@ -709,6 +709,10 @@ func (s *Service) Resume(ctx context.Context, runID string, expectedRevision int
 	if resumeIndex < 0 {
 		return Run{}, errors.New("experiment has no resumable active leg")
 	}
+	if strategy == "reconcile_observed_state" && run.HarnessProfile == HarnessProfileAdaptiveBusinessV2 {
+		next.Phase = "reconcile_observed_state"
+		resumePhase = "reconcile_observed_state"
+	}
 	next.Legs[resumeIndex].State = RunStateQueued
 	next.Legs[resumeIndex].Phase = resumePhase
 	next.Legs[resumeIndex].BrowserAttempt++

@@ -221,6 +221,44 @@ func TestConfirmedOnceEffectResumesObserveOnlyWithoutReplay(t *testing.T) {
 	}
 }
 
+func TestExplicitAdaptiveV2ReconciliationPreservesEntryPhaseForWaitingCheckpoint(t *testing.T) {
+	service := testService(t)
+	service.productSpecPlanner = staticProductSpecPlanner{spec: validProductSpecFixture()}
+	request := testCreateRequest()
+	request.DefinitionRef = "2048-v3"
+	request.IdempotencyKey = "explicit-v2-waiting-reconciliation"
+	request.HarnessProfile = HarnessProfileAdaptiveBusinessV2
+	run, err := service.CreateRun(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legID := run.Legs[0].LegID
+	run = mustTransitionLeg(t, service, run, legID, RunStateRunning, "creating_target")
+	started, err := service.BeginOnceEffect(t.Context(), run.RunID, run.Revision, legID, "target_submit", "target_submission", "explicit-v2-submit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed, err := service.CommitOnceEffect(t.Context(), run.RunID, CommitOnceEffectRequest{
+		ExpectedRevision: started.Revision, LegID: legID, EffectID: "target_submit", StateFingerprintRef: "result:initial",
+		ResultEntryRef: "direct:project-one:job-observe", EvidenceRefs: []string{"job-observe"}, EntityName: started.Legs[0].ProjectName,
+		EntityCreatedAt: started.CreatedAt.Add(time.Second), EntityTaskRef: "job-observe",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := service.TransitionLeg(t.Context(), run.RunID, LegTransitionRequest{ExpectedRevision: committed.Revision, LegID: legID, State: RunStateWaitingExternal, Phase: "reconcile_observed_state", EventType: "module_interrupted", Summary: "worker restarted during passive observation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := service.Resume(t.Context(), run.RunID, waiting.Revision, "reconcile_observed_state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Phase != "reconcile_observed_state" || resumed.Legs[0].Phase != "reconcile_observed_state" || resumed.Legs[0].TargetSubmissions != 1 {
+		t.Fatalf("explicit v2 reconciliation entry was not preserved: %+v", resumed)
+	}
+}
+
 func TestConfirmedCheckpointAdvancesObservationEntryWithoutCountingAnotherSubmission(t *testing.T) {
 	service := testService(t)
 	run := mustCreateRun(t, service)
