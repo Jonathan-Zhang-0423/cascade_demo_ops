@@ -659,6 +659,27 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 				return &experiment.AdapterError{Code: "artifact_materialization_failed", Phase: "result_materialization", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: downloadErr}
 			}
 			evidenceRefs := resultEvidenceRefs(result)
+			// A required interaction-stage failure proves that the fresh entity and
+			// its initial build submission already happened. Persist that once-effect
+			// before routing the product defect into the same-entity repair loop.
+			// Treating a failed product result as an uncommitted submit makes the
+			// coordinator reject its own repair directive and risks a fresh project
+			// on the next run.
+			if adaptiveFailedResultShouldCommitSubmit(request, commitEffect) {
+				entityCreatedAt := result.CreatedAt
+				if entityCreatedAt.IsZero() {
+					entityCreatedAt = a.now().UTC()
+				}
+				entryRef := "direct:" + projectID + ":" + jobID
+				if err := emit(experiment.LegExecutionUpdate{
+					Kind: "once_effect_committed", EffectID: "target_submit", StateFingerprintRef: "result:" + result.ResultID,
+					ResultEntryRef: entryRef, EvidenceRefs: evidenceRefs, SegmentRefs: experimentSegmentRefs(downloads),
+					EntityName: request.ProjectName, EntityCreatedAt: entityCreatedAt, EntityTaskRef: jobID,
+				}); err != nil {
+					return err
+				}
+				request = withRuntimeConfirmedTargetSubmit(request, entryRef)
+			}
 			history = append(append([]closedLoopCaptureBatch{}, history...), closedLoopCaptureBatch{Result: result, Downloads: downloads})
 			scoreEvidence := firstNonEmptyString(result.ResultID, jobID)
 			summary := &experiment.CapabilitySummary{CoreScore: score.CoreScore, EnhancementScore: score.EnhancementScore, TotalScore: score.TotalScore, CorePassed: score.CorePassed, EligibleForFilm: score.EligibleForFilm, Missing: append([]string{}, score.Missing...)}
@@ -1044,6 +1065,10 @@ func checkpointHasConfirmedTargetSubmit(checkpoint *experiment.Checkpoint) bool 
 		}
 	}
 	return false
+}
+
+func adaptiveFailedResultShouldCommitSubmit(request experiment.LegExecutionRequest, commitEffect bool) bool {
+	return commitEffect && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 && !checkpointHasConfirmedTargetSubmit(request.Checkpoint)
 }
 
 func readAdaptiveCapabilityScore(downloads []CloudDeliverableDownloadResult) (*model.CapabilityScore, string, error) {

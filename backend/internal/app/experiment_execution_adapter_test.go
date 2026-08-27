@@ -389,6 +389,28 @@ func TestAdaptiveV2RepairableFailureAfterWaitIsMaterialized(t *testing.T) {
 	}
 }
 
+func TestAdaptiveV2FailedProductResultCommitsInitialSubmitBeforeRepair(t *testing.T) {
+	request := experiment.LegExecutionRequest{HarnessProfile: experiment.HarnessProfileAdaptiveBusinessV2}
+	if !adaptiveFailedResultShouldCommitSubmit(request, true) {
+		t.Fatal("an initial submitted job that reached product verification did not commit its once-effect before repair")
+	}
+	if adaptiveFailedResultShouldCommitSubmit(request, false) {
+		t.Fatal("an observe-only reconciliation was allowed to invent a target submission")
+	}
+	request.Checkpoint = &experiment.Checkpoint{
+		ResultEntryRef: "direct:project-one:job-original",
+		OnceEffects:    []experiment.OnceEffectRecord{{EffectID: "target_submit", Status: "confirmed"}},
+	}
+	if adaptiveFailedResultShouldCommitSubmit(request, true) {
+		t.Fatal("a confirmed target submission was scheduled for a duplicate commit")
+	}
+	request.HarnessProfile = experiment.HarnessProfileAdaptiveBusinessV1
+	request.Checkpoint = nil
+	if adaptiveFailedResultShouldCommitSubmit(request, true) {
+		t.Fatal("the v1 compatibility profile changed its failed-result semantics")
+	}
+}
+
 func TestAdaptiveV2RetriesOnlySameEntityRepairFailuresBeforeSubmitEffect(t *testing.T) {
 	request := experiment.LegExecutionRequest{HarnessProfile: experiment.HarnessProfileAdaptiveBusinessV2, ProductRepairRounds: 1}
 	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{
