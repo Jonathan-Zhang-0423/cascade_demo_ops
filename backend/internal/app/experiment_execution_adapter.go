@@ -58,6 +58,17 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 		}
 		status, err := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
 		if err == nil && status.Status == "failed" && isAdaptiveExperimentHarness(request.HarnessProfile) {
+			if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
+				if failedResult, resultErr := a.service.GetDirectResult(ctx, projectID, jobID); resultErr == nil {
+					if _, repairable := adaptiveFailedCapabilityScore(request, failedResult); repairable {
+						// The once-effect and entity are already confirmed. Route an
+						// authoritative required-capability failure straight into the
+						// bounded same-entity repair loop; another reconciliation pass
+						// would add no evidence and can lose the observed deep link.
+						return a.completeDirectLeg(ctx, request, projectID, jobID, status, false, emit)
+					}
+				}
+			}
 			if adaptiveRetryableRuntimeFailure(status.BlockingErrorCode) {
 				return a.retryAdaptiveRuntimeFailure(ctx, request, projectID, jobID, emit)
 			}
