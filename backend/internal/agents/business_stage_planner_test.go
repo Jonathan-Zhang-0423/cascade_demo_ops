@@ -372,6 +372,7 @@ func TestBusinessStagePlannerRepairsBoundEntityWithoutCreationStages(t *testing.
 	project := graphQualityProject()
 	project.ProductURL = "https://example.test/entities/current"
 	project.ProductDescription = "请让撤销和触控操作正常工作，并保留当前视觉风格。"
+	project.DemoAccount = &model.DemoAccount{UsernameSecretRef: "secret://demo/username", PasswordSecretRef: "secret://demo/password"}
 	if project.Inputs == nil {
 		project.Inputs = &model.ProjectInputBundle{}
 	}
@@ -393,6 +394,10 @@ func TestBusinessStagePlannerRepairsBoundEntityWithoutCreationStages(t *testing.
 	}
 	if _, ok := seen["project_name_input"]; ok {
 		t.Fatal("same-entity repair must not write a project name")
+	}
+	session, sessionOK := seen["session_setup"]
+	if !sessionOK || session.EntryRoute != project.ProductURL || session.ExpectedRouteAfterAction != project.ProductURL {
+		t.Fatalf("same-entity repair session did not preserve the bound entity entry: %+v", session)
 	}
 	input, inputOK := seen["product_repair_input"]
 	submit, submitOK := seen["submit_product_repair"]

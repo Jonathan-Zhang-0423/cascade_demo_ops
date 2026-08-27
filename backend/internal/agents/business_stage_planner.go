@@ -54,8 +54,16 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 		source:     source,
 		now:        now,
 	}
+	workflowHints := workflowExecutionHints(project)
+	sameEntityRepair := workflowHints != nil && workflowHints.SameEntityRepair
 
 	if builder.needsSessionSetup() {
+		sessionEntryRoute := routeHints.login
+		sessionExpectedRoute := routeHints.workspace
+		if sameEntityRepair {
+			entityRoute := firstNonEmpty(workflowHints.ExistingEntityURL, project.ProductURL, routeHints.projectDetail, routeHints.workspace)
+			sessionEntryRoute, sessionExpectedRoute = entityRoute, entityRoute
+		}
 		builder.addStage(stageSpec{
 			id:             "session_setup",
 			kind:           model.BusinessStageKindSessionSetup,
@@ -65,8 +73,8 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			actionLabel:    "登录演示账号",
 			successState:   "登录完成，页面进入工作台或目标业务页面。",
 			routeState:     model.BusinessRouteStateUnauthenticated,
-			entryRoute:     routeHints.login,
-			expectedRoute:  routeHints.workspace,
+			entryRoute:     sessionEntryRoute,
+			expectedRoute:  sessionExpectedRoute,
 			durationMS:     durationMSForIntentKeywords(intentText, "login", "signin", "sign in", "登录", "登陆", "登入"),
 			keywords:       []string{"login", "signin", "sign in", "email", "password", "登录", "邮箱", "密码"},
 			capture:        []string{"登录页表单", "登录后工作台"},
@@ -78,8 +86,6 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 	// normalized intent graph because that graph also contains action kinds,
 	// selector aliases, and other generated metadata that may follow a phrase
 	// such as "new project".
-	workflowHints := workflowExecutionHints(project)
-	sameEntityRepair := workflowHints != nil && workflowHints.SameEntityRepair
 	projectName := intentProjectName(businessStageExplicitRequirementText(project, brief, report))
 	if projectName == "" && workflowHints != nil && workflowHints.RequiresFreshEntity {
 		projectName = strings.TrimSpace(workflowHints.EntityName)
