@@ -223,12 +223,17 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		return ""
 	}
 	repeated := len(priorAttempts) > 0 && priorAttempts[0] > 0
-	value := "请修复当前项目：" + strings.TrimRight(selected[0], "。；; ") + "必须能实际工作。保留已有内容，直接更新当前项目。"
+	subject := strings.TrimRight(selected[0], ".。；; ")
+	prefix, suffix := "请修复当前项目：", "必须能实际工作。保留已有内容，直接更新当前项目。"
 	if repeated {
-		value = "上轮修复后仍未通过实际预览。请先复现并检查真实加载代码，再修复：" + strings.TrimRight(selected[0], "。；; ") + "。修复后在预览中运行确认，保留已有内容。"
+		prefix, suffix = "上轮修复后实际预览仍失败。请先复现并检查已加载代码，再修复：", "。完成后在预览中运行确认，保留已有内容。"
 	}
-	if len([]rune(value)) > 140 {
-		value = string([]rune(value)[:139]) + "。"
+	prefixRunes, subjectRunes, suffixRunes := []rune(prefix), []rune(subject), []rune(suffix)
+	if available := 140 - len(prefixRunes) - len(suffixRunes); available < len(subjectRunes) {
+		if available < 2 {
+			return ""
+		}
+		subjectRunes = append(subjectRunes[:available-1], '…')
 	}
-	return value
+	return string(prefixRunes) + string(subjectRunes) + string(suffixRunes)
 }

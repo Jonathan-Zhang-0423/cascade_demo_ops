@@ -63,7 +63,7 @@ func TestAdaptiveProductRepairPromptEscalatesRepeatedFailureToRuntimeVerificatio
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"surface_ready"}, 1)
-	for _, required := range []string{"上轮修复后仍未通过实际预览", "检查真实加载代码", "预览中运行确认", "初始业务内容完整渲染"} {
+	for _, required := range []string{"上轮修复后实际预览仍失败", "检查已加载代码", "预览中运行确认", "初始业务内容完整渲染"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("repeated repair prompt lost %q: %q", required, got)
 		}
@@ -75,5 +75,8 @@ func TestAdaptiveProductRepairPromptEscalatesRepeatedFailureToRuntimeVerificatio
 	}
 	if len([]rune(got)) > 140 {
 		t.Fatalf("repeated repair prompt is too long: %d %q", len([]rune(got)), got)
+	}
+	if !strings.HasSuffix(got, "保留已有内容。") || strings.Contains(got, ".。") {
+		t.Fatalf("repeated repair prompt lost its public suffix or punctuation: %q", got)
 	}
 }
