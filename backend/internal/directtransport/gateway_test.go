@@ -125,6 +125,86 @@ func TestGatewayAllocatesDedicatedPortAndHandsValidatedPackageToWorker(t *testin
 	}
 }
 
+func TestGatewayCancelPersistsTerminalStateAndSignalsWorker(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	port := reserveTestPort(t)
+	root := t.TempDir()
+	gateway, err := NewGateway(Config{
+		ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1",
+		DataPortStart: port, DataPortEnd: port, AllowInsecureLoopback: true,
+		BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: root, LeaseTTL: time.Hour,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gateway.Close(context.Background()) })
+	lease := requestTestLease(t, gateway, now)
+	pkg := loadDirectPackageFixture(t)
+	bindTestDirectPackageOrigin(&pkg, lease.InstallationID)
+	receipt := uploadTestPackage(t, lease, pkg, now, "cancel_package", "cancel_package_request")
+	claim := httptest.NewRequest(http.MethodPost, "/v1/worker/jobs/claim", nil)
+	claim.Header.Set("Authorization", "Bearer "+testWorkerToken)
+	claimResponse := httptest.NewRecorder()
+	gateway.WorkerHandler().ServeHTTP(claimResponse, claim)
+	if claimResponse.Code != http.StatusOK {
+		t.Fatalf("claim status=%d body=%s", claimResponse.Code, claimResponse.Body.String())
+	}
+
+	cancelRequest := model.DirectJobCancelRequest{ProtocolVersion: model.DirectTransportProtocolVersion, InstallationID: lease.InstallationID, JobID: receipt.JobID, Reason: "experiment canceled"}
+	message, err := model.EncryptDirectTransportJSON(cancelRequest, lease, "cancel_message", "job_cancel", model.DirectTransportDirectionUpload, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(message)
+	request, _ := http.NewRequest(http.MethodPost, lease.DataURL+"/v1/direct/jobs/"+receipt.JobID+"/cancel", bytes.NewReader(body))
+	signDirectRequest(t, request, lease, body, now, "cancel_request_nonce")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(response.Body)
+		t.Fatalf("cancel status=%d body=%s", response.StatusCode, payload)
+	}
+	var encrypted model.DirectEncryptedMessage
+	if err := json.NewDecoder(response.Body).Decode(&encrypted); err != nil {
+		t.Fatal(err)
+	}
+	var canceled model.DirectJobCancelReceipt
+	if err := model.DecryptDirectTransportJSON(encrypted, lease, "job_cancel_receipt", model.DirectTransportDirectionResult, now, &canceled); err != nil {
+		t.Fatal(err)
+	}
+	if canceled.JobID != receipt.JobID || canceled.Status != "canceled" {
+		t.Fatalf("unexpected cancel receipt: %+v", canceled)
+	}
+
+	control := httptest.NewRequest(http.MethodGet, "/v1/worker/jobs/"+receipt.JobID+"/control", nil)
+	control.Header.Set("Authorization", "Bearer "+testWorkerToken)
+	controlResponse := httptest.NewRecorder()
+	gateway.WorkerHandler().ServeHTTP(controlResponse, control)
+	if controlResponse.Code != http.StatusOK || !strings.Contains(controlResponse.Body.String(), `"cancel_requested":true`) {
+		t.Fatalf("worker control status=%d body=%s", controlResponse.Code, controlResponse.Body.String())
+	}
+
+	persistedBytes, err := os.ReadFile(filepath.Join(root, "jobs", safeSegment(receipt.JobID), "job.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted persistedJobRecord
+	if err := json.Unmarshal(persistedBytes, &persisted); err != nil || persisted.Status.Status != "canceled" {
+		t.Fatalf("canceled state was not persisted: status=%+v err=%v", persisted.Status, err)
+	}
+	lateUpdate := httptest.NewRequest(http.MethodPut, "/v1/worker/jobs/"+receipt.JobID+"/status", strings.NewReader(`{"status":"running","stage":"late","progress_percent":50}`))
+	lateUpdate.Header.Set("Authorization", "Bearer "+testWorkerToken)
+	lateResponse := httptest.NewRecorder()
+	gateway.WorkerHandler().ServeHTTP(lateResponse, lateUpdate)
+	if lateResponse.Code != http.StatusConflict {
+		t.Fatalf("late worker update overwrote canceled job: status=%d body=%s", lateResponse.Code, lateResponse.Body.String())
+	}
+}
+
 func TestGatewayRejectsLeaseAndPackageReplay(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	port := reserveTestPort(t)

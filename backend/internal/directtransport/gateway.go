@@ -266,6 +266,7 @@ func (g *Gateway) bootstrapAuth(next http.HandlerFunc) http.HandlerFunc {
 func (g *Gateway) WorkerHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/worker/jobs/claim", g.workerAuth(g.handleWorkerClaim))
+	mux.HandleFunc("GET /v1/worker/jobs/{job_id}/control", g.workerAuth(g.handleWorkerControl))
 	mux.HandleFunc("PUT /v1/worker/jobs/{job_id}/status", g.workerAuth(g.handleWorkerStatus))
 	mux.HandleFunc("PUT /v1/worker/jobs/{job_id}/result", g.workerAuth(g.handleWorkerResult))
 	mux.HandleFunc("PUT /v1/worker/jobs/{job_id}/artifacts/{artifact_id}", g.workerAuth(g.handleWorkerArtifact))
@@ -451,12 +452,75 @@ func (g *Gateway) dataHandler(lease *leaseRuntime) http.Handler {
 	mux.HandleFunc("POST /v1/direct/packages", func(w http.ResponseWriter, r *http.Request) { g.handlePackage(w, r, lease) })
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/credentials", func(w http.ResponseWriter, r *http.Request) { g.handleCredential(w, r, lease) })
 	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/ack", func(w http.ResponseWriter, r *http.Request) { g.handleResultAck(w, r, lease) })
+	mux.HandleFunc("POST /v1/direct/jobs/{job_id}/cancel", func(w http.ResponseWriter, r *http.Request) { g.handleJobCancel(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}", func(w http.ResponseWriter, r *http.Request) { g.handleJobStatus(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/package", func(w http.ResponseWriter, r *http.Request) { g.handleJobPackage(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/result", func(w http.ResponseWriter, r *http.Request) { g.handleJobResult(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/artifacts/{artifact_id}", func(w http.ResponseWriter, r *http.Request) { g.handleArtifact(w, r, lease) })
 	mux.HandleFunc("GET /v1/direct/jobs/{job_id}/artifacts/{artifact_id}/chunks/{chunk_index}", func(w http.ResponseWriter, r *http.Request) { g.handleArtifactChunk(w, r, lease) })
 	return mux
+}
+
+func (g *Gateway) handleJobCancel(w http.ResponseWriter, r *http.Request, lease *leaseRuntime) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "cancel_too_large", "Job cancel request exceeds the transport limit.")
+		return
+	}
+	if err := g.authenticateDataRequest(r, lease, body); err != nil {
+		writeError(w, http.StatusUnauthorized, "direct_request_invalid", err.Error())
+		return
+	}
+	var message model.DirectEncryptedMessage
+	if err := json.Unmarshal(body, &message); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_encrypted_message", "Encrypted job cancel message is invalid.")
+		return
+	}
+	var request model.DirectJobCancelRequest
+	if err := model.DecryptDirectTransportJSON(message, lease.lease, "job_cancel", model.DirectTransportDirectionUpload, g.now(), &request); err != nil {
+		writeError(w, http.StatusBadRequest, "cancel_decryption_failed", "Job cancel authentication failed.")
+		return
+	}
+	jobID := r.PathValue("job_id")
+	if request.ProtocolVersion != model.DirectTransportProtocolVersion || request.InstallationID != lease.lease.InstallationID || request.JobID != jobID {
+		writeError(w, http.StatusUnprocessableEntity, "cancel_binding_invalid", "Job cancel does not match the active lease and installation.")
+		return
+	}
+	g.mu.Lock()
+	record := g.jobs[jobID]
+	if record == nil || record.InstallationID != lease.lease.InstallationID {
+		g.mu.Unlock()
+		writeError(w, http.StatusNotFound, "job_not_found", "Job was not found.")
+		return
+	}
+	if record.Status.Status != "canceled" {
+		if directJobTerminal(record.Status.Status) {
+			g.mu.Unlock()
+			writeError(w, http.StatusConflict, "job_terminal", "Completed or failed Browser Agent jobs cannot be canceled.")
+			return
+		}
+		record.Status.Status = "canceled"
+		record.Status.Stage = "canceled"
+		record.Status.Message = "Browser Agent execution was canceled by its owning experiment."
+		record.Status.BlockingErrorCode = "experiment_canceled"
+		record.Status.UpdatedAt = g.now().UTC()
+		record.Credential = nil
+		record.CredentialGrantID = ""
+		if err := g.persistJob(record); err != nil {
+			g.mu.Unlock()
+			writeError(w, http.StatusInternalServerError, "job_state_write_failed", "Canceled job state could not be persisted.")
+			return
+		}
+	}
+	status := record.Status
+	g.mu.Unlock()
+	g.writeEncrypted(w, http.StatusOK, lease, "job_cancel_receipt", model.DirectJobCancelReceipt{
+		ProtocolVersion: model.DirectTransportProtocolVersion,
+		JobID:           jobID,
+		Status:          status.Status,
+		Stage:           status.Stage,
+		CanceledAt:      status.UpdatedAt,
+	})
 }
 
 func (g *Gateway) handleResultAck(w http.ResponseWriter, r *http.Request, lease *leaseRuntime) {
@@ -1120,6 +1184,25 @@ func (g *Gateway) workerAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func (g *Gateway) handleWorkerControl(w http.ResponseWriter, r *http.Request) {
+	g.mu.Lock()
+	record := g.jobs[r.PathValue("job_id")]
+	if record == nil {
+		g.mu.Unlock()
+		writeError(w, http.StatusNotFound, "job_not_found", "Job was not found.")
+		return
+	}
+	status := record.Status.Status
+	jobID := record.Status.JobID
+	g.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"protocol_version": model.DirectWorkerProtocolVersion,
+		"job_id":           jobID,
+		"status":           status,
+		"cancel_requested": status == "canceled",
+	})
 }
 
 func (g *Gateway) handleWorkerClaim(w http.ResponseWriter, _ *http.Request) {
