@@ -171,6 +171,12 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 			modeKeywords = append(modeKeywords, "计划", "规划", "plan", "direct build", "实际构建", "直接构建")
 			modeParameters["action_recipe"] = "configure_boolean"
 			modeParameters["desired_checked"] = "false"
+			// Keep runtime target resolution tied to the state-setting control's
+			// accessible name, not this stage's internal action title. Full
+			// intelligence runs and frozen adaptive runs share this planner, so
+			// the aliases must be part of the stage contract before either path
+			// is packaged.
+			modeParameters["allowed_names"] = "计划,规划,Plan,Planning"
 		}
 		builder.addStage(stageSpec{
 			id:            "select_build_mode",

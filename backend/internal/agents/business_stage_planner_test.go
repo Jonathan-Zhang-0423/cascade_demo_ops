@@ -302,6 +302,7 @@ func TestBusinessStagePlannerActualBuildDisablesPlanFirstMode(t *testing.T) {
 	foundInput := false
 	foundMode := false
 	modeHasVisualValidation := false
+	modeHasRuntimeAliases := false
 	for _, stage := range plan.Stages {
 		switch stage.ID {
 		case "business_stage_project_name_input":
@@ -311,11 +312,16 @@ func TestBusinessStagePlannerActualBuildDisablesPlanFirstMode(t *testing.T) {
 			if stage.Action.Parameters["action_recipe"] != "configure_boolean" || stage.Action.Parameters["desired_checked"] != "false" || stage.Action.Parameters["optional_when_target_absent"] != "true" {
 				t.Fatalf("direct-build mode must be observed as an optional boolean configuration: %+v", stage.Action.Parameters)
 			}
+			if aliases := stage.Action.Parameters["allowed_names"]; !strings.Contains(aliases, "计划") || !strings.Contains(aliases, "Plan") {
+				t.Fatalf("direct-build mode must preserve state-control accessible-name aliases for every packaging path: %+v", stage.Action.Parameters)
+			}
 			node := graphNodeFromBusinessStage(project, stage, project.ProductURL, "feature_direct_build")
 			modeHasVisualValidation = stage.EntryRoute == "/app" && stage.ExpectedRouteAfterAction == "/app" && len(node.Validations) == 2 && node.Validations[0].Kind == "page_changed" && node.Validations[0].Expected == true && node.Validations[1].Kind == "url_matches" && node.Validations[1].Target.URL == "/app"
+			contract := targetContractForNode(node, model.ScriptActionInstruction{Type: node.ActionSpec.Type, Target: node.ActionSpec.Target, Parameters: node.ActionSpec.Parameters}, model.ScriptPageTarget{}, node.Validations)
+			modeHasRuntimeAliases = contract != nil && containsString(contract.AllowedNames, "计划") && containsString(contract.AllowedNames, "Plan")
 		}
 	}
-	if !foundInput || !foundMode || !modeHasVisualValidation {
+	if !foundInput || !foundMode || !modeHasVisualValidation || !modeHasRuntimeAliases {
 		t.Fatalf("actual build must bind the project idea input and disable plan-first mode: %+v", plan.Stages)
 	}
 }
