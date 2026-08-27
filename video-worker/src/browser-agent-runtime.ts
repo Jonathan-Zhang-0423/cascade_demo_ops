@@ -3538,7 +3538,7 @@ function suggestedEntryWaitCondition(stage: BrowserAgentWorkerStage): string | u
 }
 
 async function pageStillBusy(page: any): Promise<boolean> {
-  return page.evaluate(() => {
+  const snapshot = await page.evaluate(() => {
     const pageDocument = (globalThis as any).document;
     const documentBusy = pageDocument.readyState !== "complete";
     const ariaBusy = Boolean(pageDocument.querySelector?.('[aria-busy="true"]'));
@@ -3548,26 +3548,23 @@ async function pageStillBusy(page: any): Promise<boolean> {
       if (style?.display === "none" || style?.visibility === "hidden" || Number(style?.opacity) === 0 || !rect || rect.width <= 0 || rect.height <= 0) return "";
       return String(element.getAttribute?.("aria-label") || element.innerText || element.textContent || "").trim().toLowerCase();
     };
-	const lifecycleTextBusy = (value: string): boolean => {
-		const text = String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
-		if (/\b(running|in progress|generating|building|executing|processing)\b|执行中|进行中|生成中|构建中|处理中|正在执行|正在生成|正在构建/.test(text)) return true;
-		for (const match of text.matchAll(/(?:^|\s)(\d{1,3})\s*\/\s*(\d{1,3})\s*(?:completed|done|complete|已完成|完成)(?=$|\s|[，。,:：])/g)) {
-			if (Number(match[2]) > 0 && Number(match[1]) >= 0 && Number(match[1]) < Number(match[2])) return true;
-		}
-		for (const match of text.matchAll(/(?:^|\s)(\d{1,3})\s+of\s+(\d{1,3})\s+(?:steps?\s+)?(?:completed|done)(?=$|\s|[,.])/g)) {
-			if (Number(match[2]) > 0 && Number(match[1]) >= 0 && Number(match[1]) < Number(match[2])) return true;
-		}
-		return false;
-	};
-    const lifecycleNodes = Array.from(pageDocument.querySelectorAll?.('progress,[role="progressbar"],[role="status"],[aria-live],button,[role="button"]') || []).slice(0, 160) as any[];
-    const activeLifecycleSignal = lifecycleNodes.some((element) => {
+	const lifecycleNodes = Array.from(pageDocument.querySelectorAll?.('progress,[role="progressbar"],[role="status"],[aria-live],button,[role="button"],[data-status],[data-state],[class*="progress" i],[class*="status" i],[class*="loading" i]') || []).slice(-160) as any[];
+	const lifecycleTexts: string[] = [];
+	let indeterminateProgress = false;
+	for (const element of lifecycleNodes) {
       const text = visibleText(element);
-      if (!text) return element.matches?.('progress:not([value]),[role="progressbar"]') || false;
-		  return lifecycleTextBusy(text);
-    });
-	const bodyText = String(pageDocument.body?.innerText || "").replace(/\s+/g, " ").slice(0, 48_000);
-	return documentBusy || ariaBusy || activeLifecycleSignal || lifecycleTextBusy(bodyText);
-  }).catch(() => false);
+		if (text) lifecycleTexts.push(text.slice(0, 1_000));
+		else if (element.matches?.('progress:not([value]),[role="progressbar"]')) indeterminateProgress = true;
+	}
+	return { documentBusy, ariaBusy, indeterminateProgress, lifecycleTexts };
+  }).catch(() => undefined);
+	return businessLifecycleSnapshotBusy(snapshot);
+}
+
+export function businessLifecycleSnapshotBusy(snapshot: { documentBusy?: boolean; ariaBusy?: boolean; indeterminateProgress?: boolean; lifecycleTexts?: string[]; bodyText?: string } | undefined): boolean {
+	if (!snapshot) return false;
+	return Boolean(snapshot.documentBusy || snapshot.ariaBusy || snapshot.indeterminateProgress
+		|| (snapshot.lifecycleTexts || []).some((value) => businessLifecycleTextBusy(value)));
 }
 
 export function businessLifecycleTextBusy(value: string): boolean {
