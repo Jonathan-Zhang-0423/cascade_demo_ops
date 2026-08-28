@@ -151,6 +151,34 @@ func TestPrepareAutomatedPresentationReferencePublishesOnlyTextFreePalette(t *te
 	}
 }
 
+func TestPrepareAutomatedPresentationReferenceFallsBackToTextOnlyWithoutPublisher(t *testing.T) {
+	root := t.TempDir()
+	palettePath := filepath.Join(root, "palette.png")
+	if err := os.WriteFile(palettePath, []byte("palette"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{outputRoot: root, now: time.Now, referenceRetention: model.DefaultMediaDeliveryPreferences().TOSRetention}
+	job := model.FinalFilmJob{
+		JobID: "job_palette_text_only", SourcePackageID: "package_palette_text_only",
+		RunAuthorization: &model.FinalFilmRunAuthorization{AuthorizationRef: "auth_palette"},
+		Catalog: model.AssetTimelineCatalog{Artifacts: []model.TimelineArtifact{{
+			ID: "palette_1", Kind: "generated_palette_reference", URI: "asset://palette_1", LocalPath: palettePath,
+			MimeType: "image/png", SizeBytes: 7, AssetRole: "presentation_reference", Metadata: map[string]any{"text_free": true, "ui_free": true},
+		}}},
+	}
+	intent := media.GeneratedShotIntent{IntentID: "intro_1", References: []media.GeneratedShotReference{{ArtifactID: "palette_1", URI: "asset://palette_1", MimeType: "image/png"}}}
+	prepared, err := service.prepareAutomatedPresentationReferences(context.Background(), job, intent, "operation_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.References) != 0 {
+		t.Fatalf("publisher-free automated generation must use the provider's text-only route: %+v", prepared.References)
+	}
+	if len(intent.References) != 1 || intent.References[0].URI != "asset://palette_1" {
+		t.Fatalf("fallback must not mutate the persisted intent: %+v", intent.References)
+	}
+}
+
 type bridgeNormalizerRunner struct{}
 
 func (bridgeNormalizerRunner) Run(_ context.Context, command string, args ...string) (media.MiniMaxH3CommandResult, error) {
