@@ -48,7 +48,7 @@ func (p staticProductSpecPlanner) Generate(context.Context, string) (ProductSpec
 	return p.spec, nil
 }
 
-func TestMergeExperimentAcceptanceFloorKeepsFrozenVisualAndResponsiveBaseline(t *testing.T) {
+func TestMergeExperimentAcceptanceFloorDoesNotPromoteUnrequestedVisualPreference(t *testing.T) {
 	planned := validProductSpecFixture()
 	planned.VisualDirection = VisualDirection{Theme: "generic light theme", Palette: []string{"white"}, Motion: "generic motion"}
 	planned.ResponsiveRequirements = []string{"wide screen"}
@@ -58,12 +58,12 @@ func TestMergeExperimentAcceptanceFloorKeepsFrozenVisualAndResponsiveBaseline(t 
 	floor.ResponsiveRequirements = []string{"mobile square layout"}
 	floor.ForbiddenOutcomes = []string{"internal request text"}
 	floor.ObservableAcceptance = append(floor.ObservableAcceptance, AcceptanceCriterion{
-		ID: "accept_visual_floor", Statement: "required visual direction is visible", EvidenceKinds: []string{"visual", "frame"}, Required: true,
+		ID: "accept_visual_floor", Statement: "a deep blue neon gradient is visible", EvidenceKinds: []string{"visual", "frame"}, Required: true,
 	})
 
-	merged := mergeExperimentAcceptanceFloor(planned, floor)
-	if merged.VisualDirection.Theme != floor.VisualDirection.Theme || strings.Join(merged.VisualDirection.Palette, ",") != "navy,cyan" || merged.VisualDirection.Motion != floor.VisualDirection.Motion {
-		t.Fatalf("frozen visual acceptance floor was lost: %+v", merged.VisualDirection)
+	merged := mergeExperimentAcceptanceFloor(planned, floor, "Build a polished responsive interactive product")
+	if merged.VisualDirection.Theme != planned.VisualDirection.Theme || strings.Join(merged.VisualDirection.Palette, ",") != "white" || merged.VisualDirection.Motion != planned.VisualDirection.Motion {
+		t.Fatalf("fixture styling replaced the planning interpretation: %+v", merged.VisualDirection)
 	}
 	if !containsString(merged.ResponsiveRequirements, "wide screen") || !containsString(merged.ResponsiveRequirements, "mobile square layout") {
 		t.Fatalf("responsive floor was not merged: %+v", merged.ResponsiveRequirements)
@@ -71,13 +71,29 @@ func TestMergeExperimentAcceptanceFloorKeepsFrozenVisualAndResponsiveBaseline(t 
 	if !containsString(merged.ForbiddenOutcomes, "broken controls") || !containsString(merged.ForbiddenOutcomes, "internal request text") {
 		t.Fatalf("forbidden outcome floor was not merged: %+v", merged.ForbiddenOutcomes)
 	}
-	foundVisual := false
+	foundVisualAdvisory := false
 	for _, criterion := range merged.ObservableAcceptance {
-		foundVisual = foundVisual || criterion.ID == "accept_visual_floor" && criterion.Required
+		foundVisualAdvisory = foundVisualAdvisory || criterion.ID == "accept_visual_floor" && !criterion.Required
 	}
-	if !foundVisual {
-		t.Fatal("required visual acceptance criterion was not merged")
+	if !foundVisualAdvisory {
+		t.Fatal("unrequested visual acceptance floor was not retained as advisory")
 	}
+}
+
+func TestMergeExperimentAcceptanceFloorKeepsExplicitVisualRequirementBlocking(t *testing.T) {
+	planned := validProductSpecFixture()
+	floor := validProductSpecFixture()
+	floor.ObservableAcceptance = append(floor.ObservableAcceptance, AcceptanceCriterion{ID: "accept_visual_floor", Statement: "deep blue neon gradient is visible", EvidenceKinds: []string{"visual", "dom"}, Required: true})
+	merged := mergeExperimentAcceptanceFloor(planned, floor, "Build a responsive product with a deep blue neon style")
+	for _, criterion := range merged.ObservableAcceptance {
+		if criterion.ID == "accept_visual_floor" {
+			if !criterion.Required {
+				t.Fatal("explicit visual requirement was incorrectly demoted")
+			}
+			return
+		}
+	}
+	t.Fatal("explicit visual requirement was not merged")
 }
 
 func TestCreateV2RunUsesOneFreshLegAndOriginalSentence(t *testing.T) {
@@ -116,6 +132,46 @@ func TestCreateV2RunUsesOneFreshLegAndOriginalSentence(t *testing.T) {
 	}
 	if !wasdRequired {
 		t.Fatal("v2 acceptance did not retain an independent required WASD proof")
+	}
+}
+
+func TestCreateV4RunKeepsAestheticsAdvisoryAndBusinessProofBlocking(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "experiments")
+	loaded, err := LoadDefinition(root, "2048-v4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextID := 0
+	service, err := NewService(ServiceOptions{Store: NewFileStore(t.TempDir()), DefinitionRoot: root, ProductSpecPlanner: staticProductSpecPlanner{spec: loaded.ProductSpec}, Now: func() time.Time { return time.Date(2026, 8, 29, 10, 0, nextID, 0, time.UTC) }, NewID: func(prefix string) (string, error) {
+		nextID++
+		return prefix + "_v4_" + strings.Repeat("x", nextID), nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := service.CreateRun(t.Context(), CreateRunRequest{DefinitionRef: "2048-v4", TargetURL: "https://target.example.test/app", CredentialRef: "secret://demo/account", AuthorizationRef: "approval://experiment/start", IdempotencyKey: "one-sentence-v4-idem", HarnessProfile: HarnessProfileAdaptiveBusinessV2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.UserGoal != loaded.Definition.ShortGoal || run.Legs[0].BuildPrompt != loaded.Definition.ShortGoal || len(run.Legs) != 1 {
+		t.Fatalf("v4 changed the one-sentence input or created extra legs: %+v", run.Legs)
+	}
+	coreScore, enhancementScore := 0, 0
+	for _, step := range run.InteractionPlan.Steps {
+		switch step.CapabilityLayer {
+		case "core":
+			coreScore += step.CapabilityScore
+		case "enhancement":
+			enhancementScore += step.CapabilityScore
+		}
+	}
+	if coreScore != 70 || enhancementScore != 30 {
+		t.Fatalf("v4 capability layers drifted: core=%d enhancement=%d", coreScore, enhancementScore)
+	}
+	for _, criterion := range run.ProductSpec.ObservableAcceptance {
+		if criterion.Required && looksLikeSpecificPresentationPreference(criterion.Statement) {
+			t.Fatalf("an unrequested aesthetic became a blocking criterion: %+v", criterion)
+		}
 	}
 }
 

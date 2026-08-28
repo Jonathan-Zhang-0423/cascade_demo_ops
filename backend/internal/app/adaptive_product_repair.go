@@ -179,11 +179,7 @@ func selectAdaptiveBoundEntityURL(targetURL string, project *model.ProjectContex
 
 func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.InteractionPlan, missing []string, priorAttempts ...int) string {
 	statements := map[string]string{}
-	if theme := strings.TrimRight(strings.TrimSpace(spec.VisualDirection.Theme), ".。；; "); theme != "" {
-		visualRequirement := "实际产品界面的视觉风格应符合" + theme
-		if len(spec.VisualDirection.Palette) > 0 {
-			visualRequirement += "，主要配色为" + strings.Join(spec.VisualDirection.Palette, "、")
-		}
+	if visualRequirement := requiredProductVisualRepairStatement(spec); visualRequirement != "" {
 		statements["product_visual_quality"] = visualRequirement
 	}
 	for _, step := range plan.Steps {
@@ -220,11 +216,7 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	visualOnly := len(missingSet) == 1 && missingSet["product_visual_quality"]
 	if visualOnly {
 		selected = selected[:0]
-		if theme := strings.TrimRight(strings.TrimSpace(spec.VisualDirection.Theme), ".。；; "); theme != "" {
-			visualStatement := "将实际产品界面改为" + theme
-			if len(spec.VisualDirection.Palette) > 0 {
-				visualStatement += "，主色使用" + strings.Join(spec.VisualDirection.Palette, "、")
-			}
+		if visualStatement := requiredProductVisualRepairStatement(spec); visualStatement != "" {
 			selected = append(selected, visualStatement)
 		}
 	}
@@ -267,6 +259,21 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		subjectRunes = append(subjectRunes[:available-1], '…')
 	}
 	return string(prefixRunes) + string(subjectRunes) + string(suffixRunes)
+}
+
+func requiredProductVisualRepairStatement(spec experiment.ProductSpec) string {
+	for _, criterion := range spec.ObservableAcceptance {
+		statement := strings.TrimRight(strings.TrimSpace(criterion.Statement), ".。；; ")
+		if criterion.Required && statement != "" && looksLikeVisualAppearanceRequirement(statement) {
+			return statement
+		}
+	}
+	for _, requirement := range spec.ResponsiveRequirements {
+		if statement := strings.TrimRight(strings.TrimSpace(requirement), ".。；; "); statement != "" {
+			return statement
+		}
+	}
+	return ""
 }
 
 func adaptiveProductRepairStepStatement(step experiment.InteractionStep) string {

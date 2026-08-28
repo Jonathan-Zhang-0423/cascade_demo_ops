@@ -53,15 +53,18 @@ func TestAdaptiveProductRepairPromptFallsBackToOneRequiredCriterion(t *testing.T
 }
 
 func TestAdaptiveProductRepairPromptCarriesVisualQualityFailure(t *testing.T) {
-	spec := experiment.ProductSpec{VisualDirection: experiment.VisualDirection{Theme: "深蓝霓虹界面", Palette: []string{"深蓝", "青色", "紫色"}}}
+	spec := experiment.ProductSpec{
+		VisualDirection:      experiment.VisualDirection{Theme: "深蓝霓虹界面", Palette: []string{"深蓝", "青色", "紫色"}},
+		ObservableAcceptance: []experiment.AcceptanceCriterion{{ID: "usable_layout", Statement: "桌面和移动端内容清晰可读，没有遮挡或持续闪烁", EvidenceKinds: []string{"visual", "dom"}, Required: true}},
+	}
 	got := adaptiveProductRepairPrompt(spec, experiment.InteractionPlan{}, []string{"product_visual_quality"}, 1)
-	for _, required := range []string{"只调整视觉样式", "将实际产品界面改为深蓝霓虹界面", "深蓝、青色、紫色", "修复后实际操作确认"} {
+	for _, required := range []string{"只调整视觉样式", "桌面和移动端内容清晰可读", "没有遮挡或持续闪烁", "修复后实际操作确认"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("visual product repair lost %q: %q", required, got)
 		}
 	}
-	if strings.Count(got, "深蓝霓虹界面") != 1 || len([]rune(got)) > 120 {
-		t.Fatalf("visual repair should state the target once and stay compact: %q", got)
+	if strings.Contains(got, "深蓝") || strings.Contains(got, "青色") || strings.Contains(got, "紫色") || len([]rune(got)) > 120 {
+		t.Fatalf("advisory palette leaked into a blocking repair: %q", got)
 	}
 }
 

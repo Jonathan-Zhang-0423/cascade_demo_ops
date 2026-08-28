@@ -96,6 +96,43 @@ func TestProductSpecPlannerNormalizesEvidenceChannelShapeWithoutRegeneration(t *
 	}
 }
 
+func TestProductSpecPlannerDemotesUnrequestedPresentationPreferences(t *testing.T) {
+	valid := validProductSpecFixture()
+	valid.Requirements = append(valid.Requirements, ProductRequirement{ID: "r5", Statement: "Use a deep blue neon palette", Priority: "must"})
+	valid.ObservableAcceptance = append(valid.ObservableAcceptance, AcceptanceCriterion{ID: "a5", Statement: "The interface uses a deep blue neon gradient", EvidenceKinds: []string{"visual", "dom"}, Required: true})
+	client := &productSpecLLM{specs: []ProductSpec{valid}}
+	planner, err := NewProductSpecPlanner(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := planner.Generate(t.Context(), "Build a polished responsive interactive number game")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Requirements[len(result.Requirements)-1].Priority != "should" || result.ObservableAcceptance[len(result.ObservableAcceptance)-1].Required {
+		t.Fatalf("model-inferred styling became a blocker: requirement=%+v criterion=%+v", result.Requirements[len(result.Requirements)-1], result.ObservableAcceptance[len(result.ObservableAcceptance)-1])
+	}
+	if result.VisualDirection.Theme != valid.VisualDirection.Theme {
+		t.Fatalf("advisory visual context should be retained: %+v", result.VisualDirection)
+	}
+}
+
+func TestProductSpecPlannerKeepsExplicitPresentationRequirement(t *testing.T) {
+	valid := validProductSpecFixture()
+	valid.Requirements = append(valid.Requirements, ProductRequirement{ID: "r5", Statement: "Use a deep blue neon palette", Priority: "must"})
+	valid.ObservableAcceptance = append(valid.ObservableAcceptance, AcceptanceCriterion{ID: "a5", Statement: "The interface uses a deep blue neon gradient", EvidenceKinds: []string{"visual", "dom"}, Required: true})
+	result := normalizeInferredPresentationPreferences(valid, "Build a responsive number game with a deep blue neon style")
+	if result.Requirements[len(result.Requirements)-1].Priority != "must" || !result.ObservableAcceptance[len(result.ObservableAcceptance)-1].Required {
+		t.Fatalf("explicit styling requirement was demoted: requirement=%+v criterion=%+v", result.Requirements[len(result.Requirements)-1], result.ObservableAcceptance[len(result.ObservableAcceptance)-1])
+	}
+}
+
+func TestPresentationPreferenceDetectionDoesNotMatchRequiredAsRed(t *testing.T) {
+	if looksLikeSpecificPresentationPreference("This required interaction must remain responsive and readable.") {
+		t.Fatal("ordinary requirement text was mistaken for the color red")
+	}
+}
+
 func TestProductSpecQualityRejectsHarnessLeakAndWeakEvidence(t *testing.T) {
 	for name, mutate := range map[string]func(*ProductSpec){
 		"harness leak": func(spec *ProductSpec) { spec.Objective = "prepare DemoOps recording" },

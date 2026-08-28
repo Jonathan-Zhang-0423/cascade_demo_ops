@@ -41,20 +41,34 @@ func TestParseProductVisualQualityLineProtocol(t *testing.T) {
 	}
 }
 
-func TestProductVisualRequirementSummaryKeepsFrozenPublicVisualRequirements(t *testing.T) {
+func TestProductVisualRequirementSummaryKeepsStyleAdvisoryUnlessCriterionRequiresIt(t *testing.T) {
 	spec := experiment.ProductSpec{
 		VisualDirection:      experiment.VisualDirection{Theme: "deep blue neon", Palette: []string{"navy", "cyan"}},
 		ObservableAcceptance: []experiment.AcceptanceCriterion{{Statement: "The product uses a deep blue gradient.", EvidenceKinds: []string{"visual"}, Required: true}, {Statement: "Keyboard works.", EvidenceKinds: []string{"dom"}, Required: true}},
 		ForbiddenOutcomes:    []string{"Do not show a generic default theme."},
 	}
 	got := productVisualRequirementSummary(spec)
-	for _, required := range []string{"deep blue neon", "navy, cyan", "deep blue gradient", "generic default theme"} {
+	for _, required := range []string{"REQUIRED: The product uses a deep blue gradient", "FORBIDDEN: Do not show a generic default theme"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("visual summary lost %q: %s", required, got)
 		}
 	}
+	if strings.Contains(got, "deep blue neon") || strings.Contains(got, "navy, cyan") {
+		t.Fatalf("advisory presentation preferences entered the blocking visual review: %s", got)
+	}
 	if strings.Contains(got, "Keyboard works") {
 		t.Fatalf("non-visual criterion leaked into the visual-only Gate: %s", got)
+	}
+}
+
+func TestProductVisualRequirementSummaryDoesNotPromoteAdvisoryPalette(t *testing.T) {
+	spec := experiment.ProductSpec{
+		VisualDirection:      experiment.VisualDirection{Theme: "deep blue neon", Palette: []string{"navy", "cyan"}},
+		ObservableAcceptance: []experiment.AcceptanceCriterion{{Statement: "The interface remains readable without clipping or flicker.", EvidenceKinds: []string{"visual", "dom"}, Required: true}, {Statement: "The product uses a deep blue gradient.", EvidenceKinds: []string{"visual", "dom"}, Required: false}},
+	}
+	got := productVisualRequirementSummary(spec)
+	if !strings.Contains(got, "REQUIRED: The interface remains readable") || strings.Contains(got, "deep blue") || strings.Contains(got, "navy") || strings.Contains(got, "cyan") {
+		t.Fatalf("advisory palette leaked into blocking visual requirements: %s", got)
 	}
 }
 

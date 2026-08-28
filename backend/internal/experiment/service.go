@@ -80,7 +80,7 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 		if planErr != nil {
 			return Run{}, fmt.Errorf("generate ProductSpec from the one-sentence goal: %w", planErr)
 		}
-		productSpec = mergeExperimentAcceptanceFloor(planned, loaded.ProductSpec)
+		productSpec = mergeExperimentAcceptanceFloor(planned, loaded.ProductSpec, request.UserGoal)
 		if err := ValidateProductSpecQuality(productSpec); err != nil {
 			return Run{}, fmt.Errorf("validate generated ProductSpec: %w", err)
 		}
@@ -136,7 +136,7 @@ func (s *Service) CreateRun(ctx context.Context, request CreateRunRequest) (Run,
 	return run, nil
 }
 
-func mergeExperimentAcceptanceFloor(planned, floor ProductSpec) ProductSpec {
+func mergeExperimentAcceptanceFloor(planned, floor ProductSpec, userGoal string) ProductSpec {
 	// The planning model determines the product interpretation. The fixture is
 	// only an internal acceptance floor for this experiment and is never copied
 	// into the downstream builder prompt.
@@ -165,23 +165,12 @@ func mergeExperimentAcceptanceFloor(planned, floor ProductSpec) ProductSpec {
 			planned.ObservableAcceptance = append(planned.ObservableAcceptance, criterion)
 		}
 	}
-	// A versioned experiment may freeze a required visual and responsive
-	// baseline that a one-sentence planning model cannot infer reliably. Keep
-	// that baseline in the internal acceptance artifact (the downstream builder
-	// still receives only the original user sentence) so visual/product repair
-	// is judged against the experiment users actually authorized.
-	if strings.TrimSpace(floor.VisualDirection.Theme) != "" {
-		planned.VisualDirection.Theme = floor.VisualDirection.Theme
-	}
-	if len(floor.VisualDirection.Palette) > 0 {
-		planned.VisualDirection.Palette = append([]string{}, floor.VisualDirection.Palette...)
-	}
-	if strings.TrimSpace(floor.VisualDirection.Motion) != "" {
-		planned.VisualDirection.Motion = floor.VisualDirection.Motion
-	}
+	// VisualDirection is planning context, not an authorization source. The
+	// fixture may add observable usability floors, but it must not replace the
+	// model interpretation with an aesthetic the user never requested.
 	planned.ResponsiveRequirements = appendUniqueStrings(planned.ResponsiveRequirements, floor.ResponsiveRequirements)
 	planned.ForbiddenOutcomes = appendUniqueStrings(planned.ForbiddenOutcomes, floor.ForbiddenOutcomes)
-	return planned
+	return normalizeInferredPresentationPreferences(planned, userGoal)
 }
 
 func appendUniqueStrings(existing, required []string) []string {

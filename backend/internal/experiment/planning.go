@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/llm"
@@ -47,7 +48,7 @@ func (p *ProductSpecPlanner) Generate(ctx context.Context, shortGoal string) (Pr
 		return ProductSpec{}, errors.New("short product goal is required and must be bounded")
 	}
 	request := llm.JSONRequest{
-		System:     "You compile a product request into a provider-neutral ProductSpecArtifact. Return structured product requirements plus build_brief: one concise clause of at most 140 characters containing only the product capabilities, visual direction, and interactions that the builder must implement. Keep detailed acceptance criteria internal to the artifact. Do not mention the execution harness, recording, screenshots, visual polling, audit, credentials, video generation, media providers, or post-production. Acceptance criteria must be observable through visual plus DOM/ARIA/route/network evidence and must not contain selectors or hostnames.",
+		System:     "You compile a product request into a provider-neutral ProductSpecArtifact. Return structured product requirements plus build_brief: one concise clause of at most 140 characters containing only the product capabilities, visual direction, and interactions that the builder must implement. Keep detailed acceptance criteria internal to the artifact. A required criterion or must requirement must be directly entailed by the user's sentence or be essential to the product's minimum viable function. Styling details you infer yourself, including a palette, theme, decoration, or aesthetic genre, are advisory: mark their requirements as should and their acceptance criteria as required=false unless the user explicitly requested them. Readability, stable layout, responsive usability, and absence of flicker may remain required. Do not mention the execution harness, recording, screenshots, visual polling, audit, credentials, video generation, media providers, or post-production. Acceptance criteria must be observable through visual plus DOM/ARIA/route/network evidence and must not contain selectors or hostnames.",
 		User:       "Compile this short product goal into demoops.product_spec_artifact.v1:\n" + shortGoal,
 		SchemaName: ProductSpecSchemaVersion, MaxTokens: 3000, Temperature: 0.2,
 		ResponseHint: `{"schema_version":"demoops.product_spec_artifact.v1","spec_id":"product_spec_generated","title":"...","objective":"...","audience":"...","build_brief":"one concise builder-facing product clause","requirements":[{"id":"requirement_1","statement":"...","priority":"must"}],"visual_direction":{"theme":"...","palette":["..."],"motion":"..."},"interaction_requirements":[{"id":"interaction_1","statement":"...","priority":"must"}],"responsive_requirements":["..."],"observable_acceptance":[{"id":"criterion_1","statement":"...","evidence_kinds":["visual","dom"],"required":true}],"forbidden_outcomes":["..."]}`,
@@ -59,6 +60,7 @@ func (p *ProductSpecPlanner) Generate(ctx context.Context, shortGoal string) (Pr
 		if err == nil {
 			spec.BuildBrief = normalizedOptionalBuildBrief(spec.BuildBrief)
 			spec.ObservableAcceptance = normalizedAcceptanceEvidence(spec.ObservableAcceptance)
+			spec = normalizeInferredPresentationPreferences(spec, shortGoal)
 			err = ValidateProductSpecQuality(spec)
 		}
 		if err == nil {
@@ -68,6 +70,59 @@ func (p *ProductSpecPlanner) Generate(ctx context.Context, shortGoal string) (Pr
 		request.User = fmt.Sprintf("The previous draft failed the deterministic ProductSpec quality gate: %s\nRegenerate the same product goal once and correct only those structural issues:\n%s", boundedPlanningError(err), shortGoal)
 	}
 	return ProductSpec{}, fmt.Errorf("product specification failed after one regeneration: %w", lastErr)
+}
+
+// ProductSpec must remain useful even when a one-sentence request leaves room
+// for creative interpretation. A model may propose a palette or aesthetic, but
+// those guesses cannot become product blockers unless the user explicitly made
+// visual styling part of the request. Generic usability properties remain
+// eligible for required acceptance.
+func normalizeInferredPresentationPreferences(spec ProductSpec, userGoal string) ProductSpec {
+	explicit := goalExplicitlyRequestsPresentationStyle(userGoal)
+	if explicit {
+		return spec
+	}
+	for index := range spec.Requirements {
+		if spec.Requirements[index].Priority == "must" && looksLikeSpecificPresentationPreference(spec.Requirements[index].Statement) {
+			spec.Requirements[index].Priority = "should"
+		}
+	}
+	for index := range spec.InteractionRequirements {
+		if spec.InteractionRequirements[index].Priority == "must" && looksLikeSpecificPresentationPreference(spec.InteractionRequirements[index].Statement) {
+			spec.InteractionRequirements[index].Priority = "should"
+		}
+	}
+	for index := range spec.ObservableAcceptance {
+		if spec.ObservableAcceptance[index].Required && looksLikeSpecificPresentationPreference(spec.ObservableAcceptance[index].Statement) {
+			spec.ObservableAcceptance[index].Required = false
+		}
+	}
+	return spec
+}
+
+func goalExplicitlyRequestsPresentationStyle(value string) bool {
+	return containsPresentationPreferenceToken(value)
+}
+
+func looksLikeSpecificPresentationPreference(value string) bool {
+	return containsPresentationPreferenceToken(value)
+}
+
+func containsPresentationPreferenceToken(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, token := range []string{"配色", "颜色", "色彩", "主题", "风格", "渐变", "霓虹", "深蓝", "浅色", "深色", "青色", "紫色", "金色", "红色", "蓝色", "绿色", "橙色", "粉色", "黑色", "白色", "玻璃拟态", "科技感", "复古", "极简", "卡通"} {
+		if strings.Contains(normalized, token) {
+			return true
+		}
+	}
+	words := strings.FieldsFunc(normalized, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	for _, word := range words {
+		switch word {
+		case "palette", "color", "colour", "theme", "style", "gradient", "neon", "navy", "cyan", "purple", "gold", "red", "blue", "green", "orange", "pink", "black", "white", "glassmorphism", "retro", "minimalist", "cartoon":
+			return true
+		}
+	}
+	return false
 }
 
 // Evidence channel names are a protocol detail, not product judgment. Models

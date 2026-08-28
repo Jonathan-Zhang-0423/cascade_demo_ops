@@ -1,0 +1,39 @@
+{
+  "schema_version": "demoops.product_spec_artifact.v1",
+  "spec_id": "acceptance_floor_one_sentence_merge_game_v4",
+  "title": "响应式数字合并游戏",
+  "objective": "构建一款能够直接游玩、规则正确、界面清晰，并可用于展示一句话生成能力的响应式数字合并网页游戏。",
+  "audience": "希望快速理解一句需求如何成为可玩产品的演示观众",
+  "build_brief": "实现规则正确、可直接游玩、界面清晰且响应式的数字合并网页游戏",
+  "requirements": [
+    { "id": "req_board", "statement": "使用 4×4 棋盘和标准合并规则，同一次移动中每个方块最多合并一次。", "priority": "must" },
+    { "id": "req_score", "statement": "展示当前分数，并在有效合并后正确增加。", "priority": "must" },
+    { "id": "req_new_game", "statement": "提供可重新开始一局的新游戏操作。", "priority": "must" },
+    { "id": "req_best_score", "statement": "展示并保存最佳分。", "priority": "should" },
+    { "id": "req_terminal", "statement": "提供胜利与无可移动状态。", "priority": "should" },
+    { "id": "req_undo", "statement": "支持至少一步撤销。", "priority": "should" }
+  ],
+  "visual_direction": {
+    "theme": "清晰、协调、适合产品演示，具体审美由生成产品自行决定",
+    "palette": ["一致的主色系统", "足够的前景背景对比度"],
+    "motion": "交互反馈平滑且不持续闪烁，不要求特定颜色或装饰风格"
+  },
+  "interaction_requirements": [
+    { "id": "interaction_direction", "statement": "至少通过方向键完成四向移动。", "priority": "must" },
+    { "id": "interaction_touch", "statement": "在触控设备上支持滑动移动。", "priority": "should" },
+    { "id": "interaction_wasd", "statement": "支持 WASD 作为附加键盘操作方式。", "priority": "should" },
+    { "id": "interaction_undo", "statement": "撤销可近似恢复上一棋盘与分数。", "priority": "should" }
+  ],
+  "responsive_requirements": ["桌面视口中主要内容清晰可读且不相互遮挡。", "移动视口中棋盘与主要控件保持可用。"],
+  "observable_acceptance": [
+    { "id": "accept_surface", "statement": "标题、4×4 棋盘、当前分数和新游戏操作同时可见。", "evidence_kinds": ["aria", "visual"], "required": true },
+    { "id": "accept_moves", "statement": "两个不同方向操作均使棋盘区域发生变化。", "evidence_kinds": ["frame", "aria"], "required": true },
+    { "id": "accept_merge", "statement": "最多十二次自适应移动内至少完成一次合并并增加分数。", "evidence_kinds": ["visual", "dom"], "required": true },
+    { "id": "accept_stability", "statement": "连续操作后页面仍可交互，主要内容清晰可读，没有遮挡、溢出或持续闪烁。", "evidence_kinds": ["visual", "dom"], "required": true },
+    { "id": "accept_wasd", "statement": "两个不同 WASD 按键可改变棋盘。", "evidence_kinds": ["frame", "aria"], "required": false },
+    { "id": "accept_undo", "statement": "撤销近似恢复上一棋盘和分数。", "evidence_kinds": ["frame", "dom"], "required": false },
+    { "id": "accept_touch", "statement": "移动视口下滑动手势使棋盘发生变化。", "evidence_kinds": ["frame", "aria"], "required": false },
+    { "id": "accept_terminal", "statement": "产品能够显示胜利与无可移动状态。", "evidence_kinds": ["aria", "visual"], "required": false }
+  ],
+  "forbidden_outcomes": ["不得只输出计划、解释、静态截图或不可交互的占位页面。", "不得在产品界面显示开发标记、请求结构或内部执行信息。"]
+}
