@@ -31,6 +31,16 @@ func TestProductVisualQualityDraftAcceptsNestedProviderShape(t *testing.T) {
 	}
 }
 
+func TestParseProductVisualQualityLineProtocol(t *testing.T) {
+	draft, err := parseProductVisualQualityLineProtocol("PASS=FALSE\nCONFIDENCE=94%\nSUMMARY=The rendered product uses a generic beige theme.\nEVIDENCE_1=The board background is beige.\nEVIDENCE_2=Cyan neon accents are absent.\nFINDING_1=The requested deep-blue neon direction is missing.\nFINDING_2=NONE\nFAILED_REQUIREMENT_1=deep-blue neon palette\nFAILED_REQUIREMENT_2=NONE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.Pass || draft.Confidence != .94 || len(draft.VisibleEvidence) != 2 || len(draft.Findings) != 1 || len(draft.FailedRequirements) != 1 {
+		t.Fatalf("visual line protocol was not normalized: %+v", draft)
+	}
+}
+
 func TestProductVisualRequirementSummaryKeepsFrozenPublicVisualRequirements(t *testing.T) {
 	spec := experiment.ProductSpec{
 		VisualDirection:      experiment.VisualDirection{Theme: "deep blue neon", Palette: []string{"navy", "cyan"}},
