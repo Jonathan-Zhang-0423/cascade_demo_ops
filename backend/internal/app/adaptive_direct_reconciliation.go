@@ -1051,6 +1051,11 @@ func applyAdaptiveInteractionContracts(graph *model.DemoWorkflowGraph, plan expe
 	if err != nil {
 		return err
 	}
+	contractNodeIDs := make(map[string]bool, len(contracts))
+	for _, contract := range contracts {
+		contractNodeIDs["business_stage_contract_"+contract.ContractID] = true
+	}
+	usedNodeIDs := map[string]bool{}
 	existing := map[string]*model.GraphNode{}
 	var template *model.GraphNode
 	base := make([]*model.GraphNode, 0, len(graph.Nodes)+len(contracts))
@@ -1059,6 +1064,24 @@ func applyAdaptiveInteractionContracts(graph *model.DemoWorkflowGraph, plan expe
 			continue
 		}
 		if isSessionSetupGraphNode(node) || isAdaptiveSuccessorResumeGraphNode(node) || isAdaptivePendingContinuationGraphNode(node) {
+			// A terminal recovery can promote an interaction node (for example a
+			// touch proof immediately before the failed state-variant proof) into
+			// the observed-route resume. The frozen interaction plan then rebuilds
+			// that same proof below. Give the resume its own identity so the graph,
+			// stage plan and executable projections cannot contain two stages with
+			// the original interaction node ID.
+			if contractNodeIDs[node.ID] || usedNodeIDs[node.ID] {
+				baseID := node.ID + "_resume"
+				node.ID = baseID
+				for suffix := 2; contractNodeIDs[node.ID] || usedNodeIDs[node.ID]; suffix++ {
+					node.ID = fmt.Sprintf("%s_%d", baseID, suffix)
+				}
+			}
+			if node.Metadata == nil {
+				node.Metadata = map[string]any{}
+			}
+			node.Metadata["business_stage_id"] = node.ID
+			usedNodeIDs[node.ID] = true
 			node.Type = model.GraphNodeTypeAction
 			base = append(base, node)
 			continue
@@ -1119,6 +1142,7 @@ func applyAdaptiveInteractionContracts(graph *model.DemoWorkflowGraph, plan expe
 		if node.Metadata == nil {
 			node.Metadata = map[string]any{}
 		}
+		node.Metadata["business_stage_id"] = node.ID
 		node.Metadata["adaptive_successor_verification"] = true
 		node.Metadata["runtime_adaptive"] = true
 		node.Metadata["non_destructive"] = true
@@ -1128,6 +1152,7 @@ func applyAdaptiveInteractionContracts(graph *model.DemoWorkflowGraph, plan expe
 		node.Metadata["expected_route_after_action"] = observedURL
 		node.Metadata["replay_policy"] = string(contract.ReplayPolicy)
 		base = append(base, node)
+		usedNodeIDs[node.ID] = true
 	}
 	if len(base) < 2 {
 		return errors.New("adaptive continuation has no verification suffix")

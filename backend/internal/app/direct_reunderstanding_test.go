@@ -441,6 +441,52 @@ func TestApplyAdaptiveInteractionContractsPreservesPendingContinuation(t *testin
 	}
 }
 
+func TestApplyAdaptiveInteractionContractsRenamesPromotedResumeCollision(t *testing.T) {
+	observedURL := "https://app.example.com/entity/runtime-42"
+	contractID := "experiment_interaction_touch"
+	resume := &model.GraphNode{
+		ID: "business_stage_contract_" + contractID, Type: model.GraphNodeTypeStart, PageRef: observedURL,
+		ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: observedURL}},
+		Metadata: map[string]any{
+			"adaptive_successor_resume": true,
+			"business_stage_id":         "business_stage_contract_" + contractID,
+		},
+	}
+	verify := &model.GraphNode{
+		ID: "business_stage_contract_experiment_interaction_terminal_scenes", Type: model.GraphNodeTypeEnd,
+		ActionSpec:          &model.GraphAction{Type: model.GraphActionClick},
+		InteractionContract: &model.InteractionContract{SchemaVersion: model.InteractionContractSchemaVersion, ContractID: "experiment_interaction_terminal_scenes", ActionKind: model.GraphActionClick, ReplayPolicy: model.InteractionReplayIdempotentWrite, NonDestructive: true},
+	}
+	graph := model.NewDemoWorkflowGraph("repair", "project", observedURL)
+	graph.Nodes = []*model.GraphNode{resume, verify}
+	plan := experiment.InteractionPlan{
+		SchemaVersion: experiment.InteractionPlanSchemaVersion, PlanID: "plan-resume-collision", SurfaceKind: "runtime_discovered",
+		Steps: []experiment.InteractionStep{
+			{StepID: "touch", SemanticIntent: "verify touch input", ReplayPolicy: experiment.ReplayObserveOnly, ExpectedChanges: []string{"visual"}, EvidenceSlots: []string{"touch"}, ProofRequirements: []experiment.ProofRequirement{{Kind: "all_evidence_slots"}}, Action: experiment.InteractionAction{Kind: "observe", TargetSemanticID: "surface"}},
+			{StepID: "terminal_scenes", SemanticIntent: "verify terminal states", ReplayPolicy: experiment.ReplayIdempotentWrite, ExpectedChanges: []string{"visual"}, EvidenceSlots: []string{"victory", "terminal"}, ProofRequirements: []experiment.ProofRequirement{{Kind: "state_variants", MinCount: 2}}, Action: experiment.InteractionAction{Kind: "activate_state_variants", TargetSemanticID: "state_control", AllowedRoles: []string{"button"}, AllowedNames: []string{"demo"}}},
+		},
+	}
+	if err := applyAdaptiveInteractionContracts(graph, plan, experiment.ObservationPlan{SchemaVersion: experiment.ObservationPlanSchemaVersion}, observedURL, nil); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, node := range graph.Nodes {
+		if seen[node.ID] {
+			t.Fatalf("adaptive continuation contains duplicate node id %q: %+v", node.ID, graph.Nodes)
+		}
+		seen[node.ID] = true
+		if stageID, _ := node.Metadata["business_stage_id"].(string); stageID != node.ID {
+			t.Fatalf("node and business stage identities diverged: node=%s stage=%s", node.ID, stageID)
+		}
+	}
+	if graph.Nodes[0].ID != "business_stage_contract_experiment_interaction_touch_resume" {
+		t.Fatalf("promoted route resume did not receive a distinct identity: %s", graph.Nodes[0].ID)
+	}
+	if !seen["business_stage_contract_experiment_interaction_touch"] {
+		t.Fatal("frozen touch proof was not rebuilt after the resume")
+	}
+}
+
 func TestPrependReusableSessionSetupRestoresOnlyApprovedAuthentication(t *testing.T) {
 	evidence := model.EvidenceRef{ID: "evidence_login_form", Kind: "page_snapshot", ArtifactID: "login-form"}
 	sourceGraph := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/login")
