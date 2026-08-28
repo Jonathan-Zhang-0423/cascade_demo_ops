@@ -203,11 +203,26 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	next.CurrentNode = orchestrator.NodeHumanApprove
 	next.Status = orchestrator.FlowStatusAwaitingHuman
 	previousRun := state.DesktopCloudRun
+	repairHistory := append([]orchestrator.DesktopDirectRepairAuditState(nil), previousRun.RepairHistory...)
+	resultRecorded := false
+	for _, audit := range repairHistory {
+		if strings.TrimSpace(audit.SourceJobID) == strings.TrimSpace(result.CloudJobID) {
+			resultRecorded = true
+			break
+		}
+	}
+	if !resultRecorded {
+		resultCopy := result
+		repairHistory = append(repairHistory, orchestrator.DesktopDirectRepairAuditState{
+			SourceResultID: result.ResultID, SourcePackageID: result.SourcePackageID, SourceJobID: result.CloudJobID,
+			ResultPackage: &resultCopy, CreatedAt: time.Now().UTC(),
+		})
+	}
 	next.DesktopCloudRun = &orchestrator.DesktopCloudRunState{
 		SchemaVersion: desktopCloudRunSchemaVersion, Transport: directTransportStateName,
 		OrgID: firstNonEmptyString(previousRun.OrgID, defaultDesktopOrgID), Status: "not_uploaded", Stage: "adaptive_reconciliation_ready",
 		Message: "已从观察到的后继实体生成只观察续接包。", LastRepairSourceID: result.ResultID,
-		RepairHistory: append([]orchestrator.DesktopDirectRepairAuditState(nil), previousRun.RepairHistory...),
+		RepairHistory: repairHistory,
 	}
 	if err := s.states.Save(ctx, next); err != nil {
 		return adaptiveDirectReconciliationBuild{}, err

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { browserObservationRefreshEnabled } from "../src/browser-agent-runtime.js";
 
 import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, booleanConfigurationAssertion, booleanControlState, browserDeterministicSurfaceProofEligible, browserExplicitFailureAdmitsTerminal, browserRecordingSize, browserVisibleTextShowsExplicitBusinessFailure, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleControlSignalsStop, businessLifecycleSnapshotBusy, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactionStateSimilarity, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairInputSemantic, runtimeProductRepairTargetScore, runtimeStateVariantControlSemantic, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, stageHasAuthenticationProvenance, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, visibleApprovedBooleanConfigurationLabel, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
@@ -137,6 +138,12 @@ describe("browser visual polling terminal evidence", () => {
 		expect(browserVisualHardRefreshDue(startedAt, startedAt + budget - 1, budget, false)).toBe(false);
 		expect(browserVisualHardRefreshDue(startedAt, startedAt + budget, budget, false)).toBe(true);
 		expect(browserVisualHardRefreshDue(startedAt, startedAt + budget + 60_000, budget, true)).toBe(false);
+	});
+
+	it("keeps same-entity repair refresh independent from visual-provider use", () => {
+		expect(browserObservationRefreshEnabled(false, true)).toBe(true);
+		expect(browserObservationRefreshEnabled(true, false)).toBe(true);
+		expect(browserObservationRefreshEnabled(false, false)).toBe(false);
 	});
 });
 

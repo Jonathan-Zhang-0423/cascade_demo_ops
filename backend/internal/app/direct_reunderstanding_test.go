@@ -757,6 +757,9 @@ func TestPrepareAdaptiveDirectReconciliationBuildsObserveOnlyPackage(t *testing.
 	if prepared.Build.Package.ConfidenceSummary == nil || prepared.Build.Package.ConfidenceSummary.Readiness == model.PackageReadinessBlocked {
 		t.Fatalf("adaptive reconciliation package is blocked: %+v", prepared.Build.Package.ConfidenceSummary)
 	}
+	if prepared.State.DesktopCloudRun == nil || len(prepared.State.DesktopCloudRun.RepairHistory) != 1 || prepared.State.DesktopCloudRun.RepairHistory[0].SourceJobID != result.CloudJobID {
+		t.Fatalf("interrupted source result was not retained for capture recovery: %+v", prepared.State.DesktopCloudRun)
+	}
 	seenCapabilities := 0
 	seenObserveOnlyResume := false
 	for _, stage := range prepared.Build.Package.ExecutableScriptBundle.ScriptOutline.Stages {

@@ -353,6 +353,10 @@ func TestAdaptiveObservationTimeoutDefersWithoutDeclaringBusinessFailure(t *test
 	if !adaptiveObservationFailureShouldDefer(request, result) {
 		t.Fatal("an inconclusive observe-only timeout was promoted to an explicit business failure")
 	}
+	result.FailureDiagnostic.Error.Code = "browser_agent_action_failed"
+	if !adaptiveObservationFailureShouldDefer(request, result) {
+		t.Fatal("an interrupted observe-only worker call was promoted to a product failure")
+	}
 	result.FailureDiagnostic.FailedNodeID = "business_stage_contract_experiment_interaction_directional_moves"
 	if adaptiveObservationFailureShouldDefer(request, result) {
 		t.Fatal("an action proof failure was incorrectly treated as passive observation deferral")

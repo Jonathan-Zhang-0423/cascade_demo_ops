@@ -2792,6 +2792,13 @@ export function browserVisualHardRefreshDue(startedAtMS: number, nowMS: number, 
 	return !refreshed && nowMS - startedAtMS >= interactiveSurfacePollTimeout(observationBudgetMS);
 }
 
+export function browserObservationRefreshEnabled(requireVisualTerminal: boolean, requireRepairIdleTransition: boolean): boolean {
+	// A same-entity product repair must receive the same bounded refresh and
+	// post-refresh observation window even when structural evidence deliberately
+	// avoids a vision-provider call. Refresh is lifecycle recovery, not visual QC.
+	return requireVisualTerminal || requireRepairIdleTransition;
+}
+
 async function businessProgressDigest(page: any): Promise<string> {
 	const snapshot = await page.evaluate(() => {
 		const doc = (globalThis as any).document;
@@ -2830,6 +2837,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	const config = { ...baseConfig, maxCalls: Math.min(baseConfig.maxCalls, session.visualMaxCalls) };
 	const idleTimeoutMS = interactiveSurfacePollTimeout(timeout);
 	const { requireVisualTerminal, requireRepairIdleTransition, refreshAfterMS, postRefreshObserveMS } = browserVisualTerminalPolicy(stage);
+	const refreshEnabled = browserObservationRefreshEnabled(requireVisualTerminal, requireRepairIdleTransition);
 	const { heartbeatLimit } = browserVisualObservationAllocation(config.maxCalls, requireVisualTerminal);
 	const startedAtMS = Date.now();
 	let lastProgressAtMS = startedAtMS;
@@ -2852,7 +2860,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			if (nextDigest) progressDigest = nextDigest;
 			nextProgressProbeAtMS = Date.now() + 5_000;
 		}
-		if (requireVisualTerminal && browserVisualRefreshDue(lastProgressAtMS, Date.now(), refreshAfterMS, refreshed)) {
+		if (refreshEnabled && browserVisualRefreshDue(lastProgressAtMS, Date.now(), refreshAfterMS, refreshed)) {
 			refreshed = true;
 			const busyBeforeRefresh = await pageStillBusy(session.page, requireRepairIdleTransition);
 			if (browserVisualRefreshShouldReload(busyBeforeRefresh) && !await refreshAndRestoreObservedEntry(session)) {
@@ -2860,7 +2868,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			}
 			nextCaptureAt = Date.now();
 		}
-		if (requireVisualTerminal && browserVisualHardRefreshDue(startedAtMS, Date.now(), idleTimeoutMS, hardRefreshed)) {
+		if (refreshEnabled && browserVisualHardRefreshDue(startedAtMS, Date.now(), idleTimeoutMS, hardRefreshed)) {
 			// A stale busy marker must not extend an observation indefinitely. At
 			// the explicit wall-clock budget, refresh the exact observed entity once
 			// even if the SPA still claims to be busy, then reserve a short final

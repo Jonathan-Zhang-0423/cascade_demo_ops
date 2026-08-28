@@ -11,3 +11,7 @@ Run it only after the full offline suite passes:
 ```
 
 The script creates a new v3 run with a unique idempotency key, then only polls DemoOps. It never calls the target platform or a media provider directly and stops at the single final-review boundary.
+
+## Run reports
+
+- [`run-ba6b66e-failure-analysis-2026-08-28.md`](reports/run-ba6b66e-failure-analysis-2026-08-28.md): rejected real-run sample and the observe-only recovery regression it exposed.

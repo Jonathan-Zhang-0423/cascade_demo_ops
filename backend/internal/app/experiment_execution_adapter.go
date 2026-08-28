@@ -318,6 +318,15 @@ func (a *appExperimentExecutionAdapter) retryAdaptiveRuntimeFailure(ctx context.
 }
 
 func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Context, request experiment.LegExecutionRequest, projectID, sourceJobID string, emit func(experiment.LegExecutionUpdate) error) error {
+	downloads, materializeErr := a.materializeAdaptiveReconciliationSource(ctx, projectID, sourceJobID)
+	if materializeErr != nil {
+		return &experiment.AdapterError{Code: "artifact_materialization_failed", Phase: "result_materialization", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: []string{sourceJobID}, Cause: materializeErr}
+	}
+	if len(downloads) > 0 {
+		if err := emit(experiment.LegExecutionUpdate{Kind: "artifacts", Artifacts: experimentArtifactRefs(downloads), Summary: "中断轮次的录屏与页面证据已先行物化；续接只观察同一实体"}); err != nil {
+			return err
+		}
+	}
 	if sourceResult, resultErr := a.service.GetDirectResult(ctx, projectID, sourceJobID); resultErr == nil {
 		if adaptiveSameEntityRepairPackageRetryable(request, sourceResult) {
 			return a.retryAdaptiveSameEntityRepairInput(ctx, request, projectID, sourceJobID, emit)
@@ -388,6 +397,17 @@ func (a *appExperimentExecutionAdapter) reconcileFailedDirectLeg(ctx context.Con
 		return err
 	}
 	return a.completeDirectLeg(ctx, request, projectID, jobID, status, true, emit)
+}
+
+func (a *appExperimentExecutionAdapter) materializeAdaptiveReconciliationSource(ctx context.Context, projectID, jobID string) ([]CloudDeliverableDownloadResult, error) {
+	status, err := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
+	if err != nil || status.Status != "failed" {
+		// Interrupted jobs recovered only from a stage log may not yet expose a
+		// terminal artifact manifest. Reconciliation can still use that persisted
+		// evidence; materialization will run once the Gateway publishes the result.
+		return nil, nil
+	}
+	return a.downloadDirectArtifacts(ctx, projectID, jobID, adaptiveRepairMaterializationArtifacts(status.Artifacts))
 }
 
 func adaptivePreEffectRepairLineageEligible(request experiment.LegExecutionRequest, currentJobID string, state *orchestrator.CascadeState, parent model.RecordingResultPackage) (string, bool) {
@@ -918,10 +938,14 @@ func (a *appExperimentExecutionAdapter) restoreClosedLoopCaptureHistory(ctx cont
 			continue
 		}
 		status, statusErr := a.service.GetDirectExecutionStatus(ctx, projectID, jobID)
-		if statusErr != nil || status.Status != "completed" {
+		if statusErr != nil || (status.Status != "completed" && status.Status != "failed") {
 			continue
 		}
-		downloads, downloadErr := a.downloadDirectArtifacts(ctx, projectID, jobID, status.Artifacts)
+		artifacts := status.Artifacts
+		if status.Status == "failed" {
+			artifacts = adaptiveRepairMaterializationArtifacts(artifacts)
+		}
+		downloads, downloadErr := a.downloadDirectArtifacts(ctx, projectID, jobID, artifacts)
 		if downloadErr != nil {
 			continue
 		}
@@ -1049,7 +1073,7 @@ func adaptiveObservationFailureShouldDefer(request experiment.LegExecutionReques
 		return false
 	}
 	code := strings.TrimSpace(result.FailureDiagnostic.Error.Code)
-	if code != "outcome_verification_failed" && code != "browser_agent_observation_failed" {
+	if code != "outcome_verification_failed" && code != "browser_agent_observation_failed" && code != "browser_agent_action_failed" {
 		return false
 	}
 	failedNodeID := strings.TrimSpace(result.FailureDiagnostic.FailedNodeID)
