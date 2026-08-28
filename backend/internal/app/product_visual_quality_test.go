@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -16,6 +17,17 @@ func TestSelectProductVisualQualityScreenshotPrefersTerminalPreview(t *testing.T
 	got, ok := selectProductVisualQualityScreenshot(items)
 	if !ok || got.ArtifactID != "terminal_scenes_after" {
 		t.Fatalf("terminal product state was not selected: ok=%v got=%+v", ok, got)
+	}
+}
+
+func TestProductVisualQualityDraftAcceptsNestedProviderShape(t *testing.T) {
+	raw := []byte(`{"answer":"{\"pass\":\"failed\",\"confidence\":\"96%\",\"summary\":\"The preview uses a generic light theme.\",\"visible_evidence\":\"A beige board is visible.\",\"findings\":[\"Requested neon palette is absent.\"],\"failed_requirements\":\"deep blue neon\"}"}`)
+	var draft productVisualQualityDraft
+	if err := json.Unmarshal(raw, &draft); err != nil {
+		t.Fatal(err)
+	}
+	if draft.Pass || draft.Confidence != .96 || len(draft.VisibleEvidence) != 1 || len(draft.FailedRequirements) != 1 {
+		t.Fatalf("nested visual review was not normalized: %+v", draft)
 	}
 }
 

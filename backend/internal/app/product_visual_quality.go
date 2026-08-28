@@ -39,6 +39,73 @@ type productVisualQualityDraft struct {
 	FailedRequirements []string `json:"failed_requirements"`
 }
 
+func (d *productVisualQualityDraft) UnmarshalJSON(data []byte) error {
+	type wireDraft struct {
+		Pass               json.RawMessage `json:"pass"`
+		Confidence         json.RawMessage `json:"confidence"`
+		Summary            string          `json:"summary"`
+		VisibleEvidence    json.RawMessage `json:"visible_evidence"`
+		Findings           json.RawMessage `json:"findings"`
+		FailedRequirements json.RawMessage `json:"failed_requirements"`
+		Answer             json.RawMessage `json:"answer"`
+	}
+	var wire wireDraft
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if len(wire.Answer) > 0 && len(wire.Pass) == 0 && strings.TrimSpace(wire.Summary) == "" {
+		var nested string
+		if err := json.Unmarshal(wire.Answer, &nested); err == nil {
+			return json.Unmarshal([]byte(strings.TrimSpace(nested)), d)
+		}
+		return json.Unmarshal(wire.Answer, d)
+	}
+	pass, err := decodeProductVisualPass(wire.Pass)
+	if err != nil {
+		return err
+	}
+	confidence, err := decodeBrowserVisualConfidence(wire.Confidence)
+	if err != nil {
+		return err
+	}
+	evidence, err := decodeBrowserVisualEvidence(wire.VisibleEvidence)
+	if err != nil {
+		return err
+	}
+	findings, err := decodeBrowserVisualEvidence(wire.Findings)
+	if err != nil {
+		return err
+	}
+	failed, err := decodeBrowserVisualEvidence(wire.FailedRequirements)
+	if err != nil {
+		return err
+	}
+	*d = productVisualQualityDraft{Pass: pass, Confidence: confidence, Summary: wire.Summary, VisibleEvidence: evidence, Findings: findings, FailedRequirements: failed}
+	return nil
+}
+
+func decodeProductVisualPass(raw json.RawMessage) (bool, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false, nil
+	}
+	var value bool
+	if json.Unmarshal(raw, &value) == nil {
+		return value, nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "true", "pass", "passed", "yes":
+		return true, nil
+	case "false", "fail", "failed", "no":
+		return false, nil
+	default:
+		return false, errors.New("product visual quality pass value is invalid")
+	}
+}
+
 func (a *appExperimentExecutionAdapter) runProductVisualQualityGate(ctx context.Context, request experiment.LegExecutionRequest, downloads []CloudDeliverableDownloadResult) (productVisualQualityReport, CloudDeliverableDownloadResult, error) {
 	if a == nil || a.service == nil || a.service.llm == nil {
 		return productVisualQualityReport{}, CloudDeliverableDownloadResult{}, errors.New("product visual quality model is unavailable")
