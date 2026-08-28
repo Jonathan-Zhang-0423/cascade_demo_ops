@@ -3829,29 +3829,51 @@ async function pageStillBusy(page: any, treatActiveStopAsBusy = false): Promise<
     const pageDocument = (globalThis as any).document;
     const documentBusy = pageDocument.readyState !== "complete";
     const ariaBusy = Boolean(pageDocument.querySelector?.('[aria-busy="true"]'));
+	const visible = (element: any): boolean => {
+		const style = (globalThis as any).getComputedStyle?.(element);
+		const rect = element.getBoundingClientRect?.();
+		return style?.display !== "none" && style?.visibility !== "hidden" && Number(style?.opacity) !== 0
+			&& Boolean(rect && rect.width > 0 && rect.height > 0);
+	};
     const visibleText = (element: any): string => {
-      const style = (globalThis as any).getComputedStyle?.(element);
-      const rect = element.getBoundingClientRect?.();
-      if (style?.display === "none" || style?.visibility === "hidden" || Number(style?.opacity) === 0 || !rect || rect.width <= 0 || rect.height <= 0) return "";
+		if (!visible(element)) return "";
       return String(element.getAttribute?.("aria-label") || element.innerText || element.textContent || "").trim().toLowerCase();
     };
 	const lifecycleNodes = Array.from(pageDocument.querySelectorAll?.('progress,[role="progressbar"],[role="status"],[aria-live],button,[role="button"],[data-status],[data-state],[class*="progress" i],[class*="status" i],[class*="loading" i]') || []).slice(-160) as any[];
 	const lifecycleTexts: string[] = [];
+	const lifecycleControlSemantics: string[] = [];
 	let indeterminateProgress = false;
 	let activeStopControl = false;
 	for (const element of lifecycleNodes) {
       const text = visibleText(element);
+		const role = String(element.getAttribute?.("role") || "").toLowerCase();
+		const tag = String(element.tagName || "").toLowerCase();
+		if (visible(element) && (tag === "button" || role === "button")) {
+			lifecycleControlSemantics.push([
+				text,
+				element.getAttribute?.("title"),
+				element.getAttribute?.("name"),
+				element.getAttribute?.("id"),
+				element.getAttribute?.("data-testid"),
+				element.getAttribute?.("data-action"),
+				element.getAttribute?.("data-command"),
+			].filter(Boolean).join(" ").slice(0, 500));
+		}
 		if (text) {
 			lifecycleTexts.push(text.slice(0, 1_000));
-			const role = String(element.getAttribute?.("role") || "").toLowerCase();
-			const tag = String(element.tagName || "").toLowerCase();
 			if ((tag === "button" || role === "button") && /^(?:stop|停止|终止|中止)$/.test(text.replace(/\s+/g, " ").trim())) activeStopControl = true;
 		}
 		else if (element.matches?.('progress:not([value]),[role="progressbar"]')) indeterminateProgress = true;
 	}
-	return { documentBusy, ariaBusy, indeterminateProgress, activeStopControl, lifecycleTexts };
+	return { documentBusy, ariaBusy, indeterminateProgress, activeStopControl, lifecycleTexts, lifecycleControlSemantics };
   }).catch(() => undefined);
+	if (snapshot && snapshot.lifecycleControlSemantics.some(businessLifecycleControlSignalsStop)) snapshot.activeStopControl = true;
 	return businessLifecycleSnapshotBusy(snapshot, treatActiveStopAsBusy);
+}
+
+export function businessLifecycleControlSignalsStop(value: string): boolean {
+	const normalized = String(value || "").toLowerCase().replace(/[-_:.\/]+/g, " ").replace(/\s+/g, " ").trim();
+	return /(?:^|\s)(?:stop|terminate|abort)(?:\s|$)|停止|终止|中止/.test(normalized);
 }
 
 export function businessLifecycleSnapshotBusy(snapshot: { documentBusy?: boolean; ariaBusy?: boolean; indeterminateProgress?: boolean; activeStopControl?: boolean; lifecycleTexts?: string[]; bodyText?: string } | undefined, treatActiveStopAsBusy = false): boolean {
