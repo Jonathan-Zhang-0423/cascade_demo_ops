@@ -835,7 +835,12 @@ func (a *BrowserAgentOutcomeVerifierAdapter) ValidatePostExecution(
 			Summary:  fmt.Sprintf("结果包 source_package_id (%s) 与本次运行批准包 (%s) 不一致", result.SourcePackageID, vctx.SourcePackageID),
 		})
 	}
-	if result.AuditTrail.SourcePackageDigest != "" && vctx.SourceBundleHashSHA256 != "" && result.AuditTrail.SourcePackageDigest != vctx.SourceBundleHashSHA256 {
+	// AuditTrail.SourcePackageDigest is a package-level digest. Comparing it to
+	// the executable bundle digest made every correctly packaged adaptive repair
+	// look tampered after a successful browser run. Direct transport already
+	// binds this value at upload; repeat the check here only against the matching
+	// approved package digest.
+	if result.AuditTrail.SourcePackageDigest != "" && vctx.SourcePackageDigest != "" && result.AuditTrail.SourcePackageDigest != vctx.SourcePackageDigest {
 		postChecks = append(postChecks, model.ValidationCheck{
 			ID:       "post_result_hash_mismatch",
 			Kind:     "result_hash_mismatch",

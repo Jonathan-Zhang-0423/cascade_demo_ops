@@ -1305,7 +1305,7 @@ async function executeInteraction(
 		  playableTarget = await focusLargestPlayableSurface(session.page, Math.min(timeout, 5_000), interaction.target);
     }
     const before = await visualDigest(session.page, playableTarget?.digestTarget);
-    const numericBefore = await visibleNumericValues(session.page);
+    const numericBefore = await visibleNumericMetrics(playableTarget?.digestTarget);
     const stateBefore = await interactiveStateDigest(session.page, playableTarget?.digestTarget);
     if (stateBefore) session.interactionStateHistory.push(stateBefore);
     const delayMS = numericParameter(interaction.parameters, "inter_key_delay_ms", 350, 100, 1_000);
@@ -1328,11 +1328,11 @@ async function executeInteraction(
       currentDigest = nextDigest;
       const state = await interactiveStateDigest(session.page, playableTarget?.digestTarget);
       if (state) session.interactionStateHistory.push(state);
-      const numericNow = await visibleNumericValues(session.page);
-      if (successfulKeys.size >= 2 && numericSeriesIncreased(numericBefore, numericNow)) break;
+      const numericNow = await visibleNumericMetrics(playableTarget?.digestTarget);
+      if (successfulKeys.size >= 2 && numericMetricSnapshotIncreased(numericBefore, numericNow)) break;
     }
-    const numericAfter = await visibleNumericValues(session.page);
-    const numericIncreased = numericSeriesIncreased(numericBefore, numericAfter);
+    const numericAfter = await visibleNumericMetrics(playableTarget?.digestTarget);
+    const numericIncreased = numericMetricSnapshotIncreased(numericBefore, numericAfter);
     const changed = digests.size > 1;
     session.latestNumericIncrease = numericIncreased;
     session.latestFrameChange = changed;
@@ -4181,25 +4181,61 @@ async function firstVisibleSemanticLocator(page: any, roles: string[], name: str
   return undefined;
 }
 
-async function visibleNumericValues(page: any): Promise<number[]> {
-  const values: number[] = [];
-  for (const frame of (typeof page.frames === "function" ? page.frames() : [page])) {
-    const frameValues = await frame.evaluate(() => {
-      const doc = (globalThis as any).document;
-      if (!doc) return [];
-      const nodes = Array.from(doc.querySelectorAll('[role="status"], [aria-live], [role="application"], main')).slice(0, 64) as any[];
-      return nodes.flatMap((node) => String(node.innerText || node.textContent || "").match(/\b\d{1,9}\b/g) || []).map(Number).filter(Number.isFinite).slice(0, 256);
-    }).catch(() => [] as number[]);
-    values.push(...frameValues);
-  }
-  return values;
+type NumericMetricSnapshot = Record<string, number[]>;
+
+// Numeric proof is intentionally scoped to the runtime surface's own document
+// and to labelled metric-like text. Scanning every number in the hosting page
+// allowed chat messages, project names, or newly spawned board tiles to
+// masquerade as a score increase even while the visible product score stayed
+// at zero.
+async function visibleNumericMetrics(surface?: any): Promise<NumericMetricSnapshot> {
+  if (!surface?.evaluate) return {};
+  return surface.evaluate((element: any) => {
+    const doc = element?.ownerDocument;
+    if (!doc) return {};
+    const root = element.closest?.('main,[role="main"],article') || doc.body || element;
+    const values: Record<string, number[]> = {};
+    const nodes = [root, ...Array.from(root.querySelectorAll?.("*") || [])].slice(0, 1_200) as any[];
+    const compact = (value: unknown) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 160);
+    const hasLabel = (value: string) => /[\p{L}]/u.test(value.replace(/[\d.,+\-]/g, ""));
+    const metricText = (node: any): string => {
+      const own = compact(node.innerText || node.textContent || "");
+      const aria = compact(node.getAttribute?.("aria-label") || node.getAttribute?.("aria-valuetext") || "");
+      for (const candidate of [aria, own]) {
+        if (candidate.length <= 96 && /\d/.test(candidate) && hasLabel(candidate)) return candidate;
+      }
+      const parent = node.parentElement;
+      const parentText = compact(parent?.innerText || parent?.textContent || "");
+      if (parentText.length <= 96 && /\d/.test(parentText) && hasLabel(parentText)) return parentText;
+      const sibling = compact(node.previousElementSibling?.innerText || node.previousElementSibling?.textContent || "");
+      if (sibling.length <= 48 && hasLabel(sibling) && /\d/.test(own)) return `${sibling} ${own}`;
+      return "";
+    };
+    for (const node of nodes) {
+      if (!node?.getClientRects || node.getClientRects().length === 0) continue;
+      const text = metricText(node);
+      if (!text) continue;
+      const numbers = (text.match(/-?\d{1,9}(?:\.\d+)?/g) || []).map(Number).filter(Number.isFinite);
+      if (!numbers.length) continue;
+      const key = text.replace(/-?\d{1,9}(?:\.\d+)?/g, "#").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+      if (!key || values[key]) continue;
+      values[key] = numbers.slice(0, 16);
+    }
+    return values;
+  }).catch(() => ({} as NumericMetricSnapshot));
 }
 
-function numericSeriesIncreased(before: number[], after: number[]): boolean {
-  if (!before.length || !after.length) return false;
-  const beforeSorted = [...before].sort((a, b) => a - b);
-  const afterSorted = [...after].sort((a, b) => a - b);
-  return Math.max(...afterSorted) > Math.max(...beforeSorted) || afterSorted.reduce((sum, value) => sum + value, 0) > beforeSorted.reduce((sum, value) => sum + value, 0);
+export function numericMetricSnapshotIncreased(before: NumericMetricSnapshot, after: NumericMetricSnapshot): boolean {
+  for (const [key, beforeValues] of Object.entries(before || {})) {
+    const afterValues = after?.[key];
+    if (!beforeValues?.length || !afterValues?.length) continue;
+    const beforeMax = Math.max(...beforeValues);
+    const afterMax = Math.max(...afterValues);
+    const beforeSum = beforeValues.reduce((sum, value) => sum + value, 0);
+    const afterSum = afterValues.reduce((sum, value) => sum + value, 0);
+    if (afterMax > beforeMax || afterSum > beforeSum) return true;
+  }
+  return false;
 }
 
 async function interactiveStateDigest(page: any, locator?: any): Promise<string> {

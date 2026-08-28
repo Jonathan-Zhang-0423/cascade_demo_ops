@@ -529,8 +529,12 @@ func validateRuntimeContractText(values ...string) error {
 // package passed to OutcomeVerifier methods. Lives in model to avoid circular
 // imports between app and orchestrator.
 type BrowserAgentValidationContext struct {
-	RunID                     string
-	SourcePackageID           string
+	RunID           string
+	SourcePackageID string
+	// SourcePackageDigest is the approved package-level digest. It is distinct
+	// from SourceBundleHashSHA256: the result audit trail binds the former,
+	// while stage events and runtime reports bind the latter.
+	SourcePackageDigest       string
 	SourceBundleHashSHA256    string
 	EffectivePolicyHashSHA256 string
 	AllowedDomains            []string

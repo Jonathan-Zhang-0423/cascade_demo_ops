@@ -343,7 +343,8 @@ func TestValidatePostExecution_SourcePackageMismatch(t *testing.T) {
 
 // TestValidatePostExecution_HashMismatch tests scenario 11: the result
 // package's audit-trail source digest does not match the approved run's
-// source bundle hash.
+// package digest. Package and executable-bundle digests are intentionally
+// different values.
 func TestValidatePostExecution_HashMismatch(t *testing.T) {
 	config := &model.ValidationConfig{
 		PreExecutionEnabled:       true,
@@ -355,6 +356,7 @@ func TestValidatePostExecution_HashMismatch(t *testing.T) {
 	vctx := model.BrowserAgentValidationContext{
 		RunID:                     "test-post-hash-001",
 		SourcePackageID:           "pkg-approved-002",
+		SourcePackageDigest:       "expected-package-hash-abc123",
 		SourceBundleHashSHA256:    "expected-hash-abc123",
 		EffectivePolicyHashSHA256: "def456",
 		WorkflowGraph:             &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}},
@@ -405,6 +407,33 @@ func TestValidatePostExecution_HashMismatch(t *testing.T) {
 
 	if !foundCheck {
 		t.Errorf("Expected RESULT_HASH_MISMATCH check")
+	}
+}
+
+func TestValidatePostExecution_PackageDigestIsNotComparedToBundleDigest(t *testing.T) {
+	adapter := NewBrowserAgentOutcomeVerifierAdapter(&model.ValidationConfig{
+		PreExecutionEnabled: true, RealTimeBatchEnabled: true, PostExecutionBatchEnabled: true,
+	})
+	vctx := model.BrowserAgentValidationContext{
+		RunID: "test-post-distinct-digests", SourcePackageID: "pkg-approved",
+		SourcePackageDigest: "approved-package-digest", SourceBundleHashSHA256: "approved-bundle-digest",
+		EffectivePolicyHashSHA256: "policy-digest", WorkflowGraph: &model.DemoWorkflowGraph{Nodes: []*model.GraphNode{}},
+		Plan: &model.ExecutionScriptDocument{}, StageApprovalPlan: &model.StageApprovalPlan{Stages: []model.StageApprovalStage{}},
+		ScriptOutline: &model.BrowserAgentScriptOutline{}, BrowserAgentContract: &model.BrowserAgentContract{},
+	}
+	result := model.RecordingResultPackage{
+		ResultID: "result-distinct-digests", SourcePackageID: "pkg-approved", Status: model.RecordingResultStatusGenerated,
+		GeneratedAssets: []model.ArtifactRef{{ID: "screenshot", Kind: "screenshot", URI: "s3://bucket/s.png"}},
+		AuditTrail:      model.CloudExecutionAuditTrail{SourcePackageDigest: "approved-package-digest"},
+	}
+	report, err := adapter.ValidatePostExecution(context.Background(), vctx, result, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range report.Checks {
+		if check.Code == "RESULT_HASH_MISMATCH" {
+			t.Fatalf("matching package digest was compared to the distinct bundle digest: %+v", check)
+		}
 	}
 }
 

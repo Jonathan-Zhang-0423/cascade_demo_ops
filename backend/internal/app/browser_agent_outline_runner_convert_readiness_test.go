@@ -108,12 +108,14 @@ func TestConvertReadinessToValidationChecks(t *testing.T) {
 func TestPreExecutionReadinessPreservesApprovedCredentialGrants(t *testing.T) {
 	const secretRef = "credential://demo/login"
 	pkg := &model.ClientExecutionPackage{
-		PackageID: "pkg_with_login",
+		PackageID:       "pkg_with_login",
+		Reproducibility: model.ReproducibilitySpec{PackageHashSHA256: "package-digest"},
 		CredentialGrants: []model.CredentialGrant{{
 			GrantID: "grant_login", CloudSecretRef: secretRef,
 			AllowedDomains: []string{"example.test"}, AllowedOperations: []string{"login"},
 		}},
 		ExecutableScriptBundle: &model.ExecutableRecordingScriptBundle{
+			Reproducibility: model.ExecutableScriptReproducibility{BundleHashSHA256: "bundle-digest"},
 			PlanJSON: &model.ExecutionScriptDocument{Steps: []model.ScriptStep{{
 				NodeID: "node_login", Action: model.ScriptActionInstruction{Type: model.GraphActionFill, SecretRef: secretRef},
 				Validations: []model.ValidationSpec{{Kind: "page_loaded", Required: true}},
@@ -130,6 +132,9 @@ func TestPreExecutionReadinessPreservesApprovedCredentialGrants(t *testing.T) {
 	}
 
 	validationContext := validationContextFromPackage(pkg)
+	if validationContext.SourcePackageDigest != "package-digest" || validationContext.SourceBundleHashSHA256 != "bundle-digest" {
+		t.Fatalf("validation context conflated package and bundle digests: %+v", validationContext)
+	}
 	if len(validationContext.CredentialGrants) != 1 || validationContext.CredentialGrants[0].CloudSecretRef != secretRef {
 		t.Fatalf("validation context lost the approved credential grant: %+v", validationContext.CredentialGrants)
 	}
