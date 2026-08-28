@@ -9,10 +9,18 @@ import (
 	"time"
 )
 
-// MaxClientExecutionPackageBytes bounds structured execution metadata at the
-// product admission layer. Binary evidence, screenshots, DOM snapshots, traces,
-// and media must still travel as Artifact references rather than inline JSON.
-const MaxClientExecutionPackageBytes = 512 * 1024
+// ClientExecutionPackageWarningBytes marks a large structured package without
+// rejecting it. MaxClientExecutionPackageBytes is the shared hard limit used by
+// the App and remote Worker. Keeping both sides on the same 1 MiB boundary is
+// essential: a package accepted by the Gateway must not enter a claim/release
+// loop when the Worker validates the identical bytes.
+//
+// Binary evidence, screenshots, DOM snapshots, traces, and media must still
+// travel as Artifact references rather than inline JSON.
+const (
+	ClientExecutionPackageWarningBytes = 512 * 1024
+	MaxClientExecutionPackageBytes     = 1024 * 1024
+)
 
 type DirectPackageValidationError struct {
 	Code    string

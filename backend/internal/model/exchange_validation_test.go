@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+func TestClientExecutionPackageSizePolicyKeepsWarningBelowHardLimit(t *testing.T) {
+	if ClientExecutionPackageWarningBytes != 512*1024 || MaxClientExecutionPackageBytes != 1024*1024 {
+		t.Fatalf("unexpected package size policy: warning=%d hard=%d", ClientExecutionPackageWarningBytes, MaxClientExecutionPackageBytes)
+	}
+	if ClientExecutionPackageWarningBytes >= MaxClientExecutionPackageBytes {
+		t.Fatal("large-package warning must remain below the hard rejection boundary")
+	}
+}
+
 func TestValidateClientExecutionPackageForDirectExecutionAcceptsCompleteApproval(t *testing.T) {
 	pkg := approvedDirectOutlinePackage(t)
 	if err := ValidateClientExecutionPackageForDirectExecution(&pkg); err != nil {
