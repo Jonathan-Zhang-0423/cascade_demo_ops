@@ -606,7 +606,15 @@ func compileExperimentInteractionContracts(plan experiment.InteractionPlan, obse
 			for _, change := range step.ExpectedChanges {
 				switch change {
 				case "aria":
-					appendPredicate("aria_changed", true)
+					// State-variant controls are valid for canvas and iframe
+					// products whose accessible tree can remain stable while the
+					// rendered product moves through multiple real states. The
+					// specialized variant proof plus the visual-region proof are
+					// the two independent channels; an unchanged host ARIA digest
+					// must not veto both stronger signals.
+					if step.Action.Kind != "activate_state_variants" {
+						appendPredicate("aria_changed", true)
+					}
 				case "visual":
 					appendPredicate("visual_region_changed", true)
 				case "frame", "interaction":
@@ -741,6 +749,13 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 			return err
 		}
 	}
+	liveVisualCalls, liveTerminal, liveErr := recordLiveBrowserVisualObservations(downloads, request.VisualCallBudget, emit)
+	if liveErr != nil {
+		return liveErr
+	}
+	if liveVisualCalls > request.ObservationPlan.MaxVisualCalls {
+		return &experiment.AdapterError{Code: "visual_call_budget_exceeded", Phase: "visual_observation_deferred", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: evidenceRefs}
+	}
 	coreCapabilityTerminal := false
 	if isAdaptiveExperimentHarness(request.HarnessProfile) {
 		score, scoreEvidence, scoreErr := readAdaptiveCapabilityScore(downloads)
@@ -767,6 +782,42 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 			}
 			return &experiment.AdapterError{Code: "product_repair_budget_exhausted", Phase: "product_verification", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: []string{scoreEvidence}}
 		}
+		if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
+			if request.VisualCallBudget-liveVisualCalls < 1 {
+				return &experiment.AdapterError{Code: "product_visual_quality_budget_exhausted", Phase: "product_verification", State: experiment.RunStateWaitingInput, Retryable: true, EvidenceRefs: evidenceRefs}
+			}
+			quality, qualityDownload, qualityErr := a.runProductVisualQualityGate(ctx, request, downloads)
+			if qualityErr != nil {
+				return &experiment.AdapterError{Code: "product_visual_quality_unavailable", Phase: "product_verification", State: experiment.RunStateWaitingExternal, Retryable: true, EvidenceRefs: evidenceRefs, Cause: qualityErr}
+			}
+			downloads = append(downloads, qualityDownload)
+			qualityRef := experiment.ArtifactRef{ArtifactID: qualityDownload.ArtifactID, Revision: 1, Role: "product_visual_quality_report"}
+			if err := emit(experiment.LegExecutionUpdate{Kind: "visual_observation", Summary: "实际预览区域已按冻结的产品视觉规格完成独立质检", EvidenceRefs: []string{quality.ScreenshotArtifactID, qualityDownload.ArtifactID}, Artifacts: []experiment.ArtifactRef{qualityRef}}); err != nil {
+				return err
+			}
+			liveVisualCalls++
+			if !quality.Pass {
+				visualScore := *score
+				visualScore.CorePassed = false
+				visualScore.EligibleForFilm = false
+				visualScore.Missing = appendUniqueString(append([]string{}, visualScore.Missing...), "product_visual_quality")
+				summary := &experiment.CapabilitySummary{CoreScore: visualScore.CoreScore, EnhancementScore: visualScore.EnhancementScore, TotalScore: visualScore.TotalScore, CorePassed: false, EligibleForFilm: false, Missing: append([]string{}, visualScore.Missing...)}
+				if err := emit(experiment.LegExecutionUpdate{Kind: "capability_scored", Summary: "功能交互已通过，但实际预览未满足冻结的必需视觉规格", EvidenceRefs: []string{qualityDownload.ArtifactID}, CapabilityScore: summary}); err != nil {
+					return err
+				}
+				if !adaptiveProductRepairBudgetExhausted(request.ProductRepairRounds) {
+					directive := model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "surface-validation", FailureClass: "required_product_visual_quality_failed", TargetModule: "execution-capture", Action: "submit_product_repair", ArtifactRefs: []string{qualityDownload.ArtifactID}, Attempt: request.ProductRepairRounds + 1, MaxAttempts: 3, ResumePhase: "product_verification"}
+					if err := emit(experiment.LegExecutionUpdate{Kind: "repair_directive", Summary: "必需视觉规格未通过；只在本次绑定实体内提交一次简短产品修复", EvidenceRefs: []string{qualityDownload.ArtifactID}, RepairDirective: &directive}); err != nil {
+						return err
+					}
+					if err := emit(experiment.LegExecutionUpdate{Kind: "artifacts", Artifacts: experimentArtifactRefs(downloads), Summary: "功能证据与视觉质检报告均已保留"}); err != nil {
+						return err
+					}
+					return a.executeSameEntityProductRepair(ctx, request, projectID, jobID, visualScore, history, emit)
+				}
+				return &experiment.AdapterError{Code: "product_repair_budget_exhausted", Phase: "product_verification", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: []string{qualityDownload.ArtifactID}}
+			}
+		}
 		// The adaptive profile's authoritative terminal is the layered business
 		// score. It already combines real interaction, structural, and bounded
 		// visual evidence. A visual observation that calls itself "in_progress"
@@ -774,13 +825,6 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 		coreCapabilityTerminal = true
 	}
 	visualArtifacts := []experiment.ArtifactRef{}
-	liveVisualCalls, liveTerminal, liveErr := recordLiveBrowserVisualObservations(downloads, request.VisualCallBudget, emit)
-	if liveErr != nil {
-		return liveErr
-	}
-	if liveVisualCalls > request.ObservationPlan.MaxVisualCalls {
-		return &experiment.AdapterError{Code: "visual_call_budget_exceeded", Phase: "visual_observation_deferred", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: evidenceRefs}
-	}
 	if !experimentArtifactsContainRole(request.ExistingArtifacts, "temporal_visual_observation") && !liveTerminal && !coreCapabilityTerminal {
 		remaining := request.VisualCallBudget - liveVisualCalls
 		if remaining < 1 {
@@ -1397,7 +1441,7 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 		return err
 	}
 	for _, download := range downloads {
-		if download.Kind == "browser_agent_stage_event_log" || download.Kind == "recording_segment_manifest" {
+		if download.Kind == "browser_agent_stage_event_log" || download.Kind == "recording_segment_manifest" || download.Kind == "product_visual_quality_report" {
 			supplements = append(supplements, model.FinalFilmReviewSupplement{Role: "experiment_" + safePathSegment(download.Kind), SourcePath: download.LocalPath, RelativePath: "experiment/capture-" + safePathSegment(download.ArtifactID) + "-" + filepath.Base(download.LocalPath), Required: false})
 		}
 	}

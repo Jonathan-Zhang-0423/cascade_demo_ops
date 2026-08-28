@@ -1,0 +1,49 @@
+package app
+
+import (
+	"strings"
+	"testing"
+
+	"cascade-demoops/backend/internal/experiment"
+)
+
+func TestSelectProductVisualQualityScreenshotPrefersTerminalPreview(t *testing.T) {
+	items := []CloudDeliverableDownloadResult{
+		{ArtifactID: "surface_ready_after", MimeType: "image/png"},
+		{ArtifactID: "terminal_scenes_after", MimeType: "image/png"},
+		{ArtifactID: "terminal_scenes_before", MimeType: "image/png"},
+	}
+	got, ok := selectProductVisualQualityScreenshot(items)
+	if !ok || got.ArtifactID != "terminal_scenes_after" {
+		t.Fatalf("terminal product state was not selected: ok=%v got=%+v", ok, got)
+	}
+}
+
+func TestProductVisualRequirementSummaryKeepsFrozenPublicVisualRequirements(t *testing.T) {
+	spec := experiment.ProductSpec{
+		VisualDirection:      experiment.VisualDirection{Theme: "deep blue neon", Palette: []string{"navy", "cyan"}},
+		ObservableAcceptance: []experiment.AcceptanceCriterion{{Statement: "The product uses a deep blue gradient.", EvidenceKinds: []string{"visual"}, Required: true}, {Statement: "Keyboard works.", EvidenceKinds: []string{"dom"}, Required: true}},
+		ForbiddenOutcomes:    []string{"Do not show a generic default theme."},
+	}
+	got := productVisualRequirementSummary(spec)
+	for _, required := range []string{"deep blue neon", "navy, cyan", "deep blue gradient", "generic default theme"} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("visual summary lost %q: %s", required, got)
+		}
+	}
+	if strings.Contains(got, "Keyboard works") {
+		t.Fatalf("non-visual criterion leaked into the visual-only Gate: %s", got)
+	}
+}
+
+func TestNormalizeProductVisualQualityDraftRejectsLowConfidenceAndFailedRequirements(t *testing.T) {
+	for _, draft := range []productVisualQualityDraft{
+		{Pass: true, Confidence: .7, Summary: "uncertain"},
+		{Pass: true, Confidence: .95, Summary: "mismatch", FailedRequirements: []string{"palette"}},
+	} {
+		report, err := normalizeProductVisualQualityDraft(draft, "actual-preview")
+		if err != nil || report.Pass {
+			t.Fatalf("unproven product visuals passed: report=%+v err=%v", report, err)
+		}
+	}
+}

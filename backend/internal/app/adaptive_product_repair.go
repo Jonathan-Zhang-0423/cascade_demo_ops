@@ -176,6 +176,13 @@ func selectAdaptiveBoundEntityURL(targetURL string, project *model.ProjectContex
 
 func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.InteractionPlan, missing []string, priorAttempts ...int) string {
 	statements := map[string]string{}
+	if theme := strings.TrimRight(strings.TrimSpace(spec.VisualDirection.Theme), ".。；; "); theme != "" {
+		visualRequirement := "实际产品界面的视觉风格应符合" + theme
+		if len(spec.VisualDirection.Palette) > 0 {
+			visualRequirement += "，主要配色为" + strings.Join(spec.VisualDirection.Palette, "、")
+		}
+		statements["product_visual_quality"] = visualRequirement
+	}
 	for _, step := range plan.Steps {
 		statements[strings.TrimSpace(step.StepID)] = strings.TrimSpace(step.SemanticIntent)
 	}

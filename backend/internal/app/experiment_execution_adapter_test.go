@@ -214,6 +214,25 @@ func TestCompileExperimentInteractionContractsPreservesExecutableProofSemantics(
 	}
 }
 
+func TestCompileStateVariantProofUsesVisualAndVariantChannelsWithoutARIARequirement(t *testing.T) {
+	loaded, err := experiment.LoadDefinition("../../../experiments", "2048-v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contracts, err := compileExperimentInteractionContracts(loaded.InteractionPlan, loaded.ObservationPlan)
+	if err != nil || len(contracts) == 0 {
+		t.Fatalf("compile state variant contract: contracts=%+v err=%v", contracts, err)
+	}
+	contract := contracts[len(contracts)-1]
+	kinds := map[string]bool{}
+	for _, predicate := range contract.ExpectedTransitions {
+		kinds[predicate.Kind] = true
+	}
+	if kinds["aria_changed"] || !kinds["visual_region_changed"] || !kinds["state_variants_observed"] {
+		t.Fatalf("state proof did not preserve the two portable evidence channels: %+v", contract.ExpectedTransitions)
+	}
+}
+
 func TestExperimentProductEvidenceSummaryStaysInternalAndDetailed(t *testing.T) {
 	loaded, err := experiment.LoadDefinition("../../../experiments", "2048-v2")
 	if err != nil {

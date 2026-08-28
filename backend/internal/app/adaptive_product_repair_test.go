@@ -52,6 +52,16 @@ func TestAdaptiveProductRepairPromptFallsBackToOneRequiredCriterion(t *testing.T
 	}
 }
 
+func TestAdaptiveProductRepairPromptCarriesVisualQualityFailure(t *testing.T) {
+	spec := experiment.ProductSpec{VisualDirection: experiment.VisualDirection{Theme: "深蓝霓虹界面", Palette: []string{"深蓝", "青色", "紫色"}}}
+	got := adaptiveProductRepairPrompt(spec, experiment.InteractionPlan{}, []string{"product_visual_quality"}, 1)
+	for _, required := range []string{"实际产品界面的视觉风格应符合深蓝霓虹界面", "深蓝、青色、紫色", "预览中运行确认"} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("visual product repair lost %q: %q", required, got)
+		}
+	}
+}
+
 func TestAdaptiveProductRepairPromptKeepsCausalOrderWhileCoveringRelatedFailures(t *testing.T) {
 	spec := experiment.ProductSpec{ObservableAcceptance: []experiment.AcceptanceCriterion{
 		{ID: "initial_surface", Statement: "初始业务内容完整渲染并包含可操作状态", Required: true},
