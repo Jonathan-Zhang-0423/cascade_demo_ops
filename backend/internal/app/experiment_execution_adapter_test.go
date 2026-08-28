@@ -258,6 +258,36 @@ func TestExperimentProductEvidenceSummaryStaysInternalAndDetailed(t *testing.T) 
 	}
 }
 
+func TestExperimentProductEvidenceSummaryExcludesInferredAestheticsAndShouldItems(t *testing.T) {
+	spec := experiment.ProductSpec{
+		Objective:       "Build the requested interactive product",
+		VisualDirection: experiment.VisualDirection{Theme: "deep blue neon", Palette: []string{"blue"}, Motion: "glow"},
+		Requirements: []experiment.ProductRequirement{
+			{ID: "must", Statement: "render the primary surface", Priority: "must"},
+			{ID: "should", Statement: "use a guessed blue palette", Priority: "should"},
+		},
+		InteractionRequirements: []experiment.ProductRequirement{
+			{ID: "must-action", Statement: "accept keyboard input", Priority: "must"},
+			{ID: "should-action", Statement: "animate optional flourishes", Priority: "should"},
+		},
+		ObservableAcceptance: []experiment.AcceptanceCriterion{
+			{ID: "required-proof", Statement: "surface is visible", Required: true},
+			{ID: "advisory-proof", Statement: "palette is cinematic", Required: false},
+		},
+	}
+	summary := experimentProductEvidenceSummary(spec)
+	for _, required := range []string{"Build the requested interactive product", "render the primary surface", "accept keyboard input", "surface is visible"} {
+		if !strings.Contains(summary, required) {
+			t.Fatalf("business evidence summary lost %q: %s", required, summary)
+		}
+	}
+	for _, advisory := range []string{"deep blue neon", "blue", "glow", "use a guessed blue palette", "animate optional flourishes", "palette is cinematic"} {
+		if strings.Contains(summary, advisory) {
+			t.Fatalf("business evidence summary leaked advisory presentation %q: %s", advisory, summary)
+		}
+	}
+}
+
 func TestRecordLiveBrowserVisualObservationsCountsCallsAndRequiresConfidentTerminal(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, decision string, confidence float64, providerCalls int) CloudDeliverableDownloadResult {

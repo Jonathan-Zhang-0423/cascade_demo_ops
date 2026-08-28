@@ -517,16 +517,20 @@ func (a *appExperimentExecutionAdapter) latestAdaptiveReconciliationJobID(ctx co
 }
 
 func experimentProductEvidenceSummary(spec experiment.ProductSpec) string {
-	parts := []string{
-		"Objective: " + strings.TrimSpace(spec.Objective),
-		"Visual theme: " + strings.TrimSpace(spec.VisualDirection.Theme),
-		"Motion: " + strings.TrimSpace(spec.VisualDirection.Motion),
-	}
+	// This summary drives the business-surface gate, not an aesthetic review.
+	// Inferred presentation choices intentionally stay out: a one-sentence goal
+	// must not become a hard color or motion contract merely because the planning
+	// model filled optional visual fields.
+	parts := []string{"Objective: " + strings.TrimSpace(spec.Objective)}
 	for _, requirement := range spec.Requirements {
-		parts = append(parts, "Required: "+strings.TrimSpace(requirement.Statement))
+		if strings.EqualFold(strings.TrimSpace(requirement.Priority), "must") {
+			parts = append(parts, "Required: "+strings.TrimSpace(requirement.Statement))
+		}
 	}
 	for _, requirement := range spec.InteractionRequirements {
-		parts = append(parts, "Interaction: "+strings.TrimSpace(requirement.Statement))
+		if strings.EqualFold(strings.TrimSpace(requirement.Priority), "must") {
+			parts = append(parts, "Interaction: "+strings.TrimSpace(requirement.Statement))
+		}
 	}
 	for _, criterion := range spec.ObservableAcceptance {
 		if criterion.Required {
