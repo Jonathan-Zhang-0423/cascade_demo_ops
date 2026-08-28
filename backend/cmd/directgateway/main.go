@@ -48,6 +48,7 @@ func main() {
 	}
 	runtime, err := config.RuntimeConfigFromEnvWithRoot(repoRoot)
 	must(err)
+	applyDevLocalRoots(&runtime, repoRoot)
 	service, err := app.NewService(runtime, store.NewFileStateStore(filepath.Join(runtime.DataRoot, "direct_gateway_state")))
 	must(err)
 	if *statePath == "" {
@@ -106,6 +107,32 @@ func validateControlAddr(value string) error {
 		return fmt.Errorf("control address must use Direct TLS port %d", direct.ControlPort)
 	}
 	return nil
+}
+
+// Keep the local Direct Gateway in the same workspace-scoped dev roots as the
+// desktop dev bridge. Otherwise the Gateway process may inherit the default
+// per-user roaming artifact path, which is often unavailable to a
+// non-interactive local Worker and prevents stage-event audit capture.
+func applyDevLocalRoots(runtime *config.AppRuntimeConfig, repoRoot string) {
+	if runtime == nil || repoRoot == "" || runtime.Profile != config.ProfileDev {
+		return
+	}
+	root := filepath.Join(repoRoot, ".cascade-dev")
+	if os.Getenv("CASCADE_DATA_ROOT") == "" {
+		runtime.DataRoot = filepath.Join(root, "data")
+	}
+	if os.Getenv("SQLITE_PATH") == "" {
+		runtime.SQLitePath = filepath.Join(runtime.DataRoot, "cascade_demoops.db")
+	}
+	if os.Getenv("CASCADE_ARTIFACT_ROOT") == "" {
+		runtime.ArtifactRoot = filepath.Join(root, "artifacts")
+	}
+	if os.Getenv("CASCADE_CACHE_ROOT") == "" {
+		runtime.CacheRoot = filepath.Join(root, "cache")
+	}
+	if os.Getenv("CASCADE_LOG_ROOT") == "" {
+		runtime.LogRoot = filepath.Join(root, "logs")
+	}
 }
 
 func must(err error) {

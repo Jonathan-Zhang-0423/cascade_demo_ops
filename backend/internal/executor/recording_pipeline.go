@@ -223,6 +223,17 @@ func validateBrowserAgentEvidenceMaster(ctx context.Context, service DeliveryRen
 	if probe.DurationMS <= 0 || strings.TrimSpace(probe.VideoCodec) == "" {
 		return fmt.Errorf("recording_evidence_not_decodable: codec=%q duration_ms=%d", probe.VideoCodec, probe.DurationMS)
 	}
+	// Playwright's encoded WebM capture uses a stable 25fps cadence, while
+	// imported/native Browser Agent sources may already be 30fps. Both are
+	// deterministic source masters; the renderer remains responsible for the
+	// required CFR30 delivery. Reject other or variable-looking cadences here.
+	if probe.FPS > 0 {
+		stable25 := probe.FPS >= 24.75 && probe.FPS <= 25.25
+		stable30 := probe.FPS >= 29.75 && probe.FPS <= 30.25
+		if !stable25 && !stable30 {
+			return fmt.Errorf("recording_evidence_fps_mismatch: got=%.3f want=25_or_30", probe.FPS)
+		}
+	}
 	return nil
 }
 

@@ -123,7 +123,10 @@ type DirectCredentialEnvelope struct {
 	AllowedDomains    []string `json:"allowed_domains"`
 	AllowedOperations []string `json:"allowed_operations"`
 	ExpiresAtUnixMS   int64    `json:"expires_at_unix_ms"`
-	Secret            string   `json:"secret"`
+	// Username is one-time, in-memory credential material. Persistent gateway
+	// snapshots redact the entire Credential field before writing state.
+	Username string `json:"username"`
+	Secret   string `json:"secret"`
 }
 
 type DirectArtifactDescriptor struct {

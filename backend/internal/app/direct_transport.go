@@ -400,7 +400,12 @@ func (s *Service) UploadDirectExecutionPackage(ctx context.Context, projectID st
 	if err := s.directDataRequest(ctx, lease, http.MethodPost, "/v1/direct/packages", message, "package_receipt", &receipt); err != nil {
 		return DirectTransportUploadResult{}, directUploadError("package_submit", directRequestMayHaveBeenAdmitted(err), "", err)
 	}
-	if receipt.PackageID != build.Package.PackageID || receipt.PackageDigest != build.PackageDigestSHA256 {
+	// Installation binding creates two valid identities: the immutable
+	// App-reviewed source digest and the installation-bound Direct payload
+	// digest. Accept either identity, never an arbitrary receipt digest.
+	sourceDigest := build.Package.Reproducibility.PackageHashSHA256
+	transportDigest := build.PackageDigestSHA256
+	if receipt.PackageID != build.Package.PackageID || (receipt.PackageDigest != sourceDigest && receipt.PackageDigest != transportDigest) {
 		return DirectTransportUploadResult{}, directUploadError("package_receipt", true, receipt.JobID, errors.New("direct Browser Agent receipt does not match the approved package"))
 	}
 	// The package receipt is the first authoritative external task binding.
@@ -512,6 +517,10 @@ func bindDirectExecutionPackageOrigin(build ClientExecutionPackageBuild, install
 	if installationID == "" {
 		return ClientExecutionPackageBuild{}, errors.New("direct Browser Agent installation binding is required")
 	}
+	sourcePackageDigest := strings.TrimSpace(build.PackageDigestSHA256)
+	if sourcePackageDigest == "" {
+		return ClientExecutionPackageBuild{}, errors.New("direct Browser Agent source package digest is required")
+	}
 	encoded, err := json.Marshal(build.Package)
 	if err != nil {
 		return ClientExecutionPackageBuild{}, err
@@ -528,6 +537,11 @@ func bindDirectExecutionPackageOrigin(build ClientExecutionPackageBuild, install
 		return ClientExecutionPackageBuild{}, errors.New("unverified_origin: package approval installation does not own the direct lease")
 	}
 	pkg.ProducerInstallationID = installationID
+	// The Direct payload is installation-bound and therefore differs from the
+	// reviewed App package. Retain the reviewed package digest as the immutable
+	// source lineage hash; the Gateway separately hashes the encrypted Direct
+	// payload for transport idempotency.
+	pkg.Reproducibility.PackageHashSHA256 = sourcePackageDigest
 	approval.ApprovedByInstallationID = installationID
 	approval.ApprovalSchemaVersion = "cascade.user_approval.v1"
 	confidence, err := model.AssessClientExecutionPackage(&pkg)
@@ -791,7 +805,11 @@ func (s *Service) uploadDirectCredential(ctx context.Context, lease model.Direct
 	value := model.DirectCredentialValue{SecretRef: grant.CloudSecretRef, Username: credential.Username, Password: credential.Password, ExpiresAt: expiresAt, AllowedDomains: append([]string(nil), grant.AllowedDomains...), AllowedOperations: append([]string(nil), grant.AllowedOperations...)}
 	envelope := model.DirectCredentialEnvelope{
 		ProtocolVersion: model.DirectTransportProtocolVersion, LeaseID: lease.LeaseID, InstallationID: lease.InstallationID,
-		JobID: receipt.JobID, PackageID: build.Package.PackageID, PackageDigest: build.PackageDigestSHA256,
+		// Bind the one-time credential to the exact package identity accepted by
+		// this Gateway. A current Gateway receipts the immutable reviewed source
+		// digest, while the legacy-compatible Gateway receipts the installation
+		// payload digest; receipt.PackageDigest is the only safe common binding.
+		JobID: receipt.JobID, PackageID: build.Package.PackageID, PackageDigest: receipt.PackageDigest,
 		GrantID: grant.GrantID, SecretRef: grant.CloudSecretRef, IssuedAt: now, ExpiresAt: expiresAt,
 		AllowedDomains: append([]string(nil), grant.AllowedDomains...), AllowedOperations: append([]string(nil), grant.AllowedOperations...), Credential: value,
 	}

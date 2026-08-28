@@ -593,15 +593,24 @@ var intentProjectNamePatterns = []*regexp.Regexp{
 // nearby navigation phrase such as “新建项目入口”; the latter is an action
 // label, never a user-provided value.
 var intentProjectInputValuePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?:项目(?:名称|名|需求)|project\s*(?:name|idea|prompt)|今天你想做什么)[^，。；;,\n]{0,64}?(?:输入|填写|填入|fill)\s*(?:为|是|[:：=])?\s*[“”"']?([^“”"'，。；;,\n]{1,512})`),
+	// The unattended formal-App request uses this explicit English form. Keep
+	// the value capture narrow: the action verb precedes the field and the
+	// value follows an explicit `value:`/`value is` marker.
+	regexp.MustCompile(`(?i)\b(?:fill|enter|type)\s+(?:the\s+)?project[\s_-]*(?:name|idea|prompt)\s*(?:field|input|textarea)?\s+with\s+(?:the\s+)?(?:exact\s+)?value\s*(?:is|:|=)\s*[“”"']?([^“”"'，。；;,.\n]{1,512})`),
+	regexp.MustCompile(`(?:项目(?:名称|名|需求)|project\s*(?:name|idea|prompt)|今天你想做什么)[^，。；;,\n]{0,64}?(?:中|内)?(?:输入|填写|填入|fill)\s*(?:为|是|[:：=])?\s*[“”"']?([^“”"'，。；;,\n]{1,512})`),
 	regexp.MustCompile(`(?:输入|填写|填入)\s*(?:项目(?:名称|名|需求)|project\s*(?:name|idea|prompt))\s*(?:为|是|[:：=])?\s*[“”"']?([^“”"'，。；;,\n]{1,512})`),
+	regexp.MustCompile(`(?:在|于)\s*[“”"']?(?:今天你想做什么(?:？|\?)?)[“”"']?\s*(?:输入框)?(?:中|内)?\s*(?:输入|填写|填入)\s*[“”"']?([^“”"'，。；;,\n]{1,512})`),
 }
 
 var intentDurationOnlyPattern = regexp.MustCompile(`^\d+(?:\.\d+)?\s*(?:秒|s|sec|secs|second|seconds)$`)
 var intentProjectDetailsPattern = regexp.MustCompile(`(?:新建|创建|新增)(?:一个)?项目\s*[（(]([^）)]{1,96})[）)]`)
 
 func intentProjectName(intentText string) string {
-	intentText = normalizeIntentText(intentText)
+	// Preserve line boundaries while extracting an explicitly requested field
+	// value. Formal unattended requests are numbered instructions; collapsing
+	// whitespace would turn the next instruction (for example `3. Click Build`)
+	// into part of the project value.
+	intentText = strings.ToLower(strings.TrimSpace(intentText))
 	for _, pattern := range intentProjectInputValuePatterns {
 		for _, match := range pattern.FindAllStringSubmatch(intentText, -1) {
 			if len(match) < 2 {
@@ -638,6 +647,8 @@ func intentProjectName(intentText string) string {
 func normalizeIntentProjectNameCandidate(value string) string {
 	candidate := strings.Trim(strings.TrimSpace(value), `"'“”‘’()（）:：=-`)
 	if candidate == "" || intentDurationOnlyPattern.MatchString(candidate) || containsAnyNormalized(candidate,
+		"框出现", "输入框出现", "文本框出现", "field appears", "input appears",
+		"入口", "流程", "页面", "步骤", "entry", "flow", "page", "step",
 		"新建项目", "创建项目", "新增项目", "new project", "create project",
 		"构建模式", "build mode", "builder mode", "等待", "wait", "agent", "智能体",
 		"启动", "开始", "输入", "填写", "选择", "打开", "进入", "查看", "提交", "创建", "新建", "新增",
@@ -939,9 +950,14 @@ func verifierGoalInputValue(goal model.DemoIntentGoal) string {
 	if goal.ID != "intent_project_requirement_input" || goal.PreferredAction != "fill" || !goal.Required || !goal.BusinessCritical {
 		return ""
 	}
-	const prefix = "填写项目需求："
-	value := strings.TrimSpace(strings.TrimPrefix(goal.Label, prefix))
-	if value == goal.Label || value == "" || len([]rune(value)) > 512 || containsAnyNormalized(value, "password", "passwd", "secret", "token", "api key", "密码", "口令", "密钥", "令牌") {
+	// The goal ID is the structural guard. Split at either full-width or ASCII
+	// punctuation so a formal Chinese requirement keeps its exact input value.
+	original := strings.TrimSpace(goal.Label)
+	value := original
+	if index := strings.IndexAny(value, "：:"); index >= 0 {
+		value = strings.TrimSpace(value[index+len(string([]rune(value[index:])[0])):])
+	}
+	if value == original || value == "" || len([]rune(value)) > 512 || containsAnyNormalized(value, "password", "passwd", "secret", "token", "api key", "密码", "口令", "密钥", "令牌") {
 		return ""
 	}
 	return value

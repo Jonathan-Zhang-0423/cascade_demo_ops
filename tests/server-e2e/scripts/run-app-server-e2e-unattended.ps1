@@ -18,7 +18,7 @@ $ErrorActionPreference = "Stop"
 
 function Invoke-BridgeJson {
   param(
-    [Parameter(Mandatory = $true)][ValidateSet("GET", "POST")][string]$Method,
+    [Parameter(Mandatory = $true)][ValidateSet("GET", "POST", "PUT")][string]$Method,
     [Parameter(Mandatory = $true)][string]$Uri,
     [object]$Body
   )
@@ -165,6 +165,7 @@ $zhStep2 = Decode-Utf8Base64 "Mi4g5Zyo4oCc5LuK5aSp5L2g5oOz5YGa5LuA5LmI77yf4oCd6L
 $zhStep3 = Decode-Utf8Base64 "My4g54K55Ye74oCc5p6E5bu64oCd44CC"
 $zhStep4 = Decode-Utf8Base64 "NC4g5Zyo5by55Ye655qE55So5oi36aG16Z2i6L6T5YWl4oCc5biu5oiR5p6E5bu65LiA5Liq6LSq5ZCD6JuH5ri45oiP77yM6KaB5rGC5Y+v5Lul6Ieq5a6a5LmJ55WM6Z2i6aKc6Imy77yM5bm25LiU5Y+v5Lul6YCJ5oup5LiJ56eN6Zq+5bqm5qih5byP4oCd77yM562J5b6F5p6E5bu65a6M5oiQ5ZCO5YGc5q2i5b2V5Yi244CC"
 $zhForbidden = Decode-Utf8Base64 "56aB5q2i5L+u5pS55p2D6ZmQ44CB57uR5a6a5pSv5LuY5pa55byP44CB5a+85Ye65pWw5o2u44CB5aSN5Yi25a+G6ZKl5oiWIFRva2Vu77yb56aB5q2i6K+75Y+W5oiW5b2V5Yi25a+G56CB44CB6YKu566x44CB5omL5py65Y+344CBVG9rZW7jgIFDb29raWXjgIFBUEkgS2V544CC"
+$mediaDeliveryRequirement = "Final-video delivery is mandatory: generate Chinese narration through the formal TTS chain, route the narration asset through the configured private Volcengine TOS instance, align narration with Chinese subtitles and the real business actions, and fail closed if TTS, TOS transfer, audio validation, or final audio/video muxing fails. Never expose TTS or TOS credentials, signed URLs, bucket-private details, or provider task identifiers."
 $zhSnakeGame = Decode-Utf8Base64 "6LSq5ZCD6JuH5ri45oiP"
 $requestedProjectIdea = if ([string]::IsNullOrWhiteSpace($ProjectIdea)) { $zhSnakeGame } else { $ProjectIdea.Trim() }
 if ([string]::IsNullOrWhiteSpace($ProjectIdea)) {
@@ -177,6 +178,7 @@ if ([string]::IsNullOrWhiteSpace($ProjectIdea)) {
     $zhStep3
     $zhStep4
     $zhForbidden
+    $mediaDeliveryRequirement
   ) -join "`n"
 } else {
   $requirementBody = @(
@@ -188,6 +190,7 @@ if ([string]::IsNullOrWhiteSpace($ProjectIdea)) {
     "3. Click Build."
     "4. Observe the real build page until a stable progress or completion state is visible; stop after at most ten minutes."
     "Never modify permissions, bind payment, export data, copy secrets, or expose credentials, tokens, cookies, or API keys."
+    $mediaDeliveryRequirement
   ) -join "`n"
 }
 $zhNewProject = Decode-Utf8Base64 "5paw5bu66aG555uu5YWl5Y+j"
@@ -300,7 +303,7 @@ $userInput = @{
     kind = "inline_markdown"
     title = "Local unattended E2E requirements"
     body = $requirementBody
-    focus_areas = @("business_actions", "completion_observation", "subtitles", "redaction")
+    focus_areas = @("business_actions", "completion_observation", "subtitles", "narration", "tos_asset_flow", "redaction")
   })
 }
 
@@ -312,6 +315,56 @@ Write-Utf8NoBom -Path $requestPath -Text $appRequestJson
 $state = Invoke-BridgeJson -Method POST -Uri $preparePath -Body $appRequest
 $projectId = [string]$state.project_id
 if ([string]::IsNullOrWhiteSpace($projectId)) { throw "App formal package generation returned no project_id" }
+
+# Keep the media requirement in the App-owned package policy rather than in a
+# Server-side package rewrite. This is test-run configuration only: it does not
+# alter production defaults or expose provider credentials/endpoints.
+$mediaPolicy = Invoke-BridgeJson -Method PUT -Uri "$EngineBaseUrl/v1/desktop/projects/$([Uri]::EscapeDataString($projectId))/media-delivery-policy" -Body @{
+  schema_version = "demoops.media_delivery_preferences.v1"
+  narration = @{
+    mode = "custom"
+    client_specified = $true
+  }
+  tos_retention = @{
+    mode = "standard_30d"
+    retention_days = 30
+    scope = "all_task_artifacts"
+    client_disclosure_acknowledged = $true
+  }
+  output_profiles = @(
+    @{ id = "final_master_2k"; width = 2560; height = 1440; format = "mp4_h264_yuv420p_cfr30" },
+    @{ id = "final_delivery_1080p"; width = 1920; height = 1080; format = "mp4_h264_yuv420p_cfr30" }
+  )
+  default_candidate_provider = "seedance"
+  candidate_adoption_policy = "qualified_presentation_auto"
+}
+if ([bool]$mediaPolicy.client_feedback_required) {
+  throw "App media delivery policy still requires client feedback"
+}
+
+# The local source is read-only and has already been supplied as part of the
+# formal App request. When the product page lacks a matching deployment or
+# repository identity signal, the App deliberately returns `unverified` rather
+# than silently mixing page and source evidence. This unattended command is an
+# explicit App-side decision point: confirm only that non-mismatch state, write
+# the decision to the project audit trail, then regenerate the immutable package.
+$sourceBinding = Invoke-BridgeJson -Method GET -Uri "$EngineBaseUrl/v1/desktop/projects/$([Uri]::EscapeDataString($projectId))/source-binding"
+if ([string]$sourceBinding.status -eq "unverified") {
+  if ([string]::IsNullOrWhiteSpace([string]$sourceBinding.assessment_hash)) {
+    throw "App source binding is unverified without an assessment hash; refusing to produce a mixed-evidence package"
+  }
+  $confirmed = Invoke-BridgeJson -Method POST -Uri "$EngineBaseUrl/v1/desktop/projects/$([Uri]::EscapeDataString($projectId))/source-binding/decisions" -Body @{
+    decision = "confirm_mixed"
+    assessment_hash = [string]$sourceBinding.assessment_hash
+    idempotency_key = "unattended-formal-source-binding-$stamp"
+  }
+  $projectId = [string]$confirmed.project_id
+  if ([string]::IsNullOrWhiteSpace($projectId)) { throw "App source-binding confirmation returned no project_id" }
+  $sourceBinding = Invoke-BridgeJson -Method GET -Uri "$EngineBaseUrl/v1/desktop/projects/$([Uri]::EscapeDataString($projectId))/source-binding"
+}
+if ([string]$sourceBinding.effective_mode -ne "mixed" -or ([string]$sourceBinding.status -ne "matched" -and [string]$sourceBinding.status -ne "confirmed")) {
+  throw "App source binding remains ineligible for formal mixed-evidence package: status=$($sourceBinding.status), mode=$($sourceBinding.effective_mode)"
+}
 
 $buildPath = "$EngineBaseUrl/v1/desktop/projects/$([Uri]::EscapeDataString($projectId))/client-execution-package"
 $build = Invoke-BridgeJson -Method POST -Uri $buildPath -Body @{ org_id = "org_desktop" }
@@ -348,7 +401,7 @@ $globalReasonHashes = @(Get-UnscopedBlockingReasonHashes @($package.confidence_s
 $manifest.approved_node_ids = $nodeIds
 $manifest.approved_blocking_reason_hashes = $globalReasonHashes
 $auditPath = Join-Path $outputRoot "app-package-outline-audit.json"
-$auditScript = Join-Path (Get-Location) "scripts\audit-app-browser-agent-package.mjs"
+$auditScript = Join-Path (Get-Location) "tests\server-e2e\scripts\audit-app-browser-agent-package.mjs"
 if (-not (Test-Path -LiteralPath $auditScript -PathType Leaf)) {
   throw "App package audit script is missing: $auditScript"
 }

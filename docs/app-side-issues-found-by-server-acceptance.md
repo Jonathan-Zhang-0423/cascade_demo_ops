@@ -202,7 +202,7 @@
 - [ ] 不提交 `.cascade-dev`、账号凭据、截图中的敏感信息或临时验收包。
 # 新增问题：认证入口 page-scan 证据未进入正式 App 包（2026-08-20）
 
-- 复现入口：`scripts/run-app-server-e2e-unattended.ps1`，使用当前 App 代码、真实 `http://127.0.0.1:5000/app` 页面和本地 opaque credential ref。
+- 复现入口：`tests/server-e2e/scripts/run-app-server-e2e-unattended.ps1`，使用当前 App 代码、真实 `http://127.0.0.1:5000/app` 页面和本地 opaque credential ref。
 - App 返回：`login_entry_evidence_missing: stage "business_stage_session_setup" does not bind the approved authentication entry route to formal page-scan evidence`。
 - 已确认：模型 readiness、Direct TLS/Gateway/Worker 配对、真实登录页只读截图均正常；Server 未改写 App 包，也未启动正式 Server 执行。
 - 判定：App 产包链缺少或未绑定认证入口的 `source_kind=page_scan`、`observed_url=/login`、`observed_page_role=authentication`、认证表单证据及其 `evidence_id`/digest。

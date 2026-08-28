@@ -94,7 +94,7 @@ func TestPersistentGatewayNeverStoresCredentialAndRequiresFreshEnvelope(t *testi
 	}
 	envelope := DirectCredentialEnvelope{
 		JobID: receipt.JobID, PackageID: receipt.PackageID, PackageSHA256: receipt.PackageSHA256,
-		GrantID: "grant-sensitive", SecretRef: "vault://sensitive-login", Secret: "never-write-this-password",
+		GrantID: "grant-sensitive", SecretRef: "vault://sensitive-login", Username: "never-write-this-username", Secret: "never-write-this-password",
 		InstallationID: lease.InstallationID, LeaseID: lease.LeaseID,
 		AllowedDomains: []string{"example.com"}, AllowedOperations: []string{"login"},
 		ExpiresAtUnixMS: now.Add(30 * time.Minute).UnixMilli(),
@@ -109,7 +109,7 @@ func TestPersistentGatewayNeverStoresCredentialAndRequiresFreshEnvelope(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{envelope.Secret, envelope.SecretRef, envelope.GrantID} {
+	for _, secret := range []string{envelope.Username, envelope.Secret, envelope.SecretRef, envelope.GrantID} {
 		if strings.Contains(string(data), secret) {
 			t.Fatalf("gateway snapshot leaked credential value %q", secret)
 		}

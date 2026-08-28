@@ -30,6 +30,9 @@ type BrowserAgentComponentTarget = {
 type BrowserAgentSelectorCandidate = {
   kind: string;
   value: string;
+  evidence_id?: string;
+  source_kind?: string;
+  source_digest?: string;
   observed_role?: string;
   observed_accessible_name?: string;
   observed_url?: string;
@@ -56,6 +59,7 @@ type BrowserAgentInteraction = {
     text?: string;
     label?: string;
     test_id?: string;
+    evidence_refs?: Array<{ id?: string }>;
   };
   value?: string;
   input_ref?: string;
@@ -628,7 +632,7 @@ export async function browserAgentDevVisibleAutoLogin(request: { session_id: str
         submit = await firstVisibleLocator(session.page, [
           'button[type="submit"]',
           'input[type="submit"]',
-          'button:has-text("鐧诲綍")',
+          'button:has-text("登录")',
           'button:has-text("Sign in")',
           'button:has-text("Log in")',
           'button:has-text("Login")',
@@ -1044,6 +1048,18 @@ export async function closeBrowserAgentSession(request: { session_id: string }):
   }
   if (await fileExists(session.tracePath)) {
     artifacts.push(await artifactRef(`artifact_${session.id}_trace`, "browser_trace", session.tracePath, "application/zip", undefined, { include_in_demo: false }));
+  }
+  const loginGatePath = path.join(session.outputDir, "login-gate.json");
+  if (await fileExists(loginGatePath)) {
+    artifacts.push(await artifactRef(
+      `artifact_${session.id}_login_gate`,
+      "login_gate_diagnostic",
+      loginGatePath,
+      "application/json",
+      undefined,
+      { include_in_demo: false, redaction_applied: true, login_gate: true },
+      true,
+    ));
   }
   recordingPath = recordingPathPromise ? await valueWithin(recordingPathPromise, 3_000, undefined) : undefined;
   if (recordingPath && await fileExists(recordingPath)) {
@@ -3517,17 +3533,23 @@ async function executeFormalAuthentication(session: BrowserAgentSession, stage: 
   if (!secret) throw new Error("browser_agent_task_secret_unavailable");
   const entryURL = session.page.url();
   const runtimeBootstrap = runtimeAdaptiveAuthenticationBootstrap(stage, entryURL);
+  let submitted = false;
+  const selectorEvidenceIDs = authenticationCandidates(stage).map((candidate) => candidate.evidence_id).filter((value): value is string => Boolean(value));
+  await writeLoginGateDiagnostic(session, stage, "started", "login_gate_started", submitted, entryURL, selectorEvidenceIDs);
   try {
-    let passwordInput = await firstVisibleLocator(session.page, passwordInputSelectors());
+    let passwordInput = await firstApprovedSecretInputLocator(session.page, stage, "password");
+    if (!passwordInput) passwordInput = await firstVisibleLocator(session.page, passwordInputSelectors());
     if (!passwordInput) {
       const entry = await firstApprovedAuthenticationLocator(session.page, stage, false)
         || (runtimeBootstrap ? await firstRuntimeAuthenticationEntryLocator(session.page, secret.username) : undefined);
       if (!entry) throw new Error("login_entry_evidence_missing");
       await entry.click({ timeout: actionTimeoutMS });
       await waitForPageSettled(session.page, 5_000);
-      passwordInput = await firstVisibleLocator(session.page, passwordInputSelectors());
+      passwordInput = await firstApprovedSecretInputLocator(session.page, stage, "password");
+      if (!passwordInput) passwordInput = await firstVisibleLocator(session.page, passwordInputSelectors());
     }
-    const usernameInput = await firstVisibleLocator(session.page, usernameInputSelectors());
+    let usernameInput = await firstApprovedSecretInputLocator(session.page, stage, "username");
+    if (!usernameInput) usernameInput = await firstVisibleLocator(session.page, usernameInputSelectors());
     const submit = await firstApprovedAuthenticationLocator(session.page, stage, true)
       || (runtimeBootstrap && passwordInput ? await firstRuntimeAuthenticationSubmitLocator(session.page, passwordInput) : undefined);
     if (!usernameInput || !passwordInput || !submit) throw new Error("authentication_context_unverified");
@@ -3537,6 +3559,7 @@ async function executeFormalAuthentication(session: BrowserAgentSession, stage: 
     await usernameInput.fill(secret.username, { timeout: actionTimeoutMS });
     await passwordInput.fill(secret.password, { timeout: actionTimeoutMS });
     await submit.click({ timeout: actionTimeoutMS });
+    submitted = true;
     await session.page.waitForURL((value: URL) => !urlMatches(value.toString(), entryURL), { timeout: 60_000 });
     await waitForPageSettled(session.page, 10_000);
     const policyError = urlPolicyError(session.page.url(), session, false);
@@ -3545,12 +3568,81 @@ async function executeFormalAuthentication(session: BrowserAgentSession, stage: 
     if (stage.expected_route_after_action && !urlMatches(session.page.url(), stage.expected_route_after_action)) {
       throw new Error("login_success_validation_missing");
     }
+    await writeLoginGateDiagnostic(session, stage, "succeeded", "login_gate_succeeded", submitted, entryURL, selectorEvidenceIDs);
+  } catch (error) {
+    await writeLoginGateDiagnostic(session, stage, "failed", loginGateFailureCode(error), submitted, entryURL, selectorEvidenceIDs);
+    throw error;
   } finally {
     secret.username = "";
     secret.password = "";
     delete session.taskSecrets[secretRef];
     await resumeTraceAfterSecretInput(session);
   }
+}
+
+async function firstApprovedSecretInputLocator(page: any, stage: BrowserAgentWorkerStage, kind: "username" | "password"): Promise<any | undefined> {
+  const interactions = stage.interactions.filter((interaction) => interaction.kind === "fill" && Boolean(interaction.secret_ref));
+  const interaction = kind === "username" ? interactions[0] : interactions[interactions.length - 1];
+  if (!interaction?.target) return undefined;
+  const target = interaction.target;
+  const locators: any[] = [];
+  if (target.test_id) locators.push(page.getByTestId(target.test_id));
+  if (target.label) locators.push(page.getByLabel(target.label, { exact: true }));
+  if (target.selector) locators.push(page.locator(target.selector));
+  for (const locator of locators) {
+    if (locator && await locator.first().isVisible({ timeout: 1_000 }).catch(() => false)) return locator.first();
+  }
+  const evidenceIDs = new Set((target.evidence_refs || []).map((ref) => ref.id).filter(Boolean));
+  for (const candidate of authenticationCandidates(stage)) {
+    if (evidenceIDs.size > 0 && candidate.evidence_id && !evidenceIDs.has(candidate.evidence_id)) continue;
+    const locator = locatorFromAlternative(page, candidate.kind, candidate.value);
+    if (locator && await locator.first().isVisible({ timeout: 1_000 }).catch(() => false)) return locator.first();
+  }
+  return undefined;
+}
+
+export function loginGateFailureCode(error: unknown): string {
+  const message = String(error instanceof Error ? error.message : error).toLowerCase();
+  for (const code of [
+    "login_entry_evidence_missing",
+    "login_success_validation_missing",
+    "authentication_context_unverified",
+    "browser_agent_task_secret_expired",
+    "browser_agent_task_secret_domain_not_approved",
+    "browser_agent_task_secret_operation_not_approved",
+    "browser_agent_task_secret_unavailable",
+  ]) {
+    if (message.includes(code)) return code;
+  }
+  return "login_gate_failed";
+}
+
+async function writeLoginGateDiagnostic(
+  session: BrowserAgentSession,
+  stage: BrowserAgentWorkerStage,
+  status: "started" | "succeeded" | "failed",
+  code: string,
+  submitted: boolean,
+  entryURL: string,
+  selectorEvidenceIDs: string[],
+): Promise<void> {
+  const payload = {
+    schema_version: "demoops.login_gate.v1",
+    status,
+    code,
+    stage_id: stage.id,
+    node_id: stage.node_id,
+    stage_kind: stage.stage_kind,
+    entry_url: safeURL(entryURL),
+    current_url: safeURL(session.page.url()),
+    page_title: redactText(await session.page.title().catch(() => "")),
+    submitted,
+    selector_evidence_ids: [...new Set(selectorEvidenceIDs)].slice(0, 32),
+    selector_count: authenticationCandidates(stage).length,
+    captured_at: new Date().toISOString(),
+    redaction: { applied: true, credentials_included: false, page_content_included: false },
+  };
+  await writeFile(path.join(session.outputDir, "login-gate.json"), JSON.stringify(payload, null, 2), { encoding: "utf8", mode: 0o600 }).catch(() => undefined);
 }
 
 function usernameInputSelectors(): string[] {
@@ -3561,7 +3653,7 @@ function passwordInputSelectors(): string[] {
   return ['input[type="password"]', 'input[name="password"]', 'input[autocomplete="current-password"]'];
 }
 
-function authenticationCandidates(stage: BrowserAgentWorkerStage): BrowserAgentSelectorCandidate[] {
+export function authenticationCandidates(stage: BrowserAgentWorkerStage): BrowserAgentSelectorCandidate[] {
   return [...(stage.components || []).flatMap((component) => component.selector_alternatives || []), ...(stage.evidence_bound_selector_alternatives || [])]
     .filter((candidate, index, all) => candidate?.value && all.findIndex((item) => item.kind === candidate.kind && item.value === candidate.value) === index);
 }

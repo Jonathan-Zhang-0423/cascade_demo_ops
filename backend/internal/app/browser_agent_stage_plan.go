@@ -1400,6 +1400,12 @@ func redactedBrowserAgentFailureCode(err error) string {
 		"browser_agent_login_invalid_credentials",
 		"browser_agent_login_submission_not_confirmed",
 		"browser_agent_login_captcha_required",
+		"login_entry_evidence_missing",
+		"login_success_validation_missing",
+		"authentication_context_unverified",
+		"browser_agent_task_secret_expired",
+		"browser_agent_task_secret_domain_not_approved",
+		"browser_agent_task_secret_operation_not_approved",
 	} {
 		if strings.Contains(message, code) {
 			return code

@@ -183,6 +183,12 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 	if !beforeSubmitCalled || !admittedCalled || upload.Build.BuildStatus != "approved" || upload.Receipt.JobID == "" || upload.Lease.DataPort != port {
 		t.Fatalf("unexpected direct upload: %+v", upload)
 	}
+	if len(upload.Build.Package.Reproducibility.PackageHashSHA256) != 64 {
+		t.Fatalf("direct package lost its reviewed source lineage hash: %q", upload.Build.Package.Reproducibility.PackageHashSHA256)
+	}
+	if upload.Receipt.PackageDigest != upload.Build.Package.Reproducibility.PackageHashSHA256 && upload.Receipt.PackageDigest != upload.Build.PackageDigestSHA256 {
+		t.Fatalf("direct receipt did not identify either the reviewed source or installation-bound transport package: receipt=%q source=%q transport=%q", upload.Receipt.PackageDigest, upload.Build.Package.Reproducibility.PackageHashSHA256, upload.Build.PackageDigestSHA256)
+	}
 
 	claimed := claimDirectWorkerJob(t, gateway)
 	if claimed.JobID != upload.Receipt.JobID || claimed.Package.PackageID != upload.Build.Package.PackageID {
@@ -265,6 +271,34 @@ func TestAppDirectTransportApprovesUploadsAndDownloadsThroughDedicatedPort(t *te
 	}
 	if !persisted.DesktopCloudRun.ResultDownloaded || persisted.DesktopCloudRun.AckedAt == nil || persisted.DesktopCloudRun.ResultReview == nil || persisted.DesktopCloudRun.ResultReview.Decision != string(model.ResultReviewApproved) {
 		t.Fatalf("verified direct download and local review were not persisted: %+v", persisted.DesktopCloudRun)
+	}
+}
+
+func TestNewServiceUsesExplicitDevEphemeralDirectSession(t *testing.T) {
+	t.Setenv("CASCADE_DIRECT_DEV_EPHEMERAL_TOKEN", "dev-direct-ephemeral-token-0123456789abcdef")
+	t.Setenv("CASCADE_DIRECT_DEV_CONTROL_URL", "https://127.0.0.1:18443")
+	runtime := config.AppRuntimeConfig{Profile: config.ProfileDev, Environment: "test", Mode: model.AppModeDesktop, DataRoot: t.TempDir(), ArtifactRoot: t.TempDir(), CacheRoot: t.TempDir(), LogRoot: t.TempDir(), LLMMode: config.LLMModeDeterministic}
+	service, err := NewService(runtime, store.NewMemoryStateStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.effectiveDirectTransportURL() != "https://127.0.0.1:18443" {
+		t.Fatalf("unexpected dev Direct URL: %q", service.effectiveDirectTransportURL())
+	}
+	if token, err := service.readDirectToken(); err != nil || token != "dev-direct-ephemeral-token-0123456789abcdef" {
+		t.Fatalf("unexpected dev Direct token: %q, %v", token, err)
+	}
+	if err := service.storeDirectIdentity([]byte("identity")); err != nil {
+		t.Fatal(err)
+	}
+	if identity, err := service.readDirectIdentity(); err != nil || string(identity) != "identity" {
+		t.Fatalf("unexpected dev Direct identity: %q, %v", identity, err)
+	}
+	if err := service.storeDirectLease("project", []byte("lease")); err != nil {
+		t.Fatal(err)
+	}
+	if lease, err := service.readDirectLease("project"); err != nil || string(lease) != "lease" {
+		t.Fatalf("unexpected dev Direct lease: %q, %v", lease, err)
 	}
 }
 

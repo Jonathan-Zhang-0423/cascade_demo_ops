@@ -297,8 +297,31 @@ async function applyDiscoveredGoalTransition(
   request: VerifyInteractionRequest,
   timeout: number,
 ): Promise<string> {
-  const goal = goals.find((candidate) => candidate.required && candidate.business && normalizeAction(candidate.kind) === "click");
+  const projectCreationRequested = goals.some((candidate) => {
+    if (!candidate.required || !candidate.business || normalizeAction(candidate.kind) !== "click") return false;
+    const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
+    return isNewProjectSemantic(semantic);
+  });
+  const goal = goals.find((candidate) => {
+    if (!candidate.required || !candidate.business || normalizeAction(candidate.kind) !== "click") return false;
+    if (!projectCreationRequested) return true;
+    const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
+    return isNewProjectSemantic(semantic);
+  });
   if (!goal || isURLForbiddenByScope(page.url(), request)) return "";
+
+  const creationInputVisible = projectCreationRequested && await page.locator("input, textarea").evaluateAll((elements: any[]) => elements.some((element) => {
+    const html = element as any;
+    const rect = html.getBoundingClientRect();
+    const style = (globalThis as any).getComputedStyle(html);
+    const semantic = String([
+      element.getAttribute("data-testid"), element.getAttribute("data-test"), element.getAttribute("data-cy"),
+      element.getAttribute("name"), element.getAttribute("aria-label"), element.getAttribute("placeholder"),
+    ].filter(Boolean).join(" ")).toLowerCase();
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" &&
+      /(project[-_ ]?(idea|name|prompt)|(idea|name|prompt)[-_ ]?project|项目.{0,4}(需求|名称|描述))/.test(semantic);
+  })).catch(() => false);
+  if (creationInputVisible) return "already_visible:new_project_creation";
 
   const controls = await page.locator("button, [role='button']").evaluateAll((elements: any[]) => elements.slice(0, 120).map((element) => {
     const html = element as any;
@@ -322,10 +345,16 @@ async function applyDiscoveredGoalTransition(
       if (control.testid) selector = `[data-testid="${escapeCSSString(control.testid)}"]`;
       else if (control.aria) selector = `[aria-label="${escapeCSSString(control.aria)}"]`;
       else if (control.id && /^[A-Za-z][\w-]*$/.test(control.id)) selector = `#${control.id}`;
-      const score = businessControlScore(semantic, selector, [goal], "click") + (control.testid ? 100 : control.aria ? 70 : control.id ? 50 : 0);
-      return { selector, semantic, score };
+      const requested = projectCreationRequested ? isNewProjectSemantic(semantic) : businessControlScore(semantic, selector, [goal], "click") > 0;
+      const staleEntity = projectCreationRequested &&
+        /(?:card|row|tile|list|menu)[-_ ]*(?:project|entity|item)|(?:project|entity|item)[-_ ]*(?:card|row|tile|list|menu|name)/i.test(semantic) &&
+        !isNewProjectSemantic(semantic);
+      const score = businessControlScore(semantic, selector, [goal], "click") +
+        (control.testid ? 100 : control.aria ? 70 : control.id ? 50 : 0) +
+        (/button-new-project|new-project-button|create-project-button/i.test(semantic) ? 80 : 0);
+      return { selector, semantic, requested, staleEntity, score };
     })
-    .filter((candidate: any) => candidate.selector && candidate.score > 0 && !looksLikeDestructiveControl(candidate.semantic) && !looksLikeControlPlaneSignal(candidate.semantic))
+    .filter((candidate: any) => candidate.selector && candidate.requested && !candidate.staleEntity && candidate.score > 0 && !looksLikeDestructiveControl(candidate.semantic) && !looksLikeControlPlaneSignal(candidate.semantic))
     .sort((left: any, right: any) => right.score - left.score);
   if (candidates.length === 0 || (candidates.length > 1 && candidates[0].score === candidates[1].score)) return "";
 
@@ -342,9 +371,15 @@ async function applyDiscoveredGoalInput(
   request: VerifyInteractionRequest,
   timeout: number,
 ): Promise<string> {
+  const projectCreationRequested = goals.some((candidate) => {
+    const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
+    return candidate.required && candidate.business && normalizeAction(candidate.kind) === "click" && isNewProjectSemantic(semantic);
+  });
   const goal = goals.find((candidate) => {
+    const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
     return candidate.required && candidate.business && normalizeAction(candidate.kind) === "fill" &&
       typeof candidate.input_value === "string" && candidate.input_value.trim().length > 0 && candidate.input_value.length <= 512 &&
+      (!projectCreationRequested || isProjectIdeaSemantic(semantic)) &&
       !/(password|passwd|secret|token|api key|密码|口令|密钥|令牌)/i.test(candidate.input_value);
   });
   if (!goal || isURLForbiddenByScope(page.url(), request)) return "";
@@ -481,7 +516,14 @@ async function discoverObservedResultStates(
   sourceDigest: string,
   observedAt: string,
 ): Promise<VerifiedInteractionCandidate[]> {
-  const eligibleGoals = goals.filter((candidate) => candidate.required && candidate.business && normalizeAction(candidate.kind) === "click");
+  const projectCreationRequested = goals.some((candidate) => {
+    const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
+    return candidate.required && candidate.business && normalizeAction(candidate.kind) === "click" && isNewProjectSemantic(semantic);
+  });
+  const eligibleGoals = goals.filter((candidate) => {
+    const semantic = normalizeSelectorText(`${candidate.label || ""} ${(candidate.keywords || []).join(" ")}`);
+    return candidate.required && candidate.business && normalizeAction(candidate.kind) === "click" && (!projectCreationRequested || isNewProjectSemantic(semantic));
+  });
   if (eligibleGoals.length === 0) return [];
   const states = await page.locator("dialog, [role='dialog'], [role='region'][aria-label], [data-testid*='dialog' i], [data-testid*='modal' i]").evaluateAll((elements: any[]) => elements.slice(0, 40).map((element) => {
     const html = element as any;
@@ -696,8 +738,18 @@ function selectorEvidenceID(scanID: string, candidateID: string, selector: strin
   return `ev_browser_scan_${hashText(`${scanID}|${candidateID}|${selector}`)}`;
 }
 
+// Direct API v1 uses a bare lowercase SHA-256 value. Adding an algorithm
+// prefix makes otherwise valid selector provenance fail formal intake.
 function sha256Text(value: string): string {
-  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function isNewProjectSemantic(value: string): boolean {
+  return /(新建项目|创建项目|新增项目|new project|create project)/i.test(value);
+}
+
+function isProjectIdeaSemantic(value: string): boolean {
+  return /(项目需求|项目名称|今天你想做什么|project idea|project prompt|project name|input-project-idea)/i.test(value);
 }
 
 function selectorForControl(control: any, label: string): string {

@@ -32,6 +32,9 @@ func directResultContractErrorCode(err error) string {
 }
 
 func validateDirectStructuredArtifacts(job *direct.Job, source model.ClientExecutionPackage, result model.RecordingResultPackage) error {
+	if result.Classification != "" && result.Classification != model.RecordingResultClassificationFormalAppDirect && result.Classification != model.RecordingResultClassificationFailedLoginGate {
+		return newDirectResultContractError("result_classification_invalid", "formal Direct result classification must be formal_app_direct or failed_login_gate, got %q", result.Classification)
+	}
 	manifestRef, ok := findDirectResultArtifact(result, "replay_manifest")
 	if !ok {
 		return newDirectResultContractError("result_artifact_completeness_failed", "direct result is missing replay manifest")

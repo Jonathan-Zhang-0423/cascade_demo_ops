@@ -1096,6 +1096,7 @@ func (s *Service) executeAssistantProposal(ctx context.Context, session *model.A
 		rerunInput, regenerateErr := s.userInputFromConfiguration(session.Configuration)
 		if regenerateErr == nil {
 			rerunInput.ProjectID = projectID
+			regenerateErr = s.preserveSourceBindingDecisionForRerun(ctx, projectID, &rerunInput)
 		}
 		var state *orchestrator.CascadeState
 		if regenerateErr == nil {
@@ -1132,6 +1133,38 @@ func (s *Service) executeAssistantProposal(ctx context.Context, session *model.A
 		return nil, errors.New("unsupported assistant proposal kind")
 	}
 	return nil, nil
+}
+
+func (s *Service) preserveSourceBindingDecisionForRerun(ctx context.Context, projectID string, input *orchestrator.UserInput) error {
+	if input == nil || strings.TrimSpace(projectID) == "" {
+		return nil
+	}
+	state, err := s.states.Load(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	binding := state.SourceBinding
+	if binding == nil && state.ProjectContext != nil {
+		binding = state.ProjectContext.SourceBinding
+	}
+	if binding == nil || strings.TrimSpace(binding.AssessmentHash) == "" {
+		return nil
+	}
+	switch binding.Decision {
+	case "confirm_mixed":
+		if binding.Status != model.ProductSourceBindingConfirmed || binding.EffectiveMode != model.ProductSourceModeMixed {
+			return errors.New("persisted mixed source binding decision is not confirmed")
+		}
+	case "continue_page_only":
+		if binding.EffectiveMode != model.ProductSourceModePageOnly {
+			return errors.New("persisted page-only source binding decision is inconsistent")
+		}
+	default:
+		return nil
+	}
+	input.SourceBindingDecision = binding.Decision
+	input.SourceBindingHash = binding.AssessmentHash
+	return nil
 }
 
 func assistantPackageBlockReason(build ClientExecutionPackageBuild, err error) string {

@@ -39,6 +39,9 @@ func BuildValidationRunReport(result model.RecordingResultPackage, pkg model.Cli
 		}
 	}
 	formal, origin, appGenerated, transportAuthenticated, formalExchange := packageProvenance(pkg)
+	if result.Classification == model.RecordingResultClassificationFailedLoginGate || result.Classification == model.RecordingResultClassificationFixtureWaiver || result.Classification == model.RecordingResultClassificationVisibleManualReview || result.Classification == model.RecordingResultClassificationServerPreflight {
+		formal, formalExchange = false, false
+	}
 	report := model.ValidationRunReport{
 		SchemaVersion:            model.ValidationRunReportSchemaVersion,
 		ReportID:                 "validation_run_" + safePathSegment(runID),

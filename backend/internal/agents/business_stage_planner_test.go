@@ -44,6 +44,9 @@ func TestIntentProjectNameDistinguishesNumericNamesFromDurations(t *testing.T) {
 		{intent: "登录、创建俄罗斯方块项目、等待 Agent 真正编写完代码", want: "俄罗斯方块"},
 		{intent: "新建项目入口，项目需求必须精确填写为“贪吃蛇游戏”", want: "贪吃蛇游戏"},
 		{intent: "在“今天你想做什么？”输入“贪吃蛇游戏”，然后点击构建", want: "贪吃蛇游戏"},
+		{intent: "Fill the project-idea field with the exact value: 贪吃蛇游戏. Then click Build.", want: "贪吃蛇游戏"},
+		{intent: "2. Fill the project-idea field with the exact value: 贪吃蛇游戏\n3. Click Build.", want: "贪吃蛇游戏"},
+		{intent: "点击“新建项目”并验证“今天你想做什么？”输入框出现，点击“构建”", want: ""},
 		{intent: "新建项目 启动 Agent 实际构建", want: ""},
 		{intent: "新建项目（13秒，构建模式）", want: ""},
 	}
@@ -51,6 +54,100 @@ func TestIntentProjectNameDistinguishesNumericNamesFromDurations(t *testing.T) {
 		if got := intentProjectName(test.intent); got != test.want {
 			t.Fatalf("intentProjectName(%q)=%q, want %q", test.intent, got, test.want)
 		}
+	}
+}
+
+func TestBusinessStagePlannerPreservesTwoIndependentApprovedInputs(t *testing.T) {
+	const projectName = "贪吃蛇游戏"
+	const requirement = "帮我构建一个贪吃蛇游戏，要求可以自定义界面颜色，并且可以选择三种难度模式；"
+	project := graphQualityProject()
+	project.ProductDescription = `点击“新建项目”；在“今天你想做什么？”输入“` + projectName + `”；点击“构建”；输入并提交完整需求：“` + requirement + `”`
+	project.MustShow = []string{"输入项目名称“" + projectName + "”并验证输入正确", "输入并提交完整需求：" + requirement}
+
+	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, nil, nil, graphQualityIntelligence(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]model.BusinessStage{}
+	for _, stage := range plan.Stages {
+		byID[stage.ID] = stage
+	}
+	name := byID["business_stage_project_name_input"]
+	followUp := byID["business_stage_followup_requirement_input"]
+	submit := byID["business_stage_followup_requirement_submit"]
+	if name.Action.InputValue != projectName {
+		t.Fatalf("project-name input changed: %+v", name.Action)
+	}
+	if followUp.Action.InputValue != requirement || followUp.Order <= name.Order {
+		t.Fatalf("follow-up requirement was not preserved as an independent later fill: %+v", followUp)
+	}
+	if submit.Order <= followUp.Order || submit.Kind != model.BusinessStageKindBusinessSubmit {
+		t.Fatalf("follow-up requirement submit must be a distinct ordered action: %+v", submit)
+	}
+}
+
+func TestBusinessStagePlannerBindsFollowUpRequirementControlsFromCodeSnapshots(t *testing.T) {
+	const projectName = "贪吃蛇游戏"
+	const requirement = "帮我构建一个贪吃蛇游戏，要求可以自定义界面颜色，并且可以选择三种难度模式；"
+	project := graphQualityProject()
+	project.ProductDescription = `点击“新建项目”；在“今天你想做什么？”输入“` + projectName + `”；点击“构建”；输入并提交完整需求：“` + requirement + `”`
+	evidence := model.EvidenceRef{ID: "ev_code_followup_controls", Kind: model.EvidenceKindSourceCode, Confidence: 0.82}
+	report := &model.MultimodalUnderstandingReport{CodeSnapshots: []model.CodeUnderstandingSnapshot{{
+		SourceDigestSHA256: "sha256:followup-controls",
+		CreatedAt:          time.Now().UTC(),
+		Components: []model.ComponentInsight{
+			{ID: "component_chat_input", Name: "ChatInputArea", SelectorHints: []string{"[data-testid='input-chat']"}, EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 0.84},
+			{ID: "component_chat_submit", Name: "ChatInputArea", SelectorHints: []string{"[data-testid='button-send-chat']"}, EvidenceRefs: []model.EvidenceRef{evidence}, Confidence: 0.84},
+		},
+	}}}
+
+	plan, err := NewBusinessStagePlannerAgent().PlanBusinessStages(context.Background(), project, nil, report, nil, graphQualityIntelligence(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]model.BusinessStage{}
+	for _, stage := range plan.Stages {
+		byID[stage.ID] = stage
+	}
+	tests := []struct {
+		stageID string
+		testID  string
+		action  model.GraphActionType
+	}{
+		{stageID: "business_stage_followup_requirement_input", testID: "input-chat", action: model.GraphActionFill},
+		{stageID: "business_stage_followup_requirement_submit", testID: "button-send-chat", action: model.GraphActionClick},
+	}
+	graph := model.NewDemoWorkflowGraph("graph_followup_requirement", project.ID, project.ProductURL)
+	for _, test := range tests {
+		stage := byID[test.stageID]
+		if len(stage.Targets) == 0 || stage.Targets[0].TestID != test.testID || stage.Targets[0].VerificationSource != "local_code_snapshot" {
+			t.Fatalf("stage %s did not bind source selector %s: %+v", test.stageID, test.testID, stage.Targets)
+		}
+		if !stage.Action.NonDestructive {
+			t.Fatalf("approved follow-up stage %s must retain its bounded non-destructive contract", test.stageID)
+		}
+		node := graphNodeFromBusinessStage(project, stage, project.ProductURL, "feature_followup_requirement")
+		if node.ActionSpec == nil || node.ActionSpec.Type != test.action || node.ActionSpec.Target.TestID != test.testID || node.ActionSpec.Target.Selector == "" {
+			t.Fatalf("stage %s did not compile to an executable %s action: %+v", test.stageID, test.action, node)
+		}
+		graph.Nodes = append(graph.Nodes, node)
+	}
+	steps := scriptStepsFromGraph(graph, graphQualityIntelligence())
+	if len(steps) != 2 || steps[0].Action.Type != model.GraphActionFill || steps[1].Action.Type != model.GraphActionClick || !steps[0].RuntimeAdaptive || !steps[1].RuntimeAdaptive {
+		t.Fatalf("packaging downgraded approved follow-up actions: %+v", steps)
+	}
+	if len(steps[0].Validations) == 0 || steps[0].Validations[0].Kind != "value_equals" || len(steps[1].Validations) == 0 || steps[1].Validations[0].Kind != "page_changed" {
+		t.Fatalf("follow-up input and submit must retain result validations: %+v", steps)
+	}
+	if got := byID["business_stage_followup_requirement_input"].Action.InputValue; got != requirement {
+		t.Fatalf("follow-up input value changed while binding code evidence: got %q want %q", got, requirement)
+	}
+}
+
+func TestBusinessStageExplicitRequirementPreservesNumberedInstructionBoundary(t *testing.T) {
+	project := &model.ProjectContext{ProductDescription: "2. Fill the project-idea field with the exact value: 贪吃蛇游戏\n3. Click Build."}
+	if got := intentProjectName(businessStageExplicitRequirementText(project, nil, nil)); got != "贪吃蛇游戏" {
+		t.Fatalf("numbered formal requirement leaked into project value: %q", got)
 	}
 }
 
@@ -262,6 +359,36 @@ func TestDemoIntentDerivesAtomicProjectCreationGoalsFromCompoundLoginRequirement
 	if !foundInput {
 		t.Fatalf("page verifier did not receive the bounded approved project input value: %+v", verifier)
 	}
+}
+
+func TestDemoIntentDerivesExactChineseProjectIdeaFromFormalE2ERequirement(t *testing.T) {
+	state := &ProjectUnderstandingState{Project: &model.ProjectContext{
+		ID:                 "project_formal_chinese_e2e",
+		ProductDescription: "目标页面：http://127.0.0.1:5000/app\n必须按以下顺序执行：\n1. 点击“新建项目”。\n2. 在“今天你想做什么？”输入“贪吃蛇游戏”。\n3. 点击“构建”。\n禁止复制 Token。",
+		MustShow:           []string{"新建项目入口", "贪吃蛇游戏", "构建按钮", "构建完成状态"},
+	}}
+	intent := demoIntentFromState(state)
+	goals := map[string]model.DemoIntentGoal{}
+	for _, goal := range intent.Goals {
+		goals[goal.ID] = goal
+	}
+	input, ok := goals["intent_project_requirement_input"]
+	if !ok || input.PreferredAction != "fill" || input.Label != "填写项目需求：贪吃蛇游戏" {
+		t.Fatalf("formal Chinese requirement lost its exact project idea: %+v", intent.Goals)
+	}
+	if _, ok := goals["intent_new_project_entry"]; !ok {
+		t.Fatalf("formal Chinese requirement did not derive new-project entry: %+v", intent.Goals)
+	}
+	if _, ok := goals["intent_start_agent_build"]; !ok {
+		t.Fatalf("formal Chinese requirement did not derive Build click: %+v", intent.Goals)
+	}
+	verifier := verifierGoals(&model.ProjectIntelligencePack{DemoIntent: intent})
+	for _, goal := range verifier {
+		if goal.ID == "intent_project_requirement_input" && goal.InputValue == "贪吃蛇游戏" {
+			return
+		}
+	}
+	t.Fatalf("page verifier did not receive the exact approved Chinese value: %+v", verifier)
 }
 
 func TestBusinessStagePlannerDoesNotInferProjectNameFromDerivedIntentMetadata(t *testing.T) {
@@ -568,6 +695,13 @@ func TestBusinessStageNonDestructiveClassifierRejectsGenericAndDangerousActions(
 		id: "start_agent_build", actionType: string(model.GraphActionClick), actionLabel: "启动 agent 构建",
 	}) {
 		t.Fatal("explicit project build action should be classified as non-destructive")
+	}
+	if !businessStageIsApprovedNonDestructive(stageSpec{
+		id: "followup_requirement_input", actionType: string(model.GraphActionFill), actionLabel: "填写完整构建需求",
+	}) || !businessStageIsApprovedNonDestructive(stageSpec{
+		id: "followup_requirement_submit", actionType: string(model.GraphActionClick), actionLabel: "提交完整构建需求",
+	}) {
+		t.Fatal("explicit approved follow-up fill and submit actions should be non-destructive")
 	}
 }
 

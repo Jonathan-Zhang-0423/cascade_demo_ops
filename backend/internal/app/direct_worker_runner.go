@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"cascade-demoops/backend/internal/driver"
 	"cascade-demoops/backend/internal/model"
 )
 
@@ -56,7 +57,7 @@ func (s *DirectHTTPServer) RunDirectJob(ctx context.Context, jobID string) error
 		return err
 	}
 	secretRefs := directPackageSecretRefs(&pkg)
-	var credentialResolver browserAgentCredentialResolver
+	taskSecrets := map[string]driver.BrowserAgentTaskSecret{}
 	if len(secretRefs) == 1 {
 		envelope, consumeErr := s.gateway.ConsumeCredential(jobID)
 		if consumeErr != nil {
@@ -67,21 +68,26 @@ func (s *DirectHTTPServer) RunDirectJob(ctx context.Context, jobID string) error
 			_ = s.gateway.FailJob(jobID, "credential_scope_mismatch")
 			return errors.New("consumed Direct credential does not match the approved package secret_ref")
 		}
-		broker, brokerErr := newOneTimeBrowserAgentCredentialBroker(envelope.SecretRef, envelope.Secret)
-		envelope.Secret = ""
-		if brokerErr != nil {
-			_ = s.gateway.FailJob(jobID, "credential_broker_unavailable")
-			return brokerErr
+		if strings.TrimSpace(envelope.Username) == "" || strings.TrimSpace(envelope.Secret) == "" {
+			_ = s.gateway.FailJob(jobID, "credential_invalid")
+			return errors.New("consumed Direct credential is empty")
 		}
-		credentialResolver = broker
-		defer broker.Destroy()
+		taskSecrets[envelope.SecretRef] = driver.BrowserAgentTaskSecret{
+			Username:          envelope.Username,
+			Password:          envelope.Secret,
+			ExpiresAt:         time.UnixMilli(envelope.ExpiresAtUnixMS).UTC(),
+			AllowedDomains:    append([]string(nil), envelope.AllowedDomains...),
+			AllowedOperations: append([]string(nil), envelope.AllowedOperations...),
+		}
+		envelope.Username = ""
+		envelope.Secret = ""
 	}
 	root := filepath.Join(s.service.runtime.ArtifactRoot, "direct", safePathSegment(jobID))
 	recordingDir := filepath.Join(root, "recording")
 	renderDir := filepath.Join(root, "render")
 	router := newExecutionRuntimeRouter(localLegacyPlaywrightRunner{service: s.service}, s.service.outlineRunner)
 	result, err := router.Run(ctx, executionRuntimeRequest{
-		Package: &pkg, CredentialResolver: credentialResolver, CloudJobID: jobID, RecordingOutputDir: recordingDir, RenderOutputDir: renderDir,
+		Package: &pkg, CloudJobID: jobID, RecordingOutputDir: recordingDir, RenderOutputDir: renderDir, TaskSecrets: taskSecrets,
 		ResultCreatedAt: time.Now().UTC(),
 		Progress: func(stage, message string, progress int) {
 			_ = s.gateway.UpdateJob(jobID, progress, stage)

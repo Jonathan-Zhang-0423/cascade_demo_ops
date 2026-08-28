@@ -221,7 +221,7 @@ describe("interaction verifier safe state exploration", () => {
     const projectName = result.results.find((item) => item.id === "project-name");
     expect(projectName?.status).toBe("verified");
     expect(projectName).toMatchObject({ source_kind: "page_scan", observed_role: "textbox", observed_accessible_name: "Project name" });
-    expect(projectName?.source_digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(projectName?.source_digest).toMatch(/^[a-f0-9]{64}$/);
     expect(projectName?.evidence_id).toMatch(/^ev_browser_scan_/);
     expect(projectName?.observed_accessible_name).not.toContain("project-name");
   }, 30_000);
@@ -372,7 +372,7 @@ describe("interaction verifier safe state exploration", () => {
       observed_page_role: "authentication",
       observed_form_role: "authentication",
     });
-    expect(submitEvidence?.evidence_digest_sha256).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(submitEvidence?.evidence_digest_sha256).toMatch(/^[a-f0-9]{64}$/);
   }, 30_000);
 
   it("rejects destructive transition semantics", async () => {

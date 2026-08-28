@@ -96,7 +96,7 @@ const steps = [
   {
     name: "Server render validation fixture smoke",
     command: process.execPath,
-    args: [resolve(root, "scripts", "smoke-validate-server-render.mjs")],
+    args: [resolve(root, "tests", "server-e2e", "scripts", "smoke-validate-server-render.mjs")],
     cwd: root,
     group: "node",
   },

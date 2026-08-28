@@ -203,6 +203,7 @@ func newRecordingResultPackageFromRecordResult(source *model.ClientExecutionPack
 		CloudJobID:       cloudJobID,
 		SchemaVersion:    model.RecordingResultPackageSchemaVersion,
 		Status:           model.RecordingResultStatusGenerated,
+		Classification:   classifyRecordingResult(source, local, nil),
 		ExecutionTrace:   trace,
 		StepResults:      stepResults,
 		GeneratedAssets:  artifacts,
@@ -247,6 +248,7 @@ func newRecordingResultPackageFromRecordResult(source *model.ClientExecutionPack
 	}
 	if result.FailureDiagnostic != nil || hasFailedStep(stepResults) {
 		applyFailureRecordingResult(source, &recordingResult, result.FailureDiagnostic, stepResults, artifacts, createdAt)
+		recordingResult.Classification = classifyRecordingResult(source, local, recordingResult.FailureDiagnostic)
 		return recordingResult, nil
 	}
 	var validationErr error
@@ -259,6 +261,47 @@ func newRecordingResultPackageFromRecordResult(source *model.ClientExecutionPack
 		return model.RecordingResultPackage{}, validationErr
 	}
 	return recordingResult, nil
+}
+
+func classifyRecordingResult(source *model.ClientExecutionPackage, local *LocalTestRecordingResultPackageOptions, diagnostic *model.ScriptFailureDiagnostic) model.RecordingResultClassification {
+	if diagnostic != nil && isLoginGateFailureCode(diagnostic.Error.Code) {
+		return model.RecordingResultClassificationFailedLoginGate
+	}
+	if local != nil {
+		return model.RecordingResultClassificationFixtureWaiver
+	}
+	producer := ""
+	devOnly := false
+	preflight := false
+	if source != nil {
+		if source.Metadata != nil {
+			if value, ok := source.Metadata["producer"].(string); ok {
+				producer = strings.TrimSpace(value)
+			}
+			if value, ok := source.Metadata["dev_test_only"].(bool); ok {
+				devOnly = value
+			}
+			if value, ok := source.Metadata["server_preflight"].(bool); ok {
+				preflight = value
+			}
+		}
+	}
+	if preflight || strings.Contains(strings.ToLower(producer), "preflight") {
+		return model.RecordingResultClassificationServerPreflight
+	}
+	lowerProducer := strings.ToLower(producer)
+	if strings.Contains(lowerProducer, "visible") {
+		return model.RecordingResultClassificationVisibleManualReview
+	}
+	if devOnly || strings.HasPrefix(lowerProducer, "server_") || strings.HasPrefix(lowerProducer, "server-") {
+		return model.RecordingResultClassificationFixtureWaiver
+	}
+	return model.RecordingResultClassificationFormalAppDirect
+}
+
+func isLoginGateFailureCode(code string) bool {
+	value := strings.ToLower(strings.TrimSpace(code))
+	return strings.Contains(value, "login") || strings.Contains(value, "authentication") || strings.Contains(value, "credential")
 }
 
 func applyLocalTestResultPackageDelivery(result *model.RecordingResultPackage, _ *model.ClientExecutionPackage, options LocalTestRecordingResultPackageOptions) {

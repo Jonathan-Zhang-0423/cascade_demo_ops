@@ -520,7 +520,7 @@ func TestValidateFinalMP4DeliveryRejectsUnsatisfiedRequirementReport(t *testing.
 	writeTestFile(t, reportPath, `{"status":"not_satisfied","errors":[{"code":"edit_plan_timeline_duration_mismatch"}]}`)
 	service := &fakeRecordingRenderService{probeResult: MediaProbeResult{
 		Path: path, Format: "mov,mp4", VideoCodec: "h264", DurationMS: 1000,
-		Width: 2560, Height: 1440, FPS: 30, PixelFormat: "yuv420p", FFProbeAvailable: true,
+		Width: 1920, Height: 1080, FPS: 30, PixelFormat: "yuv420p", FFProbeAvailable: true,
 	}}
 	err := validateFinalMP4Delivery(t.Context(), service, nil, RenderResult{VideoPath: path, RequirementReportPath: reportPath})
 	if err == nil || !strings.Contains(err.Error(), "final_video_quality_gate: edit_plan_timeline_duration_mismatch") {
@@ -556,10 +556,45 @@ func TestValidateBrowserAgentEvidenceMasterAcceptsCanonical1080Capture(t *testin
 	}}}
 	service := &fakeRecordingRenderService{probeResult: MediaProbeResult{
 		Path: rawPath, Format: "matroska,webm", VideoCodec: "vp8", DurationMS: 1000,
-		Width: 1920, Height: 1080, FPS: 25, PixelFormat: "yuv420p", FFProbeAvailable: true,
+		Width: 1920, Height: 1080, FPS: 30, PixelFormat: "yuv420p", FFProbeAvailable: true,
 	}}
 	if err := validateBrowserAgentEvidenceMaster(t.Context(), service, &pkg, recording); err != nil {
 		t.Fatalf("expected canonical 1080p Browser Agent capture to pass, got %v", err)
+	}
+}
+
+func TestValidateBrowserAgentEvidenceMasterAcceptsPlaywright25FPSCapture(t *testing.T) {
+	pkg := sampleClientExecutionPackageForExecutorTest(t)
+	pkg.ExecutableScriptBundle.ScriptManifest.Runtime = model.ExecutableScriptRuntimeBrowserAgentOutlineV1
+	rawPath := filepath.Join(t.TempDir(), "recording.webm")
+	writeTestFile(t, rawPath, "webm fixture")
+	recording := &model.RecordingResultPackage{GeneratedAssets: []model.ArtifactRef{{
+		ID: "raw_1", Kind: "raw_recording", URI: rawPath,
+	}}}
+	service := &fakeRecordingRenderService{probeResult: MediaProbeResult{
+		Path: rawPath, Format: "matroska,webm", VideoCodec: "vp8", DurationMS: 1000,
+		Width: 1920, Height: 1080, FPS: 25, PixelFormat: "yuv420p", FFProbeAvailable: true,
+	}}
+	if err := validateBrowserAgentEvidenceMaster(t.Context(), service, &pkg, recording); err != nil {
+		t.Fatalf("expected Playwright's stable 25fps Browser Agent capture to pass, got %v", err)
+	}
+}
+
+func TestValidateBrowserAgentEvidenceMasterRejectsUnexpectedCaptureFPS(t *testing.T) {
+	pkg := sampleClientExecutionPackageForExecutorTest(t)
+	pkg.ExecutableScriptBundle.ScriptManifest.Runtime = model.ExecutableScriptRuntimeBrowserAgentOutlineV1
+	rawPath := filepath.Join(t.TempDir(), "recording.webm")
+	writeTestFile(t, rawPath, "webm fixture")
+	recording := &model.RecordingResultPackage{GeneratedAssets: []model.ArtifactRef{{
+		ID: "raw_1", Kind: "raw_recording", URI: rawPath,
+	}}}
+	service := &fakeRecordingRenderService{probeResult: MediaProbeResult{
+		Path: rawPath, Format: "matroska,webm", VideoCodec: "vp8", DurationMS: 1000,
+		Width: 1920, Height: 1080, FPS: 20, PixelFormat: "yuv420p", FFProbeAvailable: true,
+	}}
+	err := validateBrowserAgentEvidenceMaster(t.Context(), service, &pkg, recording)
+	if err == nil || !strings.Contains(err.Error(), "recording_evidence_fps_mismatch") {
+		t.Fatalf("expected unsupported Browser Agent capture cadence to be rejected, got %v", err)
 	}
 }
 

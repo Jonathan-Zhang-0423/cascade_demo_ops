@@ -86,7 +86,9 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 	// normalized intent graph because that graph also contains action kinds,
 	// selector aliases, and other generated metadata that may follow a phrase
 	// such as "new project".
-	projectName := intentProjectName(businessStageExplicitRequirementText(project, brief, report))
+	explicitRequirementText := businessStageExplicitRequirementText(project, brief, report)
+	projectName := intentProjectName(explicitRequirementText)
+	followUpRequirement := intentFollowUpRequirement(explicitRequirementText)
 	if projectName == "" && workflowHints != nil && workflowHints.RequiresFreshEntity {
 		projectName = strings.TrimSpace(workflowHints.EntityName)
 	}
@@ -279,6 +281,42 @@ func (a *BusinessStagePlannerAgent) PlanBusinessStages(
 				})
 			}
 		}
+	}
+
+	if followUpRequirement != "" && !strings.EqualFold(followUpRequirement, projectName) {
+		builder.addStage(stageSpec{
+			id:            "followup_requirement_input",
+			kind:          model.BusinessStageKindBusinessInput,
+			title:         "补充完整构建需求",
+			objective:     "在项目页的后续用户输入框填写用户批准的完整构建需求。",
+			actionType:    string(model.GraphActionFill),
+			actionLabel:   "填写完整构建需求",
+			inputSemantic: "followup_build_requirement",
+			inputValue:    followUpRequirement,
+			successState:  "后续用户输入框已完整填写批准的构建需求。",
+			routeState:    model.BusinessRouteStateProjectDetail,
+			entryRoute:    firstNonEmpty(routeHints.projectDetail, routeHints.buildRunning),
+			expectedRoute: firstNonEmpty(routeHints.projectDetail, routeHints.buildRunning),
+			durationMS:    durationMSForIntentKeywords(intentText, "完整需求", "补充需求", "后续用户输入框", "follow-up requirement"),
+			keywords:      []string{"input-chat", "chat input", "用户输入框", "后续输入框", "完整需求", "补充需求", followUpRequirement},
+			capture:       []string{"后续用户输入框", "已填写的完整构建需求"},
+		})
+		builder.addStage(stageSpec{
+			id:            "followup_requirement_submit",
+			kind:          model.BusinessStageKindBusinessSubmit,
+			title:         "提交完整构建需求",
+			objective:     "提交刚刚填写的完整构建需求，并验证真实构建过程继续运行。",
+			actionType:    string(model.GraphActionClick),
+			actionLabel:   "提交完整构建需求",
+			inputSemantic: "followup_build_requirement_submit",
+			successState:  "完整构建需求已提交，页面出现构建进度、日志或项目状态。",
+			routeState:    model.BusinessRouteStateBuildRunning,
+			entryRoute:    firstNonEmpty(routeHints.projectDetail, routeHints.buildRunning),
+			expectedRoute: firstNonEmpty(routeHints.buildRunning, routeHints.projectDetail),
+			durationMS:    durationMSForIntentKeywords(intentText, "提交完整需求", "提交需求", "发送需求", "submit requirement"),
+			keywords:      []string{"button-send-chat", "send chat", "提交需求", "发送需求", "send", "submit"},
+			capture:       []string{"提交需求按钮", "构建继续运行状态"},
+		})
 	}
 
 	waitMS := requiredObservationDurationMS(intentText)
@@ -857,6 +895,8 @@ func businessStageIsApprovedNonDestructive(spec stageSpec) bool {
 		"continue_prepared_execution_followup": model.GraphActionClick,
 		"product_repair_input":                 model.GraphActionFill,
 		"submit_product_repair":                model.GraphActionClick,
+		"followup_requirement_input":           model.GraphActionFill,
+		"followup_requirement_submit":          model.GraphActionClick,
 	}
 	want, ok := allowedAction[spec.id]
 	if !ok || model.GraphActionType(spec.actionType) != want {
@@ -942,22 +982,36 @@ func (s businessTargetSource) targetsForStage(spec stageSpec) []model.BusinessTa
 }
 
 func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.BusinessTargetCandidate {
-	if spec.kind != model.BusinessStageKindFinalObserve {
-		return nil
+	preferredTestID := ""
+	switch spec.id {
+	case "followup_requirement_input":
+		preferredTestID = "input-chat"
+	case "followup_requirement_submit":
+		preferredTestID = "button-send-chat"
+	default:
+		if spec.kind != model.BusinessStageKindFinalObserve {
+			return nil
+		}
 	}
 	if s.report == nil || len(s.report.CodeSnapshots) == 0 {
 		return nil
 	}
 	out := []model.BusinessTargetCandidate{}
+	fallback := []model.BusinessTargetCandidate{}
 	for _, snapshot := range s.report.CodeSnapshots {
 		for _, component := range snapshot.Components {
 			for _, hint := range component.SelectorHints {
 				selector := strings.TrimSpace(hint)
-				if selector == "" || !containsAnyNormalized(strings.Join([]string{component.Name, selector}, " "), spec.keywords...) {
+				semantic := strings.Join([]string{component.Name, selector}, " ")
+				exactPreferred := preferredTestID != "" && testIDFromSelector(selector) == preferredTestID
+				if selector == "" || (!exactPreferred && !businessFinalObserveSourceTargetMatches(spec, semantic)) {
 					continue
 				}
+				if exactPreferred {
+					selector = "[data-testid='" + preferredTestID + "']"
+				}
 				label := firstNonEmpty(component.Name, spec.actionLabel)
-				out = append(out, model.BusinessTargetCandidate{
+				candidate := model.BusinessTargetCandidate{
 					ID:                 "target_code_" + shortHash(spec.id+component.ID+selector),
 					Label:              label,
 					Kind:               spec.actionType,
@@ -972,17 +1026,26 @@ func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.B
 					VerificationSource: "local_code_snapshot",
 					EvidenceRefs:       component.EvidenceRefs,
 					Alternatives:       selectorProvenanceCandidates(selector, spec.actionType, label, "source_scan", snapshot.SourceDigestSHA256, "", snapshot.CreatedAt, component.EvidenceRefs, component.Confidence),
-				})
+				}
+				if exactPreferred || preferredTestID == "" {
+					out = append(out, candidate)
+				} else {
+					fallback = append(fallback, candidate)
+				}
 				break
 			}
 		}
 		for _, insight := range snapshot.Selectors {
 			selector := strings.TrimSpace(insight.Value)
-			if selector == "" || !containsAnyNormalized(selector, spec.keywords...) {
+			exactPreferred := preferredTestID != "" && testIDFromSelector(selector) == preferredTestID
+			if selector == "" || (!exactPreferred && !businessFinalObserveSourceTargetMatches(spec, selector)) {
 				continue
 			}
+			if exactPreferred {
+				selector = "[data-testid='" + preferredTestID + "']"
+			}
 			label := firstNonEmpty(spec.actionLabel, labelFromSelector(selector))
-			out = append(out, model.BusinessTargetCandidate{
+			candidate := model.BusinessTargetCandidate{
 				ID:                 "target_code_selector_" + shortHash(spec.id+insight.FilePathHashSHA256+selector),
 				Label:              label,
 				Kind:               spec.actionType,
@@ -996,10 +1059,30 @@ func (s businessTargetSource) targetsFromCodeSnapshots(spec stageSpec) []model.B
 				VerificationSource: "local_code_snapshot",
 				EvidenceRefs:       insight.EvidenceRefs,
 				Alternatives:       selectorProvenanceCandidates(selector, spec.actionType, label, "source_scan", snapshot.SourceDigestSHA256, "", snapshot.CreatedAt, insight.EvidenceRefs, insight.Confidence),
-			})
+			}
+			if exactPreferred || preferredTestID == "" {
+				out = append(out, candidate)
+			} else {
+				fallback = append(fallback, candidate)
+			}
 		}
 	}
-	return out
+	return append(out, fallback...)
+}
+
+func businessFinalObserveSourceTargetMatches(spec stageSpec, semantic string) bool {
+	if spec.kind != model.BusinessStageKindFinalObserve {
+		return false
+	}
+	if containsAnyNormalized(semantic, spec.keywords...) {
+		return true
+	}
+	switch spec.id {
+	case "interactive_surface_observe", "interactive_surface_change":
+		return containsAnyNormalized(semantic, "preview", "interactive", "iframe", "canvas", "playable", "game", "预览", "交互", "试玩")
+	default:
+		return containsAnyNormalized(semantic, "result", "complete", "completed", "output", "preview", "成品", "完成", "结果")
+	}
 }
 
 func (s businessTargetSource) resultTargetsForStage(spec stageSpec) []model.BusinessTargetCandidate {
@@ -1225,6 +1308,10 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 		return containsAnyNormalized(labelText+" "+selectorText, "new project", "create project", "create new project", "新建项目", "创建项目", "创建新项目", "新增项目")
 	case "project_name_input":
 		return containsAnyNormalized(text, "project name", "project-name", "project idea", "project-idea", "project prompt", "project-prompt", "项目名称", "项目名", "项目需求", "构建需求", "需求描述", "description", "describe", "idea", "prompt", spec.inputValue)
+	case "followup_requirement_input":
+		return containsAnyNormalized(text, "input-chat", "chat input", "chat-input", "用户输入框", "后续输入框", "补充需求", "完整需求", spec.inputValue)
+	case "followup_requirement_submit":
+		return containsAnyNormalized(text, "button-send-chat", "send chat", "send-chat", "提交需求", "发送需求")
 	case "select_build_mode":
 		return containsAnyNormalized(text, "build mode", "build-mode", "builder mode", "mode plan", "mode-plan", "plan mode", "plan-mode", "构建模式", "规划模式", "计划模式")
 	case "start_agent_build":
@@ -1258,6 +1345,9 @@ func businessActionMatchesStage(spec stageSpec, label string, kind string, selec
 func businessStageMatchesTraceKind(spec stageSpec, trace model.FeatureGoalTrace) bool {
 	switch spec.kind {
 	case model.BusinessStageKindBusinessInput:
+		if spec.id == "followup_requirement_input" {
+			return containsAnyNormalized(trace.IntentLabel, spec.inputValue, "完整需求", "补充需求", "后续用户输入框")
+		}
 		return containsAnyNormalized(trace.IntentLabel, spec.inputValue, "项目名称", "project name")
 	case model.BusinessStageKindModeSelection:
 		return containsAnyNormalized(trace.IntentLabel, "构建模式", "build mode")
@@ -1536,7 +1626,35 @@ func businessStageExplicitRequirementText(project *model.ProjectContext, brief *
 	if report != nil && report.RequirementBrief != nil {
 		parts = append(parts, report.RequirementBrief.Scenario, report.RequirementBrief.Objective)
 	}
-	return normalizeIntentText(strings.Join(parts, " "))
+	// This text is used only to extract user-supplied literal values. Preserve
+	// line boundaries so numbered formal instructions cannot be concatenated
+	// into the value of the preceding fill instruction.
+	return strings.Join(parts, "\n")
+}
+
+var followUpRequirementPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?:输入并提交|填写并提交|输入|填写|提交)(?:后续|补充)?(?:的)?(?:完整)?(?:构建)?需求\s*[：:]\s*[“"']([^”"'\n]{1,1000})[”"']`),
+	regexp.MustCompile(`(?:再|随后|然后)\s*(?:输入并)?提交\s*[“"']([^”"'\n]{1,1000})[”"']`),
+	regexp.MustCompile(`(?:输入并提交|填写并提交)(?:后续|补充)?(?:的)?(?:完整)?(?:构建)?需求\s*[：:]\s*([^\n]{1,1000})`),
+}
+
+func intentFollowUpRequirement(text string) string {
+	text = strings.TrimSpace(text)
+	for _, pattern := range followUpRequirementPatterns {
+		for _, match := range pattern.FindAllStringSubmatch(text, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			candidate := strings.Trim(strings.TrimSpace(match[1]), `"'“”‘’`)
+			if candidate == "" || len([]rune(candidate)) > 1000 || containsAnyNormalized(candidate,
+				"password", "passwd", "secret", "token", "api key", "cookie", "密码", "口令", "密钥", "令牌",
+			) {
+				continue
+			}
+			return candidate
+		}
+	}
+	return ""
 }
 
 func intentIsObservationOnly(intentText string) bool {

@@ -1069,6 +1069,23 @@ func TestCodeReaderPrioritizesBuildCompletionAndPlayableResultQuestions(t *testi
 	}
 }
 
+func TestCodeReaderPrioritizesFollowUpRequirementControls(t *testing.T) {
+	project := &model.ProjectContext{
+		ID:                 "project_followup_requirement_evidence",
+		ProductDescription: "点击构建后，输入并提交完整需求：帮我构建一个贪吃蛇游戏，要求可以自定义界面颜色。",
+	}
+	budget := model.CodeReadBudget{DrilldownRounds: 2}
+	questions := buildCodeInvestigationQuestions(project, nil, budget)
+	if len(questions) == 0 || questions[0].ID != "question_followup_requirement" ||
+		!stringSliceContains(questions[0].QueryTerms, "input-chat") || !stringSliceContains(questions[0].QueryTerms, "button-send-chat") {
+		t.Fatalf("follow-up requirement controls were not prioritized into the bounded source scan: %+v", questions)
+	}
+	queries := requirementCriticalInvestigationQueries(buildCodeInvestigationQueries(project, nil, budget, questions))
+	if len(queries) == 0 || queries[0].questionID != "question_followup_requirement" {
+		t.Fatalf("model planning could starve follow-up requirement evidence: %+v", queries)
+	}
+}
+
 func TestCodeSearchFindsEveryExactResultAnchorWithinBoundedScan(t *testing.T) {
 	root := t.TempDir()
 	candidates := make([]codeCandidateFile, 0, 132)

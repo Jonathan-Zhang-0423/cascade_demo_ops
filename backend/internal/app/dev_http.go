@@ -942,6 +942,11 @@ func (s *DevHTTPServer) handleProjectRoute(w http.ResponseWriter, r *http.Reques
 				if credentialErr != nil {
 					state, err = nil, credentialErr
 				} else {
+					// Preserve the opaque reference in the App-authored input.  The
+					// resolved values are only transient scan material; the generated
+					// package, its login actions, and its credential grant must all
+					// identify the same App-approved reference.
+					input.DemoCredentialRef = strings.TrimSpace(request.CredentialRef)
 					input.DemoUsername = credential.Username
 					input.DemoPassword = credential.Password
 					state, err = s.service.GenerateExecutionPackage(ctx, input)
@@ -1376,13 +1381,26 @@ func (s *DevHTTPServer) readLocalDemoCredential(name string) (credentialstore.De
 		return ephemeral, nil
 	}
 	credential, err := s.readDemoCredential(name)
-	if err != nil {
-		return credentialstore.DemoCredential{}, errors.New("demo credential_ref is unavailable")
+	if err == nil {
+		if strings.TrimSpace(credential.Username) == "" || credential.Password == "" {
+			return credentialstore.DemoCredential{}, errors.New("demo credential_ref is empty")
+		}
+		return credential, nil
 	}
-	if strings.TrimSpace(credential.Username) == "" || credential.Password == "" {
-		return credentialstore.DemoCredential{}, errors.New("demo credential_ref is empty")
+	// A non-interactive dev bridge may not have access to the interactive
+	// Windows Credential Manager session. DEMO_USER/DEMO_PASS are explicit
+	// local-test inputs loaded from the ignored .env, so use them only as a
+	// last-resort dev fallback after the requested opaque ref cannot be read.
+	// They are never added to an App package, persisted by this server, or
+	// enabled for desktop/production runtimes.
+	if s.service != nil && s.service.runtime.Profile == config.ProfileDev {
+		username := strings.TrimSpace(os.Getenv("DEMO_USER"))
+		password := os.Getenv("DEMO_PASS")
+		if username != "" && password != "" {
+			return credentialstore.DemoCredential{Username: username, Password: password}, nil
+		}
 	}
-	return credential, nil
+	return credentialstore.DemoCredential{}, errors.New("demo credential_ref is unavailable")
 }
 
 func devDemoCredentialName(ref string) (string, error) {

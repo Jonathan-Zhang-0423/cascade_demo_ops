@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const PackageConfidenceAlgorithmVersion = "demoops.package_confidence.v3"
+const PackageConfidenceAlgorithmVersion = "demoops.package_confidence.v4"
 
 type PackageReadiness string
 
@@ -241,6 +241,15 @@ func requirementAppliesToClientBrowserExecution(requirement GraphRequirement) bo
 	return !containsAnyPackageRequirementSignal(text,
 		"导演", "director", "seedance", "minimax h3", "h3 模型", "h3模型",
 		"ffmpeg", "视频模型", "成片", "后期", "剪辑合成", "final film", "final mp4",
+		// Narration, storage transit, subtitle, and final-delivery requirements
+		// are enforced by the media/final-film pipeline. They deliberately do
+		// not need a DOM stage in the browser execution package. Keeping them in
+		// browser requirement coverage creates an impossible gate: TTS/TOS and
+		// mux validation have no product-page node to bind to.
+		"tts", "text to speech", "text-to-speech", "tos 实例", "tos存储", "tos 存储",
+		"中文配音", "配音音轨", "中文音轨", "旁白音轨", "字幕与配音", "字幕、配音",
+		"最终视频", "最终成片", "音视频合成", "audio mux", "video mux",
+		"narration", "voiceover", "subtitle", "caption track", "audio track",
 	)
 }
 

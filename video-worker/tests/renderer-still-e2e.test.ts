@@ -499,6 +499,52 @@ describe("static screenshot compositor e2e", () => {
     }
   }, 30_000);
 
+  renderWithFFmpeg("keeps a still-only composition within the declared edit-plan duration tolerance", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "cascade-still-duration-contract-"));
+    try {
+      const recordingPath = path.join(root, "recording.mp4");
+      const firstStillPath = path.join(root, "first.png");
+      const secondStillPath = path.join(root, "second.png");
+      runFFmpeg(["-y", "-f", "lavfi", "-i", "color=c=navy:s=320x180:r=30", "-t", "1", "-c:v", "mpeg4", recordingPath]);
+      generateScreenshot(firstStillPath);
+      generateScreenshot(secondStillPath);
+
+      const evidenceCatalog = catalog(recordingPath, firstStillPath);
+      evidenceCatalog.artifacts[1]!.id = "first_still";
+      evidenceCatalog.artifacts.push({
+        id: "second_still",
+        kind: "step_screenshot",
+        uri: pathToFileURL(secondStillPath).href,
+        local_path: secondStillPath,
+        mime_type: "image/png",
+        asset_role: "presentation_reference",
+        include_in_demo: true,
+        metadata: { presentation_only: true },
+      });
+      const stillOnlyPlan: DemoEditPlan = {
+        ...plan(),
+        target_duration_ms: 8_000,
+        shots: [
+          { id: "first_still", source_artifact_id: "first_still", presentation_kind: "still", output_duration_ms: 4_000, purpose: "First approved still" },
+          { id: "second_still", source_artifact_id: "second_still", presentation_kind: "still", output_duration_ms: 4_000, purpose: "Second approved still" },
+        ],
+      };
+
+      const result = await render({
+        output_dir: path.join(root, "render"),
+        asset_timeline_catalog: evidenceCatalog,
+        edit_plan: stillOnlyPlan,
+        render_profile: { mode: "final", format: "mp4", width: 320, height: 180, fps: 30, preset: "ultrafast" },
+      });
+      const durationSec = result.media_normalization_report?.output?.duration_sec;
+      expect(durationSec).toBeDefined();
+      expect(Math.abs((durationSec as number) - 8)).toBeLessThanOrEqual(0.4);
+      expect(result.requirement_satisfaction_report?.status).toBe("satisfied");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   renderWithFFmpeg("skips target annotations that have no Browser Agent geometry evidence", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "cascade-shape-render-"));
     try {

@@ -1290,7 +1290,7 @@ func (s *ProjectInvestigationToolSuite) planCodeInvestigationQueries(ctx context
 
 func requirementCriticalInvestigationQueries(queries []codeInvestigationQuery) []codeInvestigationQuery {
 	out := []codeInvestigationQuery{}
-	for _, wanted := range []string{"question_result_anchors", "question_build_completion", "question_interactive_result"} {
+	for _, wanted := range []string{"question_followup_requirement", "question_result_anchors", "question_build_completion", "question_interactive_result"} {
 		for _, query := range queries {
 			if query.questionID == wanted {
 				out = append(out, query)
@@ -1412,6 +1412,15 @@ func buildCodeInvestigationQuestions(project *model.ProjectContext, brief *model
 			QueryTerms:       terms,
 			Status:           "open",
 		})
+	}
+	if requirement := intentFollowUpRequirement(strings.Join(codeIntentTextParts(project, brief), "\n")); requirement != "" {
+		add(
+			"question_followup_requirement",
+			"项目页补充构建需求",
+			"项目创建后用于填写并提交完整补充需求的输入框、发送按钮和项目详情路由分别由哪些组件与稳定 selector 实现？",
+			[]string{"input-chat", "button-send-chat", "ChatInputArea", "chat-panel", "project/:id", "补充需求", "完整需求"},
+			[]string{"route", "component_or_selector", "style_or_state"},
+		)
 	}
 	resultAnchorTerms := []string{}
 	if wantsBuildCompletion(intentText) {

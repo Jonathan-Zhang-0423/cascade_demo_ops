@@ -28,8 +28,11 @@ Documentation:
 
 - [Modular workflow architecture package](./docs/architecture/modular-workflow-refactor-v1.md)
 - [Universal execution port protocol v1](./docs/protocols/universal-execution-port-v1.md)
+- [Engineering and Agent Design Principles](./docs/engineering-principles.md)
 - [Server-side v2 authoritative architecture](./docs/server-browser-agent-execution-editor-architecture-v2.md)
 - [Documentation index and v1 migration status](./docs/README.md)
 - [Local Demo Editor MVP](./docs/local-demo-editor-mvp.md)
+- [Enterprise film pipeline v2 development plan](./docs/enterprise-film-development-plan-v2.md)
+- [Enterprise film pipeline v2 implementation record](./docs/enterprise-film-implementation-v2.md)
 
 Legacy AIGC capabilities may only return through adapter-based integration; the old architecture is not part of the Server-side v2 core. See [Legacy AIGC Integration Plan](./docs/legacy-aigc-integration-plan.md).

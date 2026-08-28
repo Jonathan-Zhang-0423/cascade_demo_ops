@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 function usage() {
-  console.error("usage: node scripts/audit-app-browser-agent-package.mjs <package.json> [expected-input]");
+  console.error("TEST ONLY: usage: node tests/server-e2e/scripts/audit-app-browser-agent-package.mjs <package.json> [expected-input]");
   process.exit(64);
 }
 

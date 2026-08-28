@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { browserObservationRefreshEnabled } from "../src/browser-agent-runtime.js";
 
-import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, booleanConfigurationAssertion, booleanControlState, browserDeterministicSurfaceProofEligible, browserExplicitFailureAdmitsTerminal, browserRecordingSize, browserVisibleTextShowsExplicitBusinessFailure, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleControlSignalsStop, businessLifecycleSnapshotBusy, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactionStateSimilarity, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairInputSemantic, runtimeProductRepairTargetScore, runtimeStateVariantControlSemantic, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, stageHasAuthenticationProvenance, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, visibleApprovedBooleanConfigurationLabel, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, authenticationCandidates, booleanConfigurationAssertion, booleanControlState, browserDeterministicSurfaceProofEligible, browserExplicitFailureAdmitsTerminal, browserRecordingSize, browserVisibleTextShowsExplicitBusinessFailure, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleControlSignalsStop, businessLifecycleSnapshotBusy, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactionStateSimilarity, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, loginGateFailureCode, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairInputSemantic, runtimeProductRepairTargetScore, runtimeStateVariantControlSemantic, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, stageHasAuthenticationProvenance, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, visibleApprovedBooleanConfigurationLabel, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -242,7 +242,6 @@ describe("closed-loop narrative chapter coverage", () => {
 		expect(narrativeChapterForStage({ ...base, interactions: [{ kind: "inspect" }] })).toBe("build_wait");
 	});
 });
-
 describe("browser agent target resolution feedback", () => {
 	it("requires the weighted threshold and a clear candidate margin", () => {
 		const strong = adaptiveTargetCandidateScore({ role_state: 1, semantic: 1, container_context: 1, uniqueness: 1, transition_feasibility: 1 });
@@ -423,6 +422,21 @@ describe("browser agent credential broker boundary", () => {
 		expect(approvedKeyboardKeys({ keys: "Control+L" })).toEqual([]);
 		expect(approvedKeyboardKeys({ keys: ["ArrowLeft", "Delete"] })).toEqual([]);
 	});
+});
+
+describe("formal login gate evidence", () => {
+  it("keeps App evidence candidates and metadata available without exposing selector values in diagnostics", () => {
+    const candidates = authenticationCandidates({
+      components: [{ selector_alternatives: [
+        { kind: "testid", value: "login-email", evidence_id: "ev_email", observed_page_role: "authentication", observed_form_role: "authentication" },
+        { kind: "testid", value: "login-submit", evidence_id: "ev_submit", observed_page_role: "authentication", observed_form_role: "authentication" },
+      ] }],
+      evidence_bound_selector_alternatives: [{ kind: "css", value: "[data-testid='login-password']", evidence_id: "ev_password" }],
+    } as any);
+    expect(candidates.map((candidate) => candidate.evidence_id)).toEqual(["ev_email", "ev_submit", "ev_password"]);
+    expect(loginGateFailureCode(new Error("login_success_validation_missing: password=secret-value"))).toBe("login_success_validation_missing");
+    expect(loginGateFailureCode(new Error("password=secret-value"))).toBe("login_gate_failed");
+  });
 });
 
 describe("browser agent navigation policy", () => {

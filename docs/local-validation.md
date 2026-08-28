@@ -101,7 +101,7 @@ After a Linux/ffmpeg server replays a real package with `cmd/devsmoke`, validate
 the produced render directory directly:
 
 ```bash
-node scripts/validate-server-render.mjs \
+node tests/server-e2e/scripts/validate-server-render.mjs \
   .cascade-dev/artifacts/exchange/<exchange_package_id>/render
 ```
 
@@ -120,7 +120,7 @@ The strict server check expects:
 Optional overrides:
 
 ```bash
-node scripts/validate-server-render.mjs <render-dir> \
+node tests/server-e2e/scripts/validate-server-render.mjs <render-dir> \
   --expect-resolution 1920x1080 \
   --expect-fps 30 \
   --require-operation caption \

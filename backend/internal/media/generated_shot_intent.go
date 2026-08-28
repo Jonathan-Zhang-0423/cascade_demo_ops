@@ -27,15 +27,16 @@ const (
 // artifact references must be resolved and revalidated by Server before an
 // intent reaches a provider-specific compiler.
 type GeneratedShotIntent struct {
-	IntentID      string                     `json:"intent_id"`
-	Purpose       string                     `json:"purpose"`
-	Prompt        string                     `json:"prompt"`
-	Required      bool                       `json:"required"`
-	DurationSec   int                        `json:"duration_sec"`
-	AspectRatio   string                     `json:"aspect_ratio"`
-	References    []GeneratedShotReference   `json:"references,omitempty"`
-	ContentPolicy GeneratedShotContentPolicy `json:"content_policy"`
-	FailurePolicy string                     `json:"failure_policy"`
+	IntentID         string                     `json:"intent_id"`
+	Purpose          string                     `json:"purpose"`
+	Prompt           string                     `json:"prompt"`
+	Required         bool                       `json:"required"`
+	DurationSec      int                        `json:"duration_sec"`
+	AspectRatio      string                     `json:"aspect_ratio"`
+	References       []GeneratedShotReference   `json:"references,omitempty"`
+	ContentPolicy    GeneratedShotContentPolicy `json:"content_policy"`
+	FailurePolicy    string                     `json:"failure_policy"`
+	AllowedProviders []string                   `json:"allowed_providers,omitempty"`
 }
 
 type GeneratedShotReference struct {
@@ -92,6 +93,19 @@ func ValidateGeneratedShotIntent(intent GeneratedShotIntent) error {
 	}
 	if intent.FailurePolicy != GeneratedShotFailureContinue {
 		return fail("failure_policy", "generated_shot_failure_policy_unsafe", "failure_policy must continue without the generated candidate")
+	}
+	if len(intent.AllowedProviders) > 0 {
+		seenProviders := map[string]struct{}{}
+		for _, provider := range intent.AllowedProviders {
+			provider = strings.TrimSpace(provider)
+			if !isSupportedGeneratedShotProvider(provider) {
+				return fail("allowed_providers", "generated_shot_provider_unsupported", "allowed_providers contains an unsupported provider")
+			}
+			if _, exists := seenProviders[provider]; exists {
+				return fail("allowed_providers", "generated_shot_provider_duplicate", "allowed_providers contains a duplicate provider")
+			}
+			seenProviders[provider] = struct{}{}
+		}
 	}
 	if len(intent.References) > 4 {
 		return fail("references", "generated_shot_reference_limit_exceeded", "the current Server common profile accepts at most four references")

@@ -162,6 +162,21 @@ func TestNewRecordingResultPackageFromRecordResultIsRenderable(t *testing.T) {
 	}
 }
 
+func TestRecordingResultClassificationSeparatesFormalAndTestRuns(t *testing.T) {
+	formal := sampleClientExecutionPackageForExecutorTest(t)
+	if formal.Metadata == nil {
+		formal.Metadata = map[string]any{}
+	}
+	formal.Metadata["producer"] = "app_desktop_formal"
+	result, err := NewRecordingResultPackageFromRecordResult(&formal, RecordResult{RecordingPath: "artifacts/recording/formal.webm", ScreenshotPaths: []string{"artifacts/recording/formal.png"}, TracePath: "artifacts/recording/formal.zip", WorkerID: "worker_formal", StartedAt: time.Now().UTC(), CompletedAt: time.Now().UTC()}, "job_formal", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Classification != model.RecordingResultClassificationFormalAppDirect {
+		t.Fatalf("formal package classification = %q", result.Classification)
+	}
+}
+
 func TestNewRecordingResultPackageFromRecordResultDedupesWorkerGeneratedAssets(t *testing.T) {
 	pkg := sampleClientExecutionPackageForExecutorTest(t)
 	completedAt := time.Date(2026, 7, 9, 19, 30, 0, 0, time.UTC)
