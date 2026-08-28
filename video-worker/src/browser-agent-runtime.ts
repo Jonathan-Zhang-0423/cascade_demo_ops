@@ -1383,6 +1383,22 @@ async function executeInteraction(
       await session.page.waitForTimeout(400);
       observed.add(await interactiveStateDigest(session.page));
     }
+	if (observed.size < 2) {
+		// Runtime products often expose one generic "Demo" control that cycles
+		// through several observable states, or a small set of scenario controls
+		// whose localized names were not knowable when the package was compiled.
+		// Discover only those non-destructive semantic controls inside the product
+		// surface and let actual state transitions provide the proof.
+		for (let attempt = 0; attempt < 3 && observed.size < 2; attempt += 1) {
+			const candidates = await runtimeStateVariantTargets(session.page, stage);
+			if (candidates.length === 0) break;
+			const candidate = candidates[Math.min(attempt, candidates.length - 1)]!.locator;
+			await candidate.click({ timeout });
+			await session.page.waitForTimeout(400);
+			const digest = await interactiveStateDigest(session.page);
+			if (digest) observed.add(digest);
+		}
+	}
     const variantProof = { stateVariants: [...observed].filter(Boolean).length };
     session.interactionProofByNodeID.set(stage.node_id, variantProof);
     const variantSession = stringParameter(interaction.parameters, "proof_session_id");
@@ -1583,6 +1599,11 @@ export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, i
 		const resolved = await runtimeProductRepairInputTarget(page, stage, attempts);
 		if (resolved) return resolved;
 	}
+	if (String(interaction.parameters?.action_recipe || "") === "activate_state_variants") {
+		seen.add("runtime_state_variant_controls");
+		const resolved = await runtimeStateVariantTarget(page, stage, attempts);
+		if (resolved) return resolved;
+	}
   if (structuralInput) {
     seen.add(structuralInput.strategy);
     const resolved = await resolveUniqueVisibleStructuralInputTarget(
@@ -1620,6 +1641,62 @@ export async function resolveTarget(page: any, stage: BrowserAgentWorkerStage, i
 		seen.add("runtime_execution_continuation");
 	}
   throw new Error(`browser_agent_target_not_resolved: ${stage.node_id}; strategies=${[...seen].join(",") || "none"}`);
+}
+
+export function runtimeStateVariantControlSemantic(value: string): boolean {
+	const normalized = normalizeElementName(value);
+	if (!normalized || structuralAbortActionName(normalized)) return false;
+	if (/(?:^|\s)(?:delete|remove|destroy|purge)(?:\s|$)/i.test(normalized) || ["删除", "移除", "销毁", "清空"].some((token) => normalized.includes(token))) return false;
+	return ["演示", "场景", "状态", "示例", "模拟", "预览"].some((token) => normalized.includes(token))
+		|| /(?:^|\s)(?:demo|demonstrate|scenario|state|example|simulate|simulation|preview)(?:\s|$)/i.test(normalized);
+}
+
+async function runtimeStateVariantTargets(
+	page: any,
+	stage: BrowserAgentWorkerStage,
+): Promise<Array<{ locator: any; scopeIndex: number }>> {
+	if (stage.target_contract.destructive) return [];
+	const roles = new Set((stage.target_contract.allowed_roles || []).map((value) => normalizeElementName(value)));
+	if (!roles.has("button")) return [];
+	const candidates: Array<{ locator: any; scopeIndex: number }> = [];
+	const scopes = runtimeTargetScopes(page);
+	for (let scopeIndex = 0; scopeIndex < scopes.length; scopeIndex += 1) {
+		const buttons = scopes[scopeIndex]?.getByRole?.("button");
+		if (!buttons) continue;
+		const count = Math.min(await withTimeout(buttons.count(), targetProbeTimeoutMS, 0), 32);
+		for (let index = 0; index < count; index += 1) {
+			const locator = buttons.nth(index);
+			if (!await withTimeout(locator.isVisible({ timeout: 750 }), targetProbeTimeoutMS, false)) continue;
+			if (await withTimeout(locator.isDisabled(), targetProbeTimeoutMS, true)) continue;
+			const semantics = await withTimeout(compactElementSemantics(locator), targetProbeTimeoutMS, { role: "", name: "" });
+			if (semantics.role !== "button" || forbiddenName(semantics.name, stage.target_contract.forbidden_names || [])) continue;
+			if (!runtimeStateVariantControlSemantic(semantics.name)) continue;
+			candidates.push({ locator, scopeIndex });
+		}
+	}
+	// Product controls inside an embedded runtime surface are stronger than
+	// similarly named builder chrome. Only fall back to the host page when the
+	// product surface itself exposes no semantic state/demo control.
+	const framed = candidates.filter((candidate) => candidate.scopeIndex > 0);
+	return framed.length > 0 ? framed : candidates;
+}
+
+async function runtimeStateVariantTarget(
+	page: any,
+	stage: BrowserAgentWorkerStage,
+	attempts: BrowserTargetResolutionAttempt[] = [],
+): Promise<ResolvedTarget | undefined> {
+	const candidates = await runtimeStateVariantTargets(page, stage);
+	if (candidates.length === 0) {
+		attempts.push(targetResolutionAttempt("runtime_state_variant_controls", 0, false, false, false, "no_candidates"));
+		return undefined;
+	}
+	// This recipe intentionally resolves a bounded set: one control may cycle
+	// through variants, while two or more controls may expose one scenario each.
+	// Every member is visible, enabled, non-destructive, inside the same runtime
+	// surface class, and semantically identifies itself as a state/demo control.
+	attempts.push(targetResolutionAttempt("runtime_state_variant_controls", candidates.length, candidates.length === 1, true, false, "resolved", true, true));
+	return { locator: candidates[0]!.locator, strategy: "runtime_state_variant_controls" };
 }
 
 function runtimeTargetScopes(page: any): any[] {

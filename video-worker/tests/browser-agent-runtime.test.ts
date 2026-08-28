@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, booleanConfigurationAssertion, booleanControlState, browserExplicitFailureAdmitsTerminal, browserRecordingSize, browserVisibleTextShowsExplicitBusinessFailure, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleControlSignalsStop, businessLifecycleSnapshotBusy, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactionStateSimilarity, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairInputSemantic, runtimeProductRepairTargetScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, stageHasAuthenticationProvenance, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, visibleApprovedBooleanConfigurationLabel, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, booleanConfigurationAssertion, booleanControlState, browserExplicitFailureAdmitsTerminal, browserRecordingSize, browserVisibleTextShowsExplicitBusinessFailure, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleControlSignalsStop, businessLifecycleSnapshotBusy, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactionStateSimilarity, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairInputSemantic, runtimeProductRepairTargetScore, runtimeStateVariantControlSemantic, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, stageHasAuthenticationProvenance, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, visibleApprovedBooleanConfigurationLabel, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -864,6 +864,68 @@ describe("browser agent App-evidence-bound selector semantics", () => {
     expect(resolved.strategy).toBe("role:button+approved_name");
     expect(attempts).toContainEqual(expect.objectContaining({ candidate_count: 1, outcome: "resolved" }));
   });
+
+	it("resolves a localized generic state-demo control inside the runtime preview", async () => {
+		const absent = {
+			count: async () => 0,
+			first: () => ({ isVisible: async () => false }),
+		};
+		const demoButton = {
+			isVisible: async () => true,
+			isDisabled: async () => false,
+			evaluate: async () => ({ role: "button", name: "场景演示" }),
+		};
+		const demoButtons = { count: async () => 1, nth: () => demoButton };
+		const mainFrame = {};
+		const previewFrame = {
+			getByRole: (role: string, options?: { name?: string }) => role === "button" && !options?.name ? demoButtons : absent,
+			getByTestId: () => absent,
+			getByLabel: () => absent,
+			getByText: () => absent,
+		};
+		const page = {
+			mainFrame: () => mainFrame,
+			frames: () => [mainFrame, previewFrame],
+			getByRole: () => absent,
+			getByTestId: () => absent,
+			getByLabel: () => absent,
+			getByText: () => absent,
+			locator: () => absent,
+		};
+		const attempts: BrowserTargetResolutionAttempt[] = [];
+		const stage = {
+			id: "stage_state_variants",
+			order: 1,
+			node_id: "state_variants",
+			target_contract: {
+				semantic_id: "state_scenario_control",
+				allowed_roles: ["button"],
+				allowed_names: ["Victory", "Terminal"],
+				forbidden_names: ["Delete"],
+				destructive: false,
+			},
+			interactions: [{
+				kind: "click",
+				parameters: { action_recipe: "activate_state_variants", allowed_roles: ["button"], allowed_names: ["Victory", "Terminal"] },
+				non_destructive: true,
+			}],
+		};
+
+		const resolved = await resolveTarget(page, stage, stage.interactions[0], false, attempts);
+		expect(resolved.strategy).toBe("runtime_state_variant_controls");
+		expect(attempts).toContainEqual(expect.objectContaining({
+			strategy: "runtime_state_variant_controls",
+			candidate_count: 1,
+			outcome: "resolved",
+		}));
+	});
+
+	it("keeps generic state-demo discovery bounded to semantic non-destructive controls", () => {
+		expect(runtimeStateVariantControlSemantic("Demo scenario")).toBe(true);
+		expect(runtimeStateVariantControlSemantic("状态演示")).toBe(true);
+		expect(runtimeStateVariantControlSemantic("New game")).toBe(false);
+		expect(runtimeStateVariantControlSemantic("删除演示数据")).toBe(false);
+	});
 
   it("rejects duplicate approved controls across the page and a preview frame", async () => {
     const live = {
