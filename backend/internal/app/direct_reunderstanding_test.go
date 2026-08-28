@@ -617,6 +617,27 @@ func TestTerminalInteractionRepairReplaysOnlyApprovedStateVariantProof(t *testin
 	}
 }
 
+func TestTerminalStateVariantFallbackIgnoresEarlierDiagnosticBoundary(t *testing.T) {
+	stateVariant := &model.GraphNode{
+		ID: "state-variants", Type: model.GraphNodeTypeEnd,
+		ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "activate_state_variants"}},
+		InteractionContract: &model.InteractionContract{
+			ReplayPolicy: model.InteractionReplayIdempotentWrite, NonDestructive: true,
+			Parameters: map[string]any{"action_recipe": "activate_state_variants"},
+		},
+	}
+	earlier := &model.GraphNode{ID: "earlier-core-click", ActionSpec: &model.GraphAction{Type: model.GraphActionClick}}
+	state := &orchestrator.CascadeState{
+		ProjectContext: &model.ProjectContext{ID: "project", ProductURL: "https://app.example.com/entity/1"},
+		WorkflowGraph:  &model.DemoWorkflowGraph{ID: "graph", Nodes: []*model.GraphNode{earlier, stateVariant}},
+	}
+	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{FailedNodeID: earlier.ID, CurrentURL: "https://app.example.com/entity/1"}}
+	graph, eligible, err := terminalStateVariantReconciliationFallback(state, result, stateVariant.ID, timeNowUTC())
+	if err != nil || !eligible || graph == nil || len(graph.Nodes) != 2 || !replayableStateVariantProof(graph.Nodes[1]) {
+		t.Fatalf("fallback did not recover the actual stopped state proof: eligible=%v err=%v graph=%+v", eligible, err, graph)
+	}
+}
+
 func TestReconcileAdaptiveCapabilityScoreUsesLatestCompletedCoreStage(t *testing.T) {
 	core := &model.GraphNode{
 		ID: "core-stability", ActionSpec: &model.GraphAction{Type: model.GraphActionInspect, Parameters: map[string]any{"capability_layer": "core", "capability_score": 15}},

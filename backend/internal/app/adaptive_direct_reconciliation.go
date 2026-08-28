@@ -77,6 +77,7 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 	if result.Status != model.RecordingResultStatusFailed || result.CloudJobID != strings.TrimSpace(sourceJobID) || result.FailureDiagnostic == nil {
 		return adaptiveDirectReconciliationBuild{}, errors.New("adaptive reconciliation source result does not match the failed Direct job")
 	}
+	originalFailedNodeID := result.FailureDiagnostic.FailedNodeID
 	observed := s.adaptiveObservedSuccessorEvidence(ctx, projectID, state, result)
 	if observed.URL != "" {
 		result.FailureDiagnostic.CurrentURL = observed.URL
@@ -97,6 +98,15 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		}
 	}
 	graph, eligible, err := terminalInteractionVerificationRepairGraph(repairState, result, time.Now().UTC())
+	if err == nil && (!eligible || !adaptiveReconciliationGraphSupported(graph)) {
+		// Capability-score reconciliation may move the diagnostic boundary to an
+		// earlier completed core node. If the actual stopped action was the
+		// approved idempotent state-variant proof, rebuild from that exact node so
+		// an unrelated earlier click cannot make the whole bound entity appear
+		// unrecoverable. The resulting graph still starts with observe-only
+		// navigation and replays no creation, submit, repair, or provider effect.
+		graph, eligible, err = terminalStateVariantReconciliationFallback(repairState, result, originalFailedNodeID, time.Now().UTC())
+	}
 	if err != nil || !eligible || !adaptiveReconciliationGraphSupported(graph) {
 		if err == nil {
 			err = errors.New("failed Direct job has no observed successor state")
@@ -208,6 +218,32 @@ func (s *Service) prepareAdaptiveDirectReconciliation(ctx context.Context, proje
 		return adaptiveDirectReconciliationBuild{}, fmt.Errorf("build adaptive successor package: %w", err)
 	}
 	return adaptiveDirectReconciliationBuild{State: next, Build: build, SourceResult: result, PendingContinuation: pendingContinuation}, nil
+}
+
+func terminalStateVariantReconciliationFallback(state *orchestrator.CascadeState, result model.RecordingResultPackage, failedNodeID string, now time.Time) (*model.DemoWorkflowGraph, bool, error) {
+	if state == nil || state.WorkflowGraph == nil || result.FailureDiagnostic == nil || strings.TrimSpace(failedNodeID) == "" {
+		return nil, false, nil
+	}
+	var failedNode *model.GraphNode
+	for _, node := range state.WorkflowGraph.Nodes {
+		if node != nil && node.ID == failedNodeID {
+			failedNode = node
+			break
+		}
+	}
+	if !replayableStateVariantProof(failedNode) {
+		return nil, false, nil
+	}
+	trimmedState := *state
+	trimmedGraph := *state.WorkflowGraph
+	trimmedGraph.Nodes = []*model.GraphNode{failedNode}
+	trimmedGraph.Edges = nil
+	trimmedState.WorkflowGraph = &trimmedGraph
+	fallbackResult := result
+	diagnostic := *result.FailureDiagnostic
+	diagnostic.FailedNodeID = failedNodeID
+	fallbackResult.FailureDiagnostic = &diagnostic
+	return terminalInteractionVerificationRepairGraph(&trimmedState, fallbackResult, now)
 }
 
 // A Worker interruption can finalize a stale failure diagnostic for an
