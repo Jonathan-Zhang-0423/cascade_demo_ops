@@ -59,7 +59,7 @@ func (s *Service) prepareAdaptiveSameEntityProductRepair(ctx context.Context, pr
 	if entityURL == "" {
 		return ProductRunPrepareResult{}, errors.New("same-entity repair has no observed entity entry URL")
 	}
-	repairPrompt := adaptiveProductRepairPrompt(request.ProductSpec, request.InteractionPlan, score.Missing, request.ProductRepairRounds)
+	repairPrompt := adaptiveProductRepairPromptForGoal(request.BuildPrompt, request.ProductSpec, request.InteractionPlan, score.Missing, request.ProductRepairRounds)
 	if repairPrompt == "" {
 		return ProductRunPrepareResult{}, errors.New("same-entity repair could not derive a public product request")
 	}
@@ -178,6 +178,10 @@ func selectAdaptiveBoundEntityURL(targetURL string, project *model.ProjectContex
 }
 
 func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.InteractionPlan, missing []string, priorAttempts ...int) string {
+	return adaptiveProductRepairPromptForGoal("", spec, plan, missing, priorAttempts...)
+}
+
+func adaptiveProductRepairPromptForGoal(originalGoal string, spec experiment.ProductSpec, plan experiment.InteractionPlan, missing []string, priorAttempts ...int) string {
 	statements := map[string]string{}
 	if visualRequirement := requiredProductVisualRepairStatement(spec); visualRequirement != "" {
 		statements["product_visual_quality"] = visualRequirement
@@ -247,15 +251,18 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		selected[index] = strings.TrimRight(selected[index], ".。；; ")
 	}
 	subject := strings.Join(selected, "；")
-	// Keep functional and visual repairs separate. This prevents a long mixed
-	// request from causing the target builder to fix mechanics while silently
-	// ignoring the palette, or vice versa.
-	prefix, suffix := "只修复这个问题，不要重写页面，保持已可用功能不变：", "。修复后实际操作确认。"
+	// Keep functional and required presentation repairs separate. This prevents
+	// one long mixed request from obscuring the single observed causal failure.
+	prefix, suffix := "只修复这个问题，在当前项目内完成，不要创建新项目：", "。修复后实际操作确认。"
 	if visualOnly {
-		prefix = "只调整视觉样式，不要改动现有功能和页面结构："
+		prefix = "只调整必要的视觉样式与稳定性，在当前项目内完成，不要创建新项目："
 	}
 	if finding := adaptiveProductRepairObservedFinding(causalID); finding != "" {
 		prefix = "已观察到" + finding + "。" + prefix
+	}
+	goal := boundedAdaptiveRepairGoal(firstNonEmptyString(originalGoal, spec.Objective, spec.Title), 44)
+	if goal != "" {
+		prefix = "原始目标：" + goal + "。" + prefix
 	}
 	maxRunes := 120
 	prefixRunes, subjectRunes, suffixRunes := []rune(prefix), []rune(subject), []rune(suffix)
@@ -266,6 +273,21 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		subjectRunes = append(subjectRunes[:available-1], '…')
 	}
 	return string(prefixRunes) + string(subjectRunes) + string(suffixRunes)
+}
+
+func boundedAdaptiveRepairGoal(value string, maxRunes int) string {
+	value = strings.TrimRight(strings.Join(strings.Fields(value), " "), ".。；; ")
+	if value == "" || maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	if maxRunes == 1 {
+		return "…"
+	}
+	return string(runes[:maxRunes-1]) + "…"
 }
 
 func adaptiveProductRepairObservedFinding(causalID string) string {

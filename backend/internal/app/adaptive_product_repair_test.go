@@ -31,7 +31,7 @@ func TestAdaptiveProductRepairPromptRepairsOnlyFirstCausalFailure(t *testing.T) 
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"directional_moves", "terminal_scenes"})
-	for _, required := range []string{"只修复这个问题", "不要重写页面", "使用两个不同方向键执行实际操作"} {
+	for _, required := range []string{"只修复这个问题", "在当前项目内完成", "不要创建新项目", "使用两个不同方向键执行实际操作"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("causal repair prompt lost %q: %q", required, got)
 		}
@@ -58,7 +58,7 @@ func TestAdaptiveProductRepairPromptCarriesVisualQualityFailure(t *testing.T) {
 		ObservableAcceptance: []experiment.AcceptanceCriterion{{ID: "usable_layout", Statement: "桌面和移动端内容清晰可读，没有遮挡或持续闪烁", EvidenceKinds: []string{"visual", "dom"}, Required: true}},
 	}
 	got := adaptiveProductRepairPrompt(spec, experiment.InteractionPlan{}, []string{"product_visual_quality"}, 1)
-	for _, required := range []string{"只调整视觉样式", "桌面和移动端内容清晰可读", "没有遮挡或持续闪烁", "修复后实际操作确认"} {
+	for _, required := range []string{"只调整必要的视觉样式", "桌面和移动端内容清晰可读", "没有遮挡或持续闪烁", "修复后实际操作确认"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("visual product repair lost %q: %q", required, got)
 		}
@@ -136,5 +136,35 @@ func TestAdaptiveProductRepairPromptDoesNotTreatUnexecutedCapabilitiesAsDefects(
 		if strings.Contains(got, internal) {
 			t.Fatalf("repeated repair prompt leaked internal term %q: %q", internal, got)
 		}
+	}
+}
+
+func TestAdaptiveProductRepairPromptKeepsShortOriginalGoalAnchor(t *testing.T) {
+	spec := experiment.ProductSpec{Objective: "模型扩写的目标不应覆盖用户原句"}
+	plan := experiment.InteractionPlan{Steps: []experiment.InteractionStep{{
+		StepID: "directional_moves", SemanticIntent: "使用两个不同方向键执行实际操作",
+	}}}
+
+	got := adaptiveProductRepairPromptForGoal("构建一款适合产品演示的精致响应式 2048 网页游戏", spec, plan, []string{"directional_moves"}, 1)
+	for _, required := range []string{
+		"原始目标：构建一款适合产品演示的精致响应式 2048 网页游戏",
+		"实际执行两种不同方向操作后没有观察到产品状态变化",
+		"在当前项目内完成",
+		"不要创建新项目",
+		"使用两个不同方向键执行实际操作",
+	} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("goal-anchored repair prompt lost %q: %q", required, got)
+		}
+	}
+	if strings.Contains(got, spec.Objective) || len([]rune(got)) > 120 {
+		t.Fatalf("goal-anchored repair prompt was expanded or unbounded: %d %q", len([]rune(got)), got)
+	}
+}
+
+func TestBoundedAdaptiveRepairGoalCollapsesWhitespaceAndTruncates(t *testing.T) {
+	got := boundedAdaptiveRepairGoal("  第一段\n\t第二段。  ", 6)
+	if got != "第一段 第…" {
+		t.Fatalf("bounded goal = %q", got)
 	}
 }
