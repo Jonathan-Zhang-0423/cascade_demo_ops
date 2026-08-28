@@ -586,6 +586,37 @@ func TestTerminalInteractionRepairAcceptsOptionalEnhancementClick(t *testing.T) 
 	}
 }
 
+func TestTerminalInteractionRepairReplaysOnlyApprovedStateVariantProof(t *testing.T) {
+	now := timeNowUTC()
+	stateVariant := &model.GraphNode{
+		ID: "state-variants", Type: model.GraphNodeTypeEnd,
+		ActionSpec: &model.GraphAction{Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "activate_state_variants", "capability_layer": "core"}},
+		InteractionContract: &model.InteractionContract{
+			ReplayPolicy: model.InteractionReplayIdempotentWrite, NonDestructive: true,
+			Parameters: map[string]any{"action_recipe": "activate_state_variants", "capability_layer": "core"},
+		},
+	}
+	state := &orchestrator.CascadeState{
+		ProjectContext: &model.ProjectContext{ID: "project", ProductURL: "https://app.example.com/entity/1"},
+		WorkflowGraph:  &model.DemoWorkflowGraph{ID: "graph", Nodes: []*model.GraphNode{stateVariant}},
+	}
+	result := model.RecordingResultPackage{FailureDiagnostic: &model.ScriptFailureDiagnostic{FailedNodeID: stateVariant.ID, CurrentURL: "https://app.example.com/entity/1"}}
+	graph, eligible, err := terminalInteractionVerificationRepairGraph(state, result, now)
+	if err != nil || !eligible || graph == nil {
+		t.Fatalf("approved state-variant proof should reconcile: eligible=%v err=%v graph=%+v", eligible, err, graph)
+	}
+	if len(graph.Nodes) != 2 || graph.Nodes[0].ActionSpec.Type != model.GraphActionNavigate || !replayableStateVariantProof(graph.Nodes[1]) {
+		t.Fatalf("repair must navigate to the bound entity and replay only the idempotent state proof: %+v", graph.Nodes)
+	}
+
+	unsafe := *stateVariant
+	unsafe.InteractionContract = &model.InteractionContract{ReplayPolicy: model.InteractionReplayOnceEffect, NonDestructive: true}
+	unsafeState := &orchestrator.CascadeState{ProjectContext: state.ProjectContext, WorkflowGraph: &model.DemoWorkflowGraph{ID: "graph", Nodes: []*model.GraphNode{&unsafe}}}
+	if _, eligible, err := terminalInteractionVerificationRepairGraph(unsafeState, result, now); err != nil || eligible {
+		t.Fatalf("once-effect state control must not be admitted for automatic replay: eligible=%v err=%v", eligible, err)
+	}
+}
+
 func TestReconcileAdaptiveCapabilityScoreUsesLatestCompletedCoreStage(t *testing.T) {
 	core := &model.GraphNode{
 		ID: "core-stability", ActionSpec: &model.GraphAction{Type: model.GraphActionInspect, Parameters: map[string]any{"capability_layer": "core", "capability_score": 15}},

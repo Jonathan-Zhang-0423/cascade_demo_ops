@@ -325,7 +325,7 @@ func terminalInteractionVerificationRepairGraph(state *orchestrator.CascadeState
 	}
 	failedNode := state.WorkflowGraph.Nodes[failedIndex]
 	isOptionalEnhancementClick := failedAction == model.GraphActionClick && graphNodeCapabilityLayer(failedNode) == "enhancement"
-	isTerminalInteraction := failedAction == model.GraphActionPress || failedAction == model.GraphActionGesture || failedAction == model.GraphActionInspect || failedAction == model.GraphActionWait || isOptionalEnhancementClick
+	isTerminalInteraction := failedAction == model.GraphActionPress || failedAction == model.GraphActionGesture || failedAction == model.GraphActionInspect || failedAction == model.GraphActionWait || isOptionalEnhancementClick || replayableStateVariantProof(failedNode)
 	if !isTerminalInteraction {
 		return nil, false, nil
 	}
@@ -401,7 +401,7 @@ func terminalInteractionVerificationRepairGraph(state *orchestrator.CascadeState
 		if node == nil || node.ActionSpec == nil {
 			continue
 		}
-		if index > resumeIndex && node.ActionSpec.Type != model.GraphActionInspect && node.ActionSpec.Type != model.GraphActionWait && node.ActionSpec.Type != model.GraphActionPress && node.ActionSpec.Type != model.GraphActionGesture {
+		if index > resumeIndex && node.ActionSpec.Type != model.GraphActionInspect && node.ActionSpec.Type != model.GraphActionWait && node.ActionSpec.Type != model.GraphActionPress && node.ActionSpec.Type != model.GraphActionGesture && !replayableStateVariantProof(node) {
 			return nil, true, fmt.Errorf("terminal interaction repair would replay a non-observation action %s", node.ID)
 		}
 		node.Type = model.GraphNodeTypeAction
@@ -467,6 +467,17 @@ func graphNodeCapabilityLayer(node *model.GraphNode) string {
 		return layer
 	}
 	return ""
+}
+
+func replayableStateVariantProof(node *model.GraphNode) bool {
+	if node == nil || node.ActionSpec == nil || node.ActionSpec.Type != model.GraphActionClick || node.InteractionContract == nil {
+		return false
+	}
+	recipe, _ := node.ActionSpec.Parameters["action_recipe"].(string)
+	if recipe == "" {
+		recipe, _ = node.InteractionContract.Parameters["action_recipe"].(string)
+	}
+	return recipe == "activate_state_variants" && node.InteractionContract.NonDestructive && node.InteractionContract.ReplayPolicy == model.InteractionReplayIdempotentWrite
 }
 
 // adaptiveSuccessorObservationRepairGraph handles the generic failure window
