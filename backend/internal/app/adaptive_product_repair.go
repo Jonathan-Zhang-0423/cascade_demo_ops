@@ -228,24 +228,23 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 			}
 		}
 	}
-	// More than one failed capability means the previous product result was not
-	// merely missing one polish item. Treat that first repair as an escalated
-	// business repair immediately; spending an entire provider/build round on a
-	// single symptom is both slower and less likely to produce a coherent app.
-	repeated := len(priorAttempts) > 0 && priorAttempts[0] > 0
-	if repeated {
-		// A first repair may correctly target one causal surface defect. If that
-		// repair still does not produce a provable product, another sequence of
-		// one-item prompts tends to polish a placeholder without ever completing
-		// the business workflow. Escalate using only the remaining public
-		// interaction intents, in declared order, while keeping one bounded prompt.
-		for _, step := range plan.Steps {
-			id := strings.TrimSpace(step.StepID)
-			value := adaptiveProductRepairStepStatement(step)
-			if missingSet[id] && value != "" && !seen[value] {
-				selected, seen[value] = append(selected, value), true
+	visualOnly := len(missingSet) == 1 && missingSet["product_visual_quality"]
+	if visualOnly {
+		selected = selected[:0]
+		if theme := strings.TrimRight(strings.TrimSpace(spec.VisualDirection.Theme), ".。；; "); theme != "" {
+			visualStatement := "将实际产品界面改为" + theme
+			if len(spec.VisualDirection.Palette) > 0 {
+				visualStatement += "，主色使用" + strings.Join(spec.VisualDirection.Palette, "、")
 			}
+			selected = append(selected, visualStatement)
 		}
+	}
+	if !visualOnly && len(missingSet) > 1 {
+		// A failed runtime stops at the first blocking action, so its remaining
+		// missing list contains both the causal defect and later unexecuted
+		// criteria. Compile those public intents into one short capability cluster
+		// instead of pasting the plan or submitting one repair per symptom.
+		selected = adaptiveCompactMissingCapabilities(plan, missingSet)
 	}
 	if len(selected) == 0 {
 		for _, id := range missing {
@@ -270,24 +269,11 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		selected[index] = strings.TrimRight(selected[index], ".。；; ")
 	}
 	subject := strings.Join(selected, "；")
-	// The initial one-line request intentionally stays provider-neutral and
-	// concise. When a real product defect already requires a bounded repair,
-	// carry the frozen public visual direction into that same edit so the
-	// repaired product does not remain functionally correct but visibly off-spec.
-	if theme := strings.TrimRight(strings.TrimSpace(spec.VisualDirection.Theme), ".。；; "); theme != "" {
-		subject += "；界面改为" + theme
-		if len(spec.VisualDirection.Palette) > 0 {
-			subject += "，主色使用" + strings.Join(spec.VisualDirection.Palette, "、")
-		}
-	}
-	prefix, suffix := "请修复当前项目：", "必须能实际工作。保留已有内容，直接更新当前项目。"
-	if repeated {
-		prefix, suffix = "上轮修复后实际预览仍失败。请先复现并检查已加载代码，再修复：", "。完成后在预览中运行确认，保留已有内容。"
-	}
-	maxRunes := 140
-	if repeated {
-		maxRunes = 240
-	}
+	// Keep functional and visual repairs separate. This prevents a long mixed
+	// request from causing the target builder to fix mechanics while silently
+	// ignoring the palette, or vice versa.
+	prefix, suffix := "请修好当前产品并保留已有功能：", "。完成后实际运行检查。"
+	maxRunes := 180
 	prefixRunes, subjectRunes, suffixRunes := []rune(prefix), []rune(subject), []rune(suffix)
 	if available := maxRunes - len(prefixRunes) - len(suffixRunes); available < len(subjectRunes) {
 		if available < 2 {
@@ -296,6 +282,35 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		subjectRunes = append(subjectRunes[:available-1], '…')
 	}
 	return string(prefixRunes) + string(subjectRunes) + string(suffixRunes)
+}
+
+func adaptiveCompactMissingCapabilities(plan experiment.InteractionPlan, missing map[string]bool) []string {
+	result := []string{}
+	seen := map[string]bool{}
+	appendOnce := func(key, value string) {
+		value = strings.TrimRight(strings.TrimSpace(value), ".。；; ")
+		if value == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		result = append(result, value)
+	}
+	for _, step := range plan.Steps {
+		if !missing[strings.TrimSpace(step.StepID)] {
+			continue
+		}
+		switch step.Action.Kind {
+		case "keyboard_sequence":
+			appendOnce("keyboard", "所有要求的键盘操作均能实际改变产品状态")
+		case "touch_swipe":
+			appendOnce("touch", "触控手势能实际改变产品状态")
+		case "activate_state_variants":
+			appendOnce("state_variants", adaptiveProductRepairStepStatement(step))
+		default:
+			appendOnce(step.StepID, adaptiveProductRepairStepStatement(step))
+		}
+	}
+	return result
 }
 
 func adaptiveProductRepairStepStatement(step experiment.InteractionStep) string {

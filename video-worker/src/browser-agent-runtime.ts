@@ -2705,6 +2705,12 @@ export function browserVisualProductSurfaceAdmitted(observation: BrowserVisualOb
 		&& stateful;
 }
 
+export function browserDeterministicSurfaceProofEligible(requireVisualTerminal: boolean, busyNow: boolean): boolean {
+	// Deterministic interaction proof and product-level visual quality are
+	// separate evidence channels. Only the latter is allowed to spend vision.
+	return !requireVisualTerminal && !busyNow;
+}
+
 export function browserVisualObservationAllocation(maxCalls: number, requireVisualTerminal: boolean): { heartbeatLimit: number; terminalReserve: number } {
 	const bounded = Math.max(1, Math.min(12, Math.trunc(Number(maxCalls) || 1)));
 	const terminalReserve = requireVisualTerminal ? Math.max(0, bounded - 1) : 0;
@@ -2880,6 +2886,13 @@ async function waitForPlayableSurfaceWithVisualObservation(
 			return { surface: false, score: false, controls: false };
 		}
 		if (target) {
+			if (browserDeterministicSurfaceProofEligible(requireVisualTerminal, busyNow)) {
+				// Adaptive v2 assigns visual quality to a later product-level Gate.
+				// A deterministic, stateful runtime target is enough here; spending a
+				// model call at every observe-only proof duplicates cost without adding
+				// an independent business fact.
+				return { surface: true, score: target.stateful, controls: target.focusable };
+			}
 			const surfaceDigest = session.resultSurfaceBaselineDigest ? await visualDigest(session.page, target.digestTarget) : "";
 			const surfaceChanged = Boolean(session.resultSurfaceBaselineDigest && surfaceDigest && surfaceDigest !== session.resultSurfaceBaselineDigest);
 			const existing = session.visionVerdictsByNodeID.get(stage.node_id) || [];
@@ -2892,14 +2905,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 				await session.page.waitForTimeout(Math.min(1_000, Math.max(100, deadline - Date.now())));
 				continue;
 			}
-			if (!requireVisualTerminal) {
-				// Compatibility mode: the visual result is supporting evidence and
-				// the deterministic surface remains the admitting channel.
-				if (existing.length < config.maxCalls) {
-					await captureAndUnderstandVisionPoll(session, stage, config, Math.max(0, Date.now() - session.openedAtMS));
-				}
-				return { surface: true, score: target.stateful, controls: target.focusable };
-			}
+			if (!requireVisualTerminal) continue;
 			const terminal = browserVisualTerminalWithStructuralEvidence(existing, config.maxCalls);
 			if (terminal === "succeeded" && !busyNow) return { surface: true, score: target.stateful, controls: target.focusable };
 			if (terminal === "failed") return { surface: false, score: false, controls: false };
@@ -2932,7 +2938,7 @@ async function waitForPlayableSurfaceWithVisualObservation(
 				return { surface: false, score: false, controls: false };
 			}
 		}
-		if (!target && Date.now() >= nextCaptureAt && (session.visionVerdictsByNodeID.get(stage.node_id)?.length || 0) < heartbeatLimit) {
+		if (requireVisualTerminal && !target && Date.now() >= nextCaptureAt && (session.visionVerdictsByNodeID.get(stage.node_id)?.length || 0) < heartbeatLimit) {
 			const observed = await captureAndUnderstandVisionPoll(session, stage, config, Math.max(0, Date.now() - session.openedAtMS));
 			nextCaptureAt = Date.now() + config.intervalMS * browserVisualNextDelayMultiplier(observed.decision);
 		}
