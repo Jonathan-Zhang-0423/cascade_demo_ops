@@ -165,7 +165,7 @@ func TestBrowserVisualObserverFailureCodeOnlyExposesSafeClass(t *testing.T) {
 	}
 }
 
-func TestBrowserVisualObserverUsesBoundedLineFallbackAfterJSONShapeFailure(t *testing.T) {
+func TestBrowserVisualObserverUsesSingleLineCallWithLargeBudget(t *testing.T) {
 	client := &browserVisualFallbackTestLLM{}
 	bridge, err := startBrowserVisualObserverBridge(t.Context(), client, 10, "A complete interactive product", 12, nil)
 	if err != nil {
@@ -191,14 +191,14 @@ func TestBrowserVisualObserverUsesBoundedLineFallbackAfterJSONShapeFailure(t *te
 	if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&result) != nil {
 		t.Fatalf("unexpected fallback response: status=%d", response.StatusCode)
 	}
-	if result.Decision != "succeeded" || result.ProviderCalls != 2 || len(result.VisibleEvidence) != 2 {
-		t.Fatalf("bounded line fallback was not normalized: %+v", result)
+	if result.Decision != "succeeded" || result.ProviderCalls != 1 || len(result.VisibleEvidence) != 2 {
+		t.Fatalf("single line response was not normalized: %+v", result)
 	}
 	if !result.ProductSurfaceVisible || result.GenerationCoveringSurface {
 		t.Fatalf("bounded fallback lost layered surface facts: %+v", result)
 	}
-	if client.multimodalCalls != 1 || client.textCalls != 1 {
-		t.Fatalf("large-budget fallback calls=%d/%d", client.multimodalCalls, client.textCalls)
+	if client.multimodalCalls != 0 || client.textCalls != 1 {
+		t.Fatalf("large-budget line calls=%d/%d", client.multimodalCalls, client.textCalls)
 	}
 }
 

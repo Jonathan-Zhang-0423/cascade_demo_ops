@@ -31,13 +31,13 @@ func TestAdaptiveProductRepairPromptEscalatesMultipleFailedCapabilitiesImmediate
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"directional_moves", "terminal_scenes"})
-	for _, required := range []string{"上轮修复后实际预览仍失败", "使用两个不同方向键", "观察胜利和无可移动演示状态", "预览中运行确认"} {
+	for _, required := range []string{"请修复当前项目", "使用两个不同方向键", "界面改为深色霓虹界面"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("multi-capability repair prompt lost %q: %q", required, got)
 		}
 	}
-	if strings.Contains(got, "视觉统一为") || len([]rune(got)) > 240 {
-		t.Fatalf("multi-capability repair prompt was not bounded to functional recovery: %q", got)
+	if strings.Contains(got, "胜利和无可移动") || len([]rune(got)) > 240 {
+		t.Fatalf("first repair should stay on the first causal defect: %q", got)
 	}
 }
 
@@ -55,7 +55,7 @@ func TestAdaptiveProductRepairPromptFallsBackToOneRequiredCriterion(t *testing.T
 func TestAdaptiveProductRepairPromptCarriesVisualQualityFailure(t *testing.T) {
 	spec := experiment.ProductSpec{VisualDirection: experiment.VisualDirection{Theme: "深蓝霓虹界面", Palette: []string{"深蓝", "青色", "紫色"}}}
 	got := adaptiveProductRepairPrompt(spec, experiment.InteractionPlan{}, []string{"product_visual_quality"}, 1)
-	for _, required := range []string{"实际产品界面的视觉风格应符合深蓝霓虹界面", "深蓝、青色、紫色", "预览中运行确认"} {
+	for _, required := range []string{"实际产品界面的视觉风格应符合深蓝霓虹界面", "界面改为深蓝霓虹界面", "深蓝、青色、紫色", "预览中运行确认"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("visual product repair lost %q: %q", required, got)
 		}
@@ -73,11 +73,8 @@ func TestAdaptiveProductRepairPromptKeepsCausalOrderWhileCoveringRelatedFailures
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"continued_stability", "surface_ready"})
-	if !strings.Contains(got, "初始业务内容完整渲染并包含可操作状态") || !strings.Contains(got, "连续操作后稳定") {
-		t.Fatalf("repair prompt did not cover the related public failures: %q", got)
-	}
-	if strings.Index(got, "初始业务内容完整渲染") > strings.Index(got, "连续操作后稳定") {
-		t.Fatalf("repair prompt lost causal ordering: %q", got)
+	if !strings.Contains(got, "初始业务内容完整渲染并包含可操作状态") || strings.Contains(got, "连续操作后稳定") {
+		t.Fatalf("first repair did not stay on the first causal public failure: %q", got)
 	}
 }
 
@@ -114,11 +111,11 @@ func TestAdaptiveProductRepairPromptEscalatesAllRemainingPublicCapabilities(t *t
 		{StepID: "surface_ready", SemanticIntent: "确认主要交互区域可见"},
 		{StepID: "directional_moves", SemanticIntent: "使用两个不同方向执行实际操作"},
 		{StepID: "undo", SemanticIntent: "撤销并恢复上一状态"},
-		{StepID: "terminal_scenes", SemanticIntent: "显示成功和结束演示状态"},
+		{StepID: "terminal_scenes", SemanticIntent: "显示成功和结束演示状态", Action: experiment.InteractionAction{Kind: "activate_state_variants"}},
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"surface_ready", "directional_moves", "undo", "terminal_scenes"}, 1)
-	for _, publicCapability := range []string{"初始业务内容完整渲染", "两个不同方向", "撤销并恢复", "成功和结束"} {
+	for _, publicCapability := range []string{"初始业务内容完整渲染", "两个不同方向", "撤销并恢复", "提供可见且可操作的状态切换入口", "成功和结束"} {
 		if !strings.Contains(got, publicCapability) {
 			t.Fatalf("repeated repair prompt omitted public capability %q: %q", publicCapability, got)
 		}

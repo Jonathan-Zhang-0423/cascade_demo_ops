@@ -29,6 +29,10 @@ func appendAdaptiveInteractionContractsToInitialGraph(graph *model.DemoWorkflowG
 	if err != nil {
 		return err
 	}
+	// This extension is used only by the v2 adaptive package. Structural and
+	// interaction proofs remain authoritative; one supporting visual sample is
+	// enough and the Worker must not reserve repeated terminal vision calls.
+	preferDeterministicAdaptiveProofs(contracts)
 	existing := map[string]bool{}
 	for _, node := range graph.Nodes {
 		if node != nil && node.InteractionContract != nil {

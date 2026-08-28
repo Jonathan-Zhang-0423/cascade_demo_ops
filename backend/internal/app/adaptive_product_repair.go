@@ -187,7 +187,7 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		statements["product_visual_quality"] = visualRequirement
 	}
 	for _, step := range plan.Steps {
-		statements[strings.TrimSpace(step.StepID)] = strings.TrimSpace(step.SemanticIntent)
+		statements[strings.TrimSpace(step.StepID)] = adaptiveProductRepairStepStatement(step)
 	}
 	for _, criterion := range spec.ObservableAcceptance {
 		if criterion.Required {
@@ -221,7 +221,7 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	if len(selected) == 0 {
 		for _, step := range plan.Steps {
 			id := strings.TrimSpace(step.StepID)
-			value := strings.TrimSpace(step.SemanticIntent)
+			value := adaptiveProductRepairStepStatement(step)
 			if missingSet[id] && value != "" && !seen[value] {
 				selected, seen[value] = append(selected, value), true
 				break
@@ -232,7 +232,7 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	// merely missing one polish item. Treat that first repair as an escalated
 	// business repair immediately; spending an entire provider/build round on a
 	// single symptom is both slower and less likely to produce a coherent app.
-	repeated := (len(priorAttempts) > 0 && priorAttempts[0] > 0) || len(missingSet) > 1
+	repeated := len(priorAttempts) > 0 && priorAttempts[0] > 0
 	if repeated {
 		// A first repair may correctly target one causal surface defect. If that
 		// repair still does not produce a provable product, another sequence of
@@ -241,7 +241,7 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		// interaction intents, in declared order, while keeping one bounded prompt.
 		for _, step := range plan.Steps {
 			id := strings.TrimSpace(step.StepID)
-			value := strings.TrimSpace(step.SemanticIntent)
+			value := adaptiveProductRepairStepStatement(step)
 			if missingSet[id] && value != "" && !seen[value] {
 				selected, seen[value] = append(selected, value), true
 			}
@@ -274,9 +274,10 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	// concise. When a real product defect already requires a bounded repair,
 	// carry the frozen public visual direction into that same edit so the
 	// repaired product does not remain functionally correct but visibly off-spec.
-	if !repeated {
-		if theme := strings.TrimRight(strings.TrimSpace(spec.VisualDirection.Theme), ".。；; "); theme != "" {
-			subject += "；视觉统一为" + theme
+	if theme := strings.TrimRight(strings.TrimSpace(spec.VisualDirection.Theme), ".。；; "); theme != "" {
+		subject += "；界面改为" + theme
+		if len(spec.VisualDirection.Palette) > 0 {
+			subject += "，主色使用" + strings.Join(spec.VisualDirection.Palette, "、")
 		}
 	}
 	prefix, suffix := "请修复当前项目：", "必须能实际工作。保留已有内容，直接更新当前项目。"
@@ -295,4 +296,18 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		subjectRunes = append(subjectRunes[:available-1], '…')
 	}
 	return string(prefixRunes) + string(subjectRunes) + string(suffixRunes)
+}
+
+func adaptiveProductRepairStepStatement(step experiment.InteractionStep) string {
+	intent := strings.TrimRight(strings.TrimSpace(step.SemanticIntent), ".。；; ")
+	if intent == "" {
+		return ""
+	}
+	if step.Action.Kind != "activate_state_variants" {
+		return intent
+	}
+	for _, prefix := range []string{"观察", "验证", "确认", "展示", "显示"} {
+		intent = strings.TrimSpace(strings.TrimPrefix(intent, prefix))
+	}
+	return "提供可见且可操作的状态切换入口，可实际显示" + intent
 }

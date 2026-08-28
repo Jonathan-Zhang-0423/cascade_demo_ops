@@ -685,6 +685,15 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 			if downloadErr != nil {
 				return &experiment.AdapterError{Code: "artifact_materialization_failed", Phase: "result_materialization", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: downloadErr}
 			}
+			previousVisualCalls := max(0, request.ObservationPlan.MaxVisualCalls-request.VisualCallBudget)
+			liveVisualCalls, _, visualErr := recordLiveBrowserVisualObservations(downloads, request.VisualCallBudget, emit, previousVisualCalls)
+			if visualErr != nil {
+				return visualErr
+			}
+			if liveVisualCalls > request.VisualCallBudget {
+				return &experiment.AdapterError{Code: "visual_call_budget_exceeded", Phase: "visual_observation_deferred", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: resultEvidenceRefs(result)}
+			}
+			request.VisualCallBudget = max(0, request.VisualCallBudget-liveVisualCalls)
 			evidenceRefs := resultEvidenceRefs(result)
 			// A required interaction-stage failure proves that the fresh entity and
 			// its initial build submission already happened. Persist that once-effect

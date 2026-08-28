@@ -133,6 +133,9 @@ func TestAdaptiveInitialGraphKeepsBuildAndProductProofInOneSession(t *testing.T)
 		if node.InteractionContract == nil || node.PageRef != "" || node.ActionSpec == nil || node.ActionSpec.Target.URL != "" {
 			t.Fatalf("initial product proof must stay on the runtime-created entity: %+v", node)
 		}
+		if node.InteractionContract.Parameters["require_visual_terminal_confirmation"] == true {
+			t.Fatalf("adaptive v2 initial proof retained redundant repeated visual polling: %+v", node.InteractionContract.Parameters)
+		}
 	}
 }
 
