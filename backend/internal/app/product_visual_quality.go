@@ -253,11 +253,27 @@ func productVisualRequirementSummary(spec experiment.ProductSpec) string {
 		}
 	}
 	for _, outcome := range spec.ForbiddenOutcomes {
-		if looksLikeVisualAppearanceRequirement(outcome) {
+		if looksLikeVisualAppearanceRequirement(outcome) && !looksLikeInferredAestheticConstraint(outcome) {
 			parts = append(parts, "FORBIDDEN: "+strings.TrimSpace(outcome))
 		}
 	}
 	return truncateForUpload(strings.Join(parts, "\n"), 6000)
+}
+
+func looksLikeInferredAestheticConstraint(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return false
+	}
+	for _, token := range []string{
+		"配色", "颜色", "色彩", "渐变", "霓虹", "主题", "视觉风格", "现代风格", "简约风格", "粗糙",
+		"palette", "color", "gradient", "neon", "theme", "visual style", "modern style", "minimal style", "styling",
+	} {
+		if strings.Contains(normalized, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func looksLikeVisualAppearanceRequirement(value string) bool {

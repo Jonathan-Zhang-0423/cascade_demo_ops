@@ -538,6 +538,13 @@ func experimentProductEvidenceSummary(spec experiment.ProductSpec) string {
 		}
 	}
 	for _, forbidden := range spec.ForbiddenOutcomes {
+		// ProductSpec generation is allowed to suggest a presentation direction,
+		// but it is not allowed to turn an inferred palette or theme into a
+		// business blocker. Explicit user-facing appearance requirements still
+		// arrive through required observable_acceptance criteria above.
+		if looksLikeInferredAestheticConstraint(forbidden) {
+			continue
+		}
 		parts = append(parts, "Forbidden: "+strings.TrimSpace(forbidden))
 	}
 	return truncateForUpload(strings.Join(parts, "\n"), 4096)

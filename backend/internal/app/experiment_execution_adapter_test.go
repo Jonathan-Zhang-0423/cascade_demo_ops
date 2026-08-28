@@ -274,6 +274,10 @@ func TestExperimentProductEvidenceSummaryExcludesInferredAestheticsAndShouldItem
 			{ID: "required-proof", Statement: "surface is visible", Required: true},
 			{ID: "advisory-proof", Statement: "palette is cinematic", Required: false},
 		},
+		ForbiddenOutcomes: []string{
+			"Do not use a generic color palette.",
+			"Do not expose internal request text.",
+		},
 	}
 	summary := experimentProductEvidenceSummary(spec)
 	for _, required := range []string{"Build the requested interactive product", "render the primary surface", "accept keyboard input", "surface is visible"} {
@@ -281,10 +285,13 @@ func TestExperimentProductEvidenceSummaryExcludesInferredAestheticsAndShouldItem
 			t.Fatalf("business evidence summary lost %q: %s", required, summary)
 		}
 	}
-	for _, advisory := range []string{"deep blue neon", "blue", "glow", "use a guessed blue palette", "animate optional flourishes", "palette is cinematic"} {
+	for _, advisory := range []string{"deep blue neon", "blue", "glow", "use a guessed blue palette", "animate optional flourishes", "palette is cinematic", "generic color palette"} {
 		if strings.Contains(summary, advisory) {
 			t.Fatalf("business evidence summary leaked advisory presentation %q: %s", advisory, summary)
 		}
+	}
+	if !strings.Contains(summary, "Do not expose internal request text") {
+		t.Fatalf("non-aesthetic forbidden outcome was lost: %s", summary)
 	}
 }
 

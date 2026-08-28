@@ -41,19 +41,19 @@ func TestParseProductVisualQualityLineProtocol(t *testing.T) {
 	}
 }
 
-func TestProductVisualRequirementSummaryKeepsStyleAdvisoryUnlessCriterionRequiresIt(t *testing.T) {
+func TestProductVisualRequirementSummaryKeepsOnlyExplicitRequiredStyle(t *testing.T) {
 	spec := experiment.ProductSpec{
 		VisualDirection:      experiment.VisualDirection{Theme: "deep blue neon", Palette: []string{"navy", "cyan"}},
 		ObservableAcceptance: []experiment.AcceptanceCriterion{{Statement: "The product uses a deep blue gradient.", EvidenceKinds: []string{"visual"}, Required: true}, {Statement: "Keyboard works.", EvidenceKinds: []string{"dom"}, Required: true}},
 		ForbiddenOutcomes:    []string{"Do not show a generic default theme."},
 	}
 	got := productVisualRequirementSummary(spec)
-	for _, required := range []string{"REQUIRED: The product uses a deep blue gradient", "FORBIDDEN: Do not show a generic default theme"} {
+	for _, required := range []string{"REQUIRED: The product uses a deep blue gradient"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("visual summary lost %q: %s", required, got)
 		}
 	}
-	if strings.Contains(got, "deep blue neon") || strings.Contains(got, "navy, cyan") {
+	if strings.Contains(got, "deep blue neon") || strings.Contains(got, "navy, cyan") || strings.Contains(got, "generic default theme") {
 		t.Fatalf("advisory presentation preferences entered the blocking visual review: %s", got)
 	}
 	if strings.Contains(got, "Keyboard works") {
