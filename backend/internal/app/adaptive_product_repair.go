@@ -218,7 +218,11 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 			}
 		}
 	}
-	repeated := len(priorAttempts) > 0 && priorAttempts[0] > 0
+	// More than one failed capability means the previous product result was not
+	// merely missing one polish item. Treat that first repair as an escalated
+	// business repair immediately; spending an entire provider/build round on a
+	// single symptom is both slower and less likely to produce a coherent app.
+	repeated := (len(priorAttempts) > 0 && priorAttempts[0] > 0) || len(missingSet) > 1
 	if repeated {
 		// A first repair may correctly target one causal surface defect. If that
 		// repair still does not produce a provable product, another sequence of

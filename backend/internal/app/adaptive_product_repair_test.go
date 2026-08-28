@@ -20,7 +20,7 @@ func TestAdaptiveProductRepairRequiresAsyncRepairToBecomeIdleBeforeProof(t *test
 	}
 }
 
-func TestAdaptiveProductRepairPromptUsesEarliestFailedCapabilityAndPublicVisualDirection(t *testing.T) {
+func TestAdaptiveProductRepairPromptEscalatesMultipleFailedCapabilitiesImmediately(t *testing.T) {
 	spec := experiment.ProductSpec{VisualDirection: experiment.VisualDirection{Theme: "深色霓虹界面"}, ObservableAcceptance: []experiment.AcceptanceCriterion{
 		{ID: "surface", Statement: "完整产品表面可见", Required: true},
 		{ID: "terminal", Statement: "终局状态可用", Required: true},
@@ -31,12 +31,13 @@ func TestAdaptiveProductRepairPromptUsesEarliestFailedCapabilityAndPublicVisualD
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"directional_moves", "terminal_scenes"})
-	want := "请修复当前项目：使用两个不同方向键执行实际操作；视觉统一为深色霓虹界面必须能实际工作。保留已有内容，直接更新当前项目。"
-	if got != want {
-		t.Fatalf("repair prompt = %q, want %q", got, want)
+	for _, required := range []string{"上轮修复后实际预览仍失败", "使用两个不同方向键", "观察胜利和无可移动演示状态", "预览中运行确认"} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("multi-capability repair prompt lost %q: %q", required, got)
+		}
 	}
-	if strings.Contains(got, "终局") || len([]rune(got)) > 140 {
-		t.Fatalf("repair prompt was not root-cause scoped: %q", got)
+	if strings.Contains(got, "视觉统一为") || len([]rune(got)) > 240 {
+		t.Fatalf("multi-capability repair prompt was not bounded to functional recovery: %q", got)
 	}
 }
 
@@ -51,7 +52,7 @@ func TestAdaptiveProductRepairPromptFallsBackToOneRequiredCriterion(t *testing.T
 	}
 }
 
-func TestAdaptiveProductRepairPromptRepairsFoundationalSurfaceBeforeAlphabeticStability(t *testing.T) {
+func TestAdaptiveProductRepairPromptKeepsCausalOrderWhileCoveringRelatedFailures(t *testing.T) {
 	spec := experiment.ProductSpec{ObservableAcceptance: []experiment.AcceptanceCriterion{
 		{ID: "initial_surface", Statement: "初始业务内容完整渲染并包含可操作状态", Required: true},
 		{ID: "advanced_state", Statement: "高级状态可切换", Required: true},
@@ -62,8 +63,11 @@ func TestAdaptiveProductRepairPromptRepairsFoundationalSurfaceBeforeAlphabeticSt
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"continued_stability", "surface_ready"})
-	if !strings.Contains(got, "初始业务内容完整渲染并包含可操作状态") || strings.Contains(got, "连续操作后稳定") {
-		t.Fatalf("repair prompt did not choose the causal surface criterion: %q", got)
+	if !strings.Contains(got, "初始业务内容完整渲染并包含可操作状态") || !strings.Contains(got, "连续操作后稳定") {
+		t.Fatalf("repair prompt did not cover the related public failures: %q", got)
+	}
+	if strings.Index(got, "初始业务内容完整渲染") > strings.Index(got, "连续操作后稳定") {
+		t.Fatalf("repair prompt lost causal ordering: %q", got)
 	}
 }
 
