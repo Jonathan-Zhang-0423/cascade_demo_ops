@@ -93,7 +93,7 @@ func TestAdaptiveProductRepairPromptEscalatesRepeatedFailureToRuntimeVerificatio
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"surface_ready"}, 1)
-	for _, required := range []string{"只修复这个问题", "确认主要交互区域可见", "修复后实际操作确认"} {
+	for _, required := range []string{"实际预览为空白或没有显示可交互的产品主界面", "只修复这个问题", "确认主要交互区域可见", "修复后实际操作确认"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("repeated repair prompt lost %q: %q", required, got)
 		}

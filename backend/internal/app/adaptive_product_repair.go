@@ -196,6 +196,7 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	selected := []string{}
 	seen := map[string]bool{}
 	missingSet := map[string]bool{}
+	causalID := ""
 	for _, id := range missing {
 		missingSet[strings.TrimSpace(id)] = true
 	}
@@ -210,6 +211,7 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		value := adaptiveProductRepairStepStatement(step)
 		if missingSet[id] && value != "" && !seen[value] {
 			selected, seen[value] = append(selected, value), true
+			causalID = id
 			break
 		}
 	}
@@ -218,12 +220,14 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		selected = selected[:0]
 		if visualStatement := requiredProductVisualRepairStatement(spec); visualStatement != "" {
 			selected = append(selected, visualStatement)
+			causalID = "product_visual_quality"
 		}
 	}
 	if len(selected) == 0 {
 		for _, id := range missing {
 			if value := statements[strings.TrimSpace(id)]; value != "" && !seen[value] {
 				selected, seen[value] = append(selected, value), true
+				causalID = strings.TrimSpace(id)
 				break
 			}
 		}
@@ -250,6 +254,9 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	if visualOnly {
 		prefix = "只调整视觉样式，不要改动现有功能和页面结构："
 	}
+	if finding := adaptiveProductRepairObservedFinding(causalID); finding != "" {
+		prefix = "已观察到" + finding + "。" + prefix
+	}
 	maxRunes := 120
 	prefixRunes, subjectRunes, suffixRunes := []rune(prefix), []rune(subject), []rune(suffix)
 	if available := maxRunes - len(prefixRunes) - len(suffixRunes); available < len(subjectRunes) {
@@ -259,6 +266,29 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		subjectRunes = append(subjectRunes[:available-1], '…')
 	}
 	return string(prefixRunes) + string(subjectRunes) + string(suffixRunes)
+}
+
+func adaptiveProductRepairObservedFinding(causalID string) string {
+	switch strings.TrimSpace(causalID) {
+	case "surface_ready":
+		return "实际预览为空白或没有显示可交互的产品主界面"
+	case "directional_moves", "wasd_moves":
+		return "实际执行两种不同方向操作后没有观察到产品状态变化"
+	case "merge_score":
+		return "连续操作后没有观察到要求的核心状态或指标更新"
+	case "continued_stability":
+		return "连续操作后页面不再稳定可用"
+	case "undo":
+		return "撤销操作没有恢复上一状态"
+	case "touch":
+		return "移动视口中的触控操作没有产生状态变化"
+	case "terminal_scenes":
+		return "实际页面没有可操作的结果状态展示入口"
+	case "product_visual_quality":
+		return "实际页面未通过清晰可读和稳定呈现检查"
+	default:
+		return ""
+	}
 }
 
 func requiredProductVisualRepairStatement(spec experiment.ProductSpec) string {
