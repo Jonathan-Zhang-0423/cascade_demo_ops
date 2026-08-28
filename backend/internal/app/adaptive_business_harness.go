@@ -95,6 +95,40 @@ func adaptiveBusinessSnapshot(stage BrowserAgentRuntimeStage, observation *model
 	return snapshot
 }
 
+func adaptiveBusinessDecision(stage BrowserAgentRuntimeStage, observation *model.RuntimeObservation, snapshot model.BusinessStateSnapshot) model.HarnessDecision {
+	decision := model.DecideBusinessTransition(snapshot, businessTransitionForStage(stage))
+	if stage.StageKind != model.BusinessStageKindSessionSetup || observation == nil || strings.TrimSpace(stage.ExpectedRouteAfterAction) == "" {
+		return decision
+	}
+	// The compact business phase vocabulary starts at workspace. An
+	// unauthenticated entry route must therefore be decided from the observed
+	// route, otherwise workspace -> workspace would be reported as satisfied
+	// before the approved login effect runs.
+	if !businessRouteMatches(strings.TrimSpace(observation.URL), strings.TrimSpace(stage.ExpectedRouteAfterAction)) {
+		decision.Kind = model.HarnessDecisionAct
+		decision.Confidence = max(snapshot.Confidence, 0.85)
+		decision.Reason = "the authenticated successor route has not been observed"
+		decision.AbsorbedSteps = nil
+	}
+	return decision
+}
+
+func businessRouteMatches(actualValue, expectedValue string) bool {
+	actual, actualErr := url.Parse(strings.TrimSpace(actualValue))
+	if actualErr != nil || actual.Host == "" {
+		return false
+	}
+	expected, expectedErr := url.Parse(strings.TrimSpace(expectedValue))
+	if expectedErr != nil {
+		return false
+	}
+	if !expected.IsAbs() {
+		expected = actual.ResolveReference(expected)
+	}
+	return strings.EqualFold(actual.Scheme, expected.Scheme) && strings.EqualFold(actual.Host, expected.Host) &&
+		strings.TrimSuffix(actual.EscapedPath(), "/") == strings.TrimSuffix(expected.EscapedPath(), "/")
+}
+
 func businessSuccessorPhase(stage BrowserAgentRuntimeStage) model.BusinessPhase {
 	transition := businessTransitionForStage(stage)
 	if stage.StageKind == model.BusinessStageKindModeSelection {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, booleanConfigurationAssertion, booleanControlState, browserExplicitFailureAdmitsTerminal, browserRecordingSize, browserVisibleTextShowsExplicitBusinessFailure, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleControlSignalsStop, businessLifecycleSnapshotBusy, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactionStateSimilarity, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairInputSemantic, runtimeProductRepairTargetScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, visibleApprovedBooleanConfigurationLabel, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
+import { adaptiveObservationDeadline, adaptiveTargetCandidateExecutable, adaptiveTargetCandidateScore, approvedKeyboardKeys, booleanConfigurationAssertion, booleanControlState, browserExplicitFailureAdmitsTerminal, browserRecordingSize, browserVisibleTextShowsExplicitBusinessFailure, browserVisualFinalObservationDue, browserVisualHardRefreshDue, browserVisualNextDelayMultiplier, browserVisualObservationAllocation, browserVisualProductSurfaceAdmitted, browserVisualRefreshDue, browserVisualRefreshRecoveryRequired, browserVisualRefreshShouldReload, browserVisualTerminalPolicy, browserVisualTerminalWithStructuralEvidence, browserVisualUnchangedSurfaceObservationDue, businessLifecycleControlSignalsStop, businessLifecycleSnapshotBusy, businessLifecycleTextBusy, captureTargetGeometry, classifyDOMInteractiveSurface, classifyInteractiveSurfaceFrame, classifyPlayableSurfaceFrame, completedPlaceholderContradiction, confirmedBrowserVisualTerminalDecision, evidenceBoundNameAllowed, evidenceBoundNameAllowedForInteraction, evaluateRequiredValidations, interactionRequiresResolvedTarget, interactionRequiresVisualChangeEvidence, interactionStateSimilarity, interactiveSurfacePollTimeout, isEvidenceBoundSelectorAlternative, narrativeChapterForStage, normalizedApprovedTargetName, normalizedBusinessProgressText, recoveredScreenshotMetadata, resolutionAssertions, resolveTarget, resolveUniqueVisibleEvidenceBoundTarget, routeTemplateMatches, runtimeAdaptiveAuthenticationBootstrap, runtimeAuthenticationChoiceScore, runtimeContinuationConfirmationPrompt, runtimeContinuationPollDecision, runtimeContinuationWaitTimeout, runtimeExecutionContinuationScore, runtimeProductRepairInputSemantic, runtimeProductRepairTargetScore, selectRedirectedResultEntryCandidate, stageExecutionTargetURL, stageHasAuthenticationProvenance, urlPolicyError, validatedStageSecretValues, validationTimeoutMilliseconds, visibleApprovedBooleanConfigurationLabel, type BrowserTargetResolutionAttempt } from "../src/browser-agent-runtime.js";
 
 describe("browser visual polling terminal evidence", () => {
   const verdict = (decision: "in_progress" | "succeeded" | "failed" | "unknown", confidence: number) => ({
@@ -553,6 +553,30 @@ describe("runtime adaptive authentication bootstrap", () => {
     expect(runtimeAdaptiveAuthenticationBootstrap({ ...stage, expected_route_after_action: "/login" }, "https://app.example/login")).toBe(false);
     expect(runtimeAdaptiveAuthenticationBootstrap({ ...stage, interactions: [{ ...stage.interactions[0], target: { selector: "#login" } }] }, "https://app.example/login")).toBe(false);
     expect(runtimeAdaptiveAuthenticationBootstrap({ ...stage, stage_kind: "business_submit" }, "https://app.example/login")).toBe(false);
+  });
+
+  it("does not let unrelated selector evidence disable live authentication discovery", () => {
+    const unrelated = {
+      kind: "css", value: "button[type=button]", observed_page_role: "product", observed_form_role: "none",
+      observed_url: "https://app.example/login", evidence_digest_sha256: "evidence",
+    };
+    const withUnrelatedEvidence = { ...stage, evidence_bound_selector_alternatives: [unrelated] };
+    expect(runtimeAdaptiveAuthenticationBootstrap(withUnrelatedEvidence, "https://app.example/login")).toBe(true);
+    expect(stageHasAuthenticationProvenance(withUnrelatedEvidence, "https://app.example/login")).toBe(true);
+  });
+
+  it("accepts only form-tagged provenance for a packaged authentication path", () => {
+    const packaged = {
+      ...stage,
+      interactions: [{ ...stage.interactions[0], target: { selector: "button[type=button]" } }],
+      evidence_bound_selector_alternatives: [{
+        kind: "css", value: "button[type=submit]", observed_page_role: "authentication", observed_form_role: "authentication",
+        observed_url: "https://app.example/login", evidence_digest_sha256: "evidence",
+      }],
+    };
+    expect(runtimeAdaptiveAuthenticationBootstrap(packaged, "https://app.example/login")).toBe(false);
+    expect(stageHasAuthenticationProvenance(packaged, "https://app.example/login")).toBe(true);
+    expect(stageHasAuthenticationProvenance(packaged, "https://app.example/other")).toBe(true);
   });
 
   it("selects an email-compatible login method with the global action threshold and margin", () => {

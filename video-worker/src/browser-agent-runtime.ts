@@ -3407,7 +3407,11 @@ function formalAuthenticationTaskSecretRef(session: BrowserAgentSession, stage: 
   if (refs.length !== 1 || stage.stage_kind !== "session_setup") throw new Error("browser_agent_task_secret_stage_not_approved");
   const ref = refs[0]!;
   const secret = session.taskSecrets[ref];
-  if (!secret) return undefined;
+  // A task-scoped login secret is the only complete username/password value
+  // admitted by the formal login path. Falling through to the legacy
+  // per-action secret map turns an unavailable task credential into an opaque
+  // action failure and can never complete a two-field login form.
+  if (!secret) throw new Error("browser_agent_task_secret_unavailable");
   const required = ["fill_username", "fill_password", "submit_login"];
   if (!required.every((operation) => secret.allowed_operations.includes(operation))) throw new Error("browser_agent_task_secret_operation_not_approved");
   const current = new URL(session.page.url());
@@ -3471,15 +3475,19 @@ function authenticationCandidates(stage: BrowserAgentWorkerStage): BrowserAgentS
     .filter((candidate, index, all) => candidate?.value && all.findIndex((item) => item.kind === candidate.kind && item.value === candidate.value) === index);
 }
 
-function stageHasAuthenticationProvenance(stage: BrowserAgentWorkerStage, currentURL: string): boolean {
-  const candidates = authenticationCandidates(stage);
-  if (candidates.length === 0 && runtimeAdaptiveAuthenticationBootstrap(stage, currentURL)) return true;
-  return candidates.some((candidate) =>
+function approvedAuthenticationCandidates(stage: BrowserAgentWorkerStage): BrowserAgentSelectorCandidate[] {
+  return authenticationCandidates(stage).filter((candidate) =>
     candidate.observed_page_role === "authentication"
     && candidate.observed_form_role === "authentication"
     && Boolean(candidate.evidence_digest_sha256)
-    && Boolean(candidate.observed_url)
-    && urlMatches(candidate.observed_url!, stage.url || stage.route || stage.entry_route || currentURL));
+    && Boolean(candidate.observed_url));
+}
+
+export function stageHasAuthenticationProvenance(stage: BrowserAgentWorkerStage, currentURL: string): boolean {
+  const candidates = approvedAuthenticationCandidates(stage);
+  if (candidates.length === 0 && runtimeAdaptiveAuthenticationBootstrap(stage, currentURL)) return true;
+  return candidates.some((candidate) =>
+    urlMatches(candidate.observed_url!, stage.url || stage.route || stage.entry_route || currentURL));
 }
 
 // Selector-free session setup is admitted only when the approved package
@@ -3488,7 +3496,10 @@ function stageHasAuthenticationProvenance(stage: BrowserAgentWorkerStage, curren
 export function runtimeAdaptiveAuthenticationBootstrap(stage: BrowserAgentWorkerStage, currentURL: string): boolean {
   if (stage.stage_kind !== "session_setup" || stage.target_contract?.destructive !== false) return false;
   if (!stage.expected_route_after_action || !stage.interactions?.length) return false;
-  if (authenticationCandidates(stage).length > 0) return false;
+  // Unrelated or entry-choice candidates must not disable selector-free
+  // bootstrap. Only a fully evidenced authentication-form candidate owns the
+  // formal selector path.
+  if (approvedAuthenticationCandidates(stage).length > 0) return false;
   const secretRefs = [...new Set(stage.interactions.map((item) => String(item.secret_ref || "").trim()).filter(Boolean))];
   if (secretRefs.length !== 1 || stage.interactions.some((item) => item.non_destructive !== true || Boolean(item.target?.selector || item.target?.test_id))) return false;
   const entry = stage.url || stage.route || stage.entry_route || currentURL;

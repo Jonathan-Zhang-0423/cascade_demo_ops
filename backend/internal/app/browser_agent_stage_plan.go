@@ -376,7 +376,7 @@ func (o browserAgentStageOrchestrator) Run(ctx context.Context, plan BrowserAgen
 		if adaptiveBusinessHarnessEnabled(plan) {
 			snapshot := adaptiveBusinessSnapshot(stage, &observed.Observation, nil, observed.TargetResolved, timeNowUTC())
 			observed.Observation.BusinessState = &snapshot
-			decision := model.DecideBusinessTransition(snapshot, businessTransitionForStage(stage))
+			decision := adaptiveBusinessDecision(stage, &observed.Observation, snapshot)
 			if err := appendEventDetails(stage, model.StageExecutionEventBusinessStateObserved, &observed.Observation, observed.EvidenceRefs, &decision, nil, nil); err != nil {
 				return result, err
 			}
@@ -1385,6 +1385,14 @@ func browserAgentPathForbidden(value string, forbiddenPages []string, forbiddenP
 func redactedBrowserAgentFailureCode(err error) string {
 	message := strings.ToLower(strings.TrimSpace(errString(err)))
 	for _, code := range []string{
+		"browser_agent_task_secret_unavailable",
+		"browser_agent_task_secret_expired",
+		"browser_agent_task_secret_scope_invalid",
+		"browser_agent_task_secret_stage_not_approved",
+		"browser_agent_task_secret_operation_not_approved",
+		"browser_agent_task_secret_domain_not_approved",
+		"authentication_context_unverified",
+		"login_entry_evidence_missing",
 		"browser_agent_login_form_not_resolved",
 		"browser_agent_login_continue_not_resolved",
 		"browser_agent_login_password_not_resolved",

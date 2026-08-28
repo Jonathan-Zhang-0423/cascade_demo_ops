@@ -639,6 +639,22 @@ func TestBrowserAgentStageOrchestratorEmitsOrderedEventsAndStopsOnFailure(t *tes
 	}
 }
 
+func TestRedactedBrowserAgentFailureCodePreservesTaskCredentialPreflightCategory(t *testing.T) {
+	for _, code := range []string{
+		"browser_agent_task_secret_unavailable",
+		"browser_agent_task_secret_expired",
+		"authentication_context_unverified",
+		"login_entry_evidence_missing",
+	} {
+		if got := redactedBrowserAgentFailureCode(errors.New("rpc failed: " + code)); got != code {
+			t.Fatalf("expected redacted category %q, got %q", code, got)
+		}
+	}
+	if got := redactedBrowserAgentFailureCode(errors.New("locator contained private page text")); got != "browser_agent_action_failed" {
+		t.Fatalf("unexpected generic failure category: %q", got)
+	}
+}
+
 func TestBrowserAgentStageOrchestratorStopsWhenOutcomeVerifierBlocks(t *testing.T) {
 	pkg := readBrowserAgentOutlineFixture(t)
 	verifier := &stubStageVerifier{decision: model.ValidationDecisionStopAndReport}
