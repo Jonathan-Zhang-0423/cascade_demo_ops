@@ -82,6 +82,9 @@ func (s *Service) prepareAdaptiveSameEntityProductRepair(ctx context.Context, pr
 	if err != nil {
 		return ProductRunPrepareResult{}, err
 	}
+	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
+		preferDeterministicAdaptiveProofs(next.ProjectContext.Inputs.InteractionContracts)
+	}
 	markAdaptiveRepairInteractionContracts(next.ProjectContext.Inputs.InteractionContracts)
 	if next.ProjectIntelligence.RunIntentScope == nil {
 		next.ProjectIntelligence.RunIntentScope = &model.RunIntentScope{ID: "same_entity_repair_scope_" + projectID, ProjectID: projectID, SchemaVersion: model.ProjectIntelligencePackSchemaVersion}

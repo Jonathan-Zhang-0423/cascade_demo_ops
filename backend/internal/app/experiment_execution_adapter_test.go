@@ -233,6 +233,14 @@ func TestCompileStateVariantProofUsesVisualAndVariantChannelsWithoutARIARequirem
 	}
 }
 
+func TestAdaptiveV2PrefersDeterministicProofsBeforeStrictProductVisualGate(t *testing.T) {
+	contracts := []model.InteractionContract{{Parameters: map[string]any{"require_visual_terminal_confirmation": true, "evidence_step_id": "surface"}}}
+	preferDeterministicAdaptiveProofs(contracts)
+	if _, exists := contracts[0].Parameters["require_visual_terminal_confirmation"]; exists || contracts[0].Parameters["evidence_step_id"] != "surface" {
+		t.Fatalf("deterministic proof policy removed unrelated contract data or retained the redundant visual poll: %+v", contracts[0].Parameters)
+	}
+}
+
 func TestExperimentProductEvidenceSummaryStaysInternalAndDetailed(t *testing.T) {
 	loaded, err := experiment.LoadDefinition("../../../experiments", "2048-v2")
 	if err != nil {
@@ -280,6 +288,13 @@ func TestRecordLiveBrowserVisualObservationsCountsCallsAndRequiresConfidentTermi
 	if err != nil || calls != 4 || emitted != 0 || !terminal {
 		t.Fatalf("recovered live observations were not reused idempotently: calls=%d emitted=%d terminal=%t err=%v", calls, emitted, terminal, err)
 	}
+	calls, terminal, err = recordLiveBrowserVisualObservations(downloads, 1, func(update experiment.LegExecutionUpdate) error {
+		emitted++
+		return nil
+	}, 4)
+	if err != nil || calls != 0 || emitted != 0 || !terminal {
+		t.Fatalf("already-recorded observations consumed the resume budget: calls=%d emitted=%d terminal=%t err=%v", calls, emitted, terminal, err)
+	}
 }
 
 func TestReadAdaptiveCapabilityScoreUsesPersistedStageEvent(t *testing.T) {
@@ -295,6 +310,28 @@ func TestReadAdaptiveCapabilityScoreUsesPersistedStageEvent(t *testing.T) {
 	score, evidence, err := readAdaptiveCapabilityScore([]CloudDeliverableDownloadResult{{ArtifactID: "events", Kind: "browser_agent_stage_event_log", LocalPath: path}})
 	if err != nil || score == nil || score.TotalScore != 88 || evidence != "events" {
 		t.Fatalf("capability score was not recovered from stage events: score=%+v evidence=%q err=%v", score, evidence, err)
+	}
+}
+
+func TestReadAdaptiveCapabilityScoreNormalizesRecoveryStagesToFrozenPlan(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stage-events.jsonl")
+	results := []model.CapabilityResult{
+		{ID: "stage_step_02_business_stage_contract_experiment_interaction_touch_resume", Layer: "core", Score: 15, Passed: true},
+		{ID: "stage_step_03_business_stage_contract_experiment_interaction_surface_ready", Layer: "core", Score: 40, Passed: true},
+		{ID: "stage_step_04_business_stage_contract_experiment_interaction_touch", Layer: "core", Score: 60, Passed: true},
+	}
+	event := model.StageExecutionEvent{SchemaVersion: model.StageExecutionEventSchemaVersion, EventType: model.StageExecutionEventCapabilityScored, CapabilityScore: &model.CapabilityScore{SchemaVersion: "demoops.capability_score.v1", CoreScore: 115, TotalScore: 115, CorePassed: true, EligibleForFilm: true, Results: results}}
+	payload, _ := json.Marshal(event)
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := experiment.InteractionPlan{Steps: []experiment.InteractionStep{
+		{StepID: "surface_ready", CapabilityLayer: "core", CapabilityScore: 40},
+		{StepID: "touch", CapabilityLayer: "core", CapabilityScore: 60},
+	}}
+	score, _, err := readAdaptiveCapabilityScore([]CloudDeliverableDownloadResult{{ArtifactID: "events", Kind: "browser_agent_stage_event_log", LocalPath: path}}, plan)
+	if err != nil || score == nil || score.TotalScore != 100 || !score.CorePassed || len(score.Results) != 2 {
+		t.Fatalf("recovery navigation polluted the frozen capability score: score=%+v err=%v", score, err)
 	}
 }
 

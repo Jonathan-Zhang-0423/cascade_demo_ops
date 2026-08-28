@@ -159,6 +159,9 @@ func (a *appExperimentExecutionAdapter) ExecuteLeg(ctx context.Context, request 
 	if err != nil {
 		return &experiment.AdapterError{Code: "interaction_contract_compile_failed", Phase: "plan_review", State: experiment.RunStateFailed, Retryable: false, Cause: err}
 	}
+	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
+		preferDeterministicAdaptiveProofs(interactionContracts)
+	}
 	var prepared ProductRunPrepareResult
 	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV1 {
 		prepared, err = a.service.prepareAdaptiveExperimentRun(ctx, request, interactionContracts)
@@ -656,6 +659,14 @@ func compileExperimentInteractionContracts(plan experiment.InteractionPlan, obse
 	return result, nil
 }
 
+func preferDeterministicAdaptiveProofs(contracts []model.InteractionContract) {
+	for index := range contracts {
+		if contracts[index].Parameters != nil {
+			delete(contracts[index].Parameters, "require_visual_terminal_confirmation")
+		}
+	}
+}
+
 func (a *appExperimentExecutionAdapter) completeDirectLeg(ctx context.Context, request experiment.LegExecutionRequest, projectID, jobID string, status model.DirectJobStatus, commitEffect bool, emit func(experiment.LegExecutionUpdate) error) error {
 	return a.completeDirectLegWithHistory(ctx, request, projectID, jobID, status, commitEffect, nil, emit)
 }
@@ -749,16 +760,17 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 			return err
 		}
 	}
-	liveVisualCalls, liveTerminal, liveErr := recordLiveBrowserVisualObservations(downloads, request.VisualCallBudget, emit)
+	previousVisualCalls := max(0, request.ObservationPlan.MaxVisualCalls-request.VisualCallBudget)
+	liveVisualCalls, liveTerminal, liveErr := recordLiveBrowserVisualObservations(downloads, request.VisualCallBudget, emit, previousVisualCalls)
 	if liveErr != nil {
 		return liveErr
 	}
-	if liveVisualCalls > request.ObservationPlan.MaxVisualCalls {
+	if liveVisualCalls > request.VisualCallBudget {
 		return &experiment.AdapterError{Code: "visual_call_budget_exceeded", Phase: "visual_observation_deferred", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: evidenceRefs}
 	}
 	coreCapabilityTerminal := false
 	if isAdaptiveExperimentHarness(request.HarnessProfile) {
-		score, scoreEvidence, scoreErr := readAdaptiveCapabilityScore(downloads)
+		score, scoreEvidence, scoreErr := readAdaptiveCapabilityScore(downloads, request.InteractionPlan)
 		if scoreErr != nil {
 			return &experiment.AdapterError{Code: "capability_score_invalid", Phase: "interaction_verification", State: experiment.RunStateFailed, Retryable: false, EvidenceRefs: evidenceRefs, Cause: scoreErr}
 		}
@@ -1125,7 +1137,7 @@ func adaptiveFailedResultShouldCommitSubmit(request experiment.LegExecutionReque
 	return commitEffect && request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 && !checkpointHasConfirmedTargetSubmit(request.Checkpoint)
 }
 
-func readAdaptiveCapabilityScore(downloads []CloudDeliverableDownloadResult) (*model.CapabilityScore, string, error) {
+func readAdaptiveCapabilityScore(downloads []CloudDeliverableDownloadResult, plans ...experiment.InteractionPlan) (*model.CapabilityScore, string, error) {
 	var latest *model.CapabilityScore
 	evidence := ""
 	for _, item := range downloads {
@@ -1159,14 +1171,50 @@ func readAdaptiveCapabilityScore(downloads []CloudDeliverableDownloadResult) (*m
 	if latest == nil {
 		return nil, "", nil
 	}
+	if len(plans) > 0 && len(plans[0].Steps) > 0 {
+		normalized := normalizeAdaptiveCapabilityScore(*latest, plans[0])
+		latest = &normalized
+	}
 	if latest.SchemaVersion != "demoops.capability_score.v1" || latest.CoreScore < 0 || latest.EnhancementScore < 0 || latest.TotalScore != latest.CoreScore+latest.EnhancementScore || latest.TotalScore > 100 || latest.EligibleForFilm != latest.CorePassed {
 		return nil, "", errors.New("stage event log contains an invalid capability score")
 	}
 	return latest, evidence, nil
 }
 
-func recordLiveBrowserVisualObservations(downloads []CloudDeliverableDownloadResult, newCallBudget int, emit func(experiment.LegExecutionUpdate) error) (int, bool, error) {
+func normalizeAdaptiveCapabilityScore(score model.CapabilityScore, plan experiment.InteractionPlan) model.CapabilityScore {
+	byStepID := map[string]model.CapabilityResult{}
+	for _, result := range score.Results {
+		for _, step := range plan.Steps {
+			stepID := strings.TrimSpace(step.StepID)
+			if stepID != "" && (result.ID == stepID || strings.HasSuffix(result.ID, "_experiment_interaction_"+stepID)) {
+				byStepID[stepID] = result
+				break
+			}
+		}
+	}
+	results := make([]model.CapabilityResult, 0, len(plan.Steps))
+	for _, step := range plan.Steps {
+		if step.CapabilityLayer != "core" && step.CapabilityLayer != "enhancement" {
+			continue
+		}
+		observed, ok := byStepID[strings.TrimSpace(step.StepID)]
+		results = append(results, model.CapabilityResult{
+			ID: step.StepID, Layer: step.CapabilityLayer, Score: step.CapabilityScore,
+			Passed: ok && observed.Passed, Evidence: append([]string{}, observed.Evidence...),
+		})
+	}
+	if len(results) == 0 {
+		return score
+	}
+	return model.ScoreCapabilities(results)
+}
+
+func recordLiveBrowserVisualObservations(downloads []CloudDeliverableDownloadResult, newCallBudget int, emit func(experiment.LegExecutionUpdate) error, alreadyRecorded ...int) (int, bool, error) {
 	calls, recorded, terminal := 0, 0, false
+	remainingSkip := 0
+	if len(alreadyRecorded) > 0 {
+		remainingSkip = max(0, alreadyRecorded[0])
+	}
 	for _, item := range downloads {
 		if item.Kind != "browser_visual_observation" {
 			continue
@@ -1187,12 +1235,18 @@ func recordLiveBrowserVisualObservations(downloads []CloudDeliverableDownloadRes
 		if err := json.Unmarshal(data, &observation); err != nil || observation.SchemaVersion != browserVisualObservationSchemaVersion {
 			return calls, terminal, &experiment.AdapterError{Code: "live_visual_observation_invalid", Phase: "visual_observation_deferred", State: experiment.RunStateFailed, Retryable: false, Cause: err}
 		}
-		calls += max(1, observation.ProviderCalls)
+		itemCalls := max(1, observation.ProviderCalls)
+		calls += itemCalls
 		if observation.Decision == "succeeded" && observation.Confidence >= .85 {
 			terminal = true
 		}
+		if remainingSkip > 0 {
+			skipped := min(remainingSkip, itemCalls)
+			remainingSkip -= skipped
+			itemCalls -= skipped
+		}
 		if emit != nil && recorded < newCallBudget {
-			toRecord := max(1, observation.ProviderCalls)
+			toRecord := itemCalls
 			if toRecord > newCallBudget-recorded {
 				toRecord = newCallBudget - recorded
 			}
@@ -1204,7 +1258,14 @@ func recordLiveBrowserVisualObservations(downloads []CloudDeliverableDownloadRes
 			}
 		}
 	}
-	return calls, terminal, nil
+	return max(0, calls-firstOptionalInt(alreadyRecorded)), terminal, nil
+}
+
+func firstOptionalInt(values []int) int {
+	if len(values) == 0 {
+		return 0
+	}
+	return max(0, values[0])
 }
 
 func (a *appExperimentExecutionAdapter) waitForDirectResult(ctx context.Context, projectID, jobID string, request experiment.LegExecutionRequest, emit func(experiment.LegExecutionUpdate) error) (model.DirectJobStatus, error) {

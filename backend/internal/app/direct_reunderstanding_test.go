@@ -582,7 +582,7 @@ func TestSyncAdaptiveBusinessStagePlanKeepsDistinctLoginSuccessRoute(t *testing.
 func TestNormalizeAdaptiveReconciliationResumeAcceptsTerminalInteractionFailure(t *testing.T) {
 	graph := model.NewDemoWorkflowGraph("graph_terminal_interaction_repair_1", "project", "https://app.example.com/workspace")
 	graph.Nodes = []*model.GraphNode{{
-		ID: "resume_terminal", ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: "https://app.example.com/old"}},
+		ID: "resume_terminal", ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate, Target: model.ActionTarget{URL: "https://app.example.com/old"}, Parameters: map[string]any{"capability_layer": "core", "capability_score": 15}},
 		InteractionContract: &model.InteractionContract{ContractID: "stale_interaction_contract", ReplayPolicy: model.InteractionReplayIdempotentWrite},
 		Metadata:            map[string]any{"terminal_repair_resume": true},
 	}, {
@@ -598,6 +598,9 @@ func TestNormalizeAdaptiveReconciliationResumeAcceptsTerminalInteractionFailure(
 	resume := graph.Nodes[0]
 	if resume.PageRef != observedURL || resume.ActionSpec.Target.URL != observedURL || resume.InteractionContract == nil || resume.InteractionContract.ReplayPolicy != model.InteractionReplayObserveOnly {
 		t.Fatalf("terminal resume was not normalized to the observed entity: %+v", resume)
+	}
+	if len(resume.ActionSpec.Parameters) != 0 {
+		t.Fatalf("recovery navigation retained capability weight from the promoted source proof: %+v", resume.ActionSpec.Parameters)
 	}
 	if value, _ := resume.Metadata["adaptive_successor_resume"].(bool); !value {
 		t.Fatalf("normalized resume is not recognized by the adaptive graph compiler: %+v", resume.Metadata)

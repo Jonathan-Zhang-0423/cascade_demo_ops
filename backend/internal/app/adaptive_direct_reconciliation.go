@@ -786,13 +786,16 @@ func normalizeAdaptiveReconciliationResume(graph *model.DemoWorkflowGraph, obser
 			continue
 		}
 		node.PageRef = observedURL
-		node.ActionSpec.Target.URL = observedURL
+		target := node.ActionSpec.Target
+		target.URL = observedURL
+		node.Action = string(model.GraphActionNavigate)
+		node.ActionSpec = &model.GraphAction{Type: model.GraphActionNavigate, Target: target, TimeoutMS: 30_000, WaitUntil: "domcontentloaded"}
 		node.InteractionContract = &model.InteractionContract{
 			SchemaVersion: model.InteractionContractSchemaVersion,
 			ContractID:    "interaction_adaptive_observed_resume_" + node.ID,
 			SemanticGoal:  "进入已观察到的业务实体，只继续观察和验证。",
 			ActionKind:    model.GraphActionNavigate, ReplayPolicy: model.InteractionReplayObserveOnly,
-			TargetSemanticID: "observed_successor_entity", ActionTarget: node.ActionSpec.Target,
+			TargetSemanticID: "observed_successor_entity", ActionTarget: target,
 			ExpectedTransitions: []model.InteractionPredicate{{
 				ID: "observe_adaptive_successor_route", Kind: "url_matches", Target: model.ActionTarget{URL: observedURL},
 				Expected: observedURL, Required: true, TimeoutMS: 30_000, EvidenceRefs: append([]model.EvidenceRef(nil), evidence...),
