@@ -1553,7 +1553,7 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 	}
 	for _, download := range downloads {
 		if download.Kind == "browser_agent_stage_event_log" || download.Kind == "recording_segment_manifest" || download.Kind == "product_visual_quality_report" {
-			supplements = append(supplements, model.FinalFilmReviewSupplement{Role: "experiment_" + safePathSegment(download.Kind), SourcePath: download.LocalPath, RelativePath: "experiment/capture-" + safePathSegment(download.ArtifactID) + "-" + filepath.Base(download.LocalPath), Required: false})
+			supplements = append(supplements, experimentCaptureReviewSupplement(download))
 		}
 	}
 	var job model.FinalFilmJob
@@ -1703,6 +1703,21 @@ func closedLoopNarrativeBoundary(request experiment.LegExecutionRequest, downloa
 		return report, facts, fmt.Errorf("required recording chapters are incomplete: %s", strings.Join(report.QualityIssues, ", "))
 	}
 	return report, facts, nil
+}
+
+func experimentCaptureReviewSupplement(download CloudDeliverableDownloadResult) model.FinalFilmReviewSupplement {
+	kind := safePathSegment(download.Kind)
+	artifactID := safePathSegment(download.ArtifactID)
+	return model.FinalFilmReviewSupplement{
+		// A closed-loop run can carry an initial capture, observe-only
+		// reconciliations, and product-repair captures of the same kind. A
+		// review-package role is an identity, so bind it to the unique Artifact
+		// instead of collapsing same-kind captures into duplicate roles.
+		Role:         "experiment_" + kind + "_" + artifactID,
+		SourcePath:   download.LocalPath,
+		RelativePath: "experiment/capture-" + artifactID + "-" + filepath.Base(download.LocalPath),
+		Required:     false,
+	}
 }
 
 func (a *appExperimentExecutionAdapter) materializeReviewSupplements(request experiment.LegExecutionRequest) ([]model.FinalFilmReviewSupplement, error) {

@@ -244,6 +244,21 @@ func TestAdaptiveV2PrefersDeterministicProofsBeforeStrictProductVisualGate(t *te
 	}
 }
 
+func TestExperimentCaptureReviewSupplementUsesArtifactScopedIdentity(t *testing.T) {
+	first := experimentCaptureReviewSupplement(CloudDeliverableDownloadResult{
+		ArtifactID: "stage_event_log_initial", Kind: "browser_agent_stage_event_log", LocalPath: filepath.Join(t.TempDir(), "initial.jsonl"),
+	})
+	second := experimentCaptureReviewSupplement(CloudDeliverableDownloadResult{
+		ArtifactID: "stage_event_log_repair", Kind: "browser_agent_stage_event_log", LocalPath: filepath.Join(t.TempDir(), "repair.jsonl"),
+	})
+	if first.Role == second.Role || first.RelativePath == second.RelativePath {
+		t.Fatalf("same-kind captures collapsed to duplicate review identities: first=%+v second=%+v", first, second)
+	}
+	if !strings.Contains(first.Role, "stage_event_log_initial") || !strings.Contains(second.Role, "stage_event_log_repair") {
+		t.Fatalf("artifact identity was not retained in review roles: first=%+v second=%+v", first, second)
+	}
+}
+
 func TestExperimentProductEvidenceSummaryStaysInternalAndDetailed(t *testing.T) {
 	loaded, err := experiment.LoadDefinition("../../../experiments", "2048-v2")
 	if err != nil {
