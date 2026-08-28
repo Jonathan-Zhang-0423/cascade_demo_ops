@@ -49,8 +49,17 @@ func businessTransitionForStage(stage BrowserAgentRuntimeStage) model.BusinessTr
 }
 
 func adaptiveBusinessSnapshot(stage BrowserAgentRuntimeStage, observation *model.RuntimeObservation, before *model.RuntimeObservation, targetResolved bool, observedAt time.Time) model.BusinessStateSnapshot {
+	initialPhase := businessTransitionForStage(stage).From
+	if stage.StageKind == model.BusinessStageKindFinalObserve {
+		// Entering a final-observe step is a plan position, not proof that a
+		// preview candidate exists. Builder shells and empty preview placeholders
+		// can expose generic main/application regions while execution is active.
+		// Keep the snapshot conservative until the stage's outcome validations
+		// establish the real successor state.
+		initialPhase = model.BusinessPhaseBuildRunning
+	}
 	snapshot := model.BusinessStateSnapshot{
-		SchemaVersion: "demoops.business_state_snapshot.v1", Phase: businessTransitionForStage(stage).From,
+		SchemaVersion: "demoops.business_state_snapshot.v1", Phase: initialPhase,
 		Confidence: 0.7, ObservedAt: observedAt.UTC(),
 	}
 	if observation == nil {

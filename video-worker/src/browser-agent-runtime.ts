@@ -2864,6 +2864,8 @@ async function waitForPlayableSurfaceWithVisualObservation(
 	let hardRefreshed = false;
 	let sawBusy = false;
 	let nextCaptureAt = Date.now();
+	let nextHeartbeatAtMS = startedAtMS + 60_000;
+	let heartbeatSequence = 0;
 	while (Date.now() < deadline) {
 		const nowMS = Date.now();
 		if (nowMS >= nextProgressProbeAtMS) {
@@ -2899,6 +2901,29 @@ async function waitForPlayableSurfaceWithVisualObservation(
 		}
 		const busyNow = await pageStillBusy(session.page, requireRepairIdleTransition);
 		if (busyNow) sawBusy = true;
+		if (browserTemporalHeartbeatDue(Date.now(), nextHeartbeatAtMS)) {
+			heartbeatSequence += 1;
+			const heartbeat = await captureBrowserAgentTemporalObservation({
+				session_id: session.id,
+				scope_id: `${stage.node_id}-build-observation`,
+				sequence: heartbeatSequence,
+				phase: busyNow ? "build_running" : "preview_candidate",
+				reason: "heartbeat",
+			});
+			const artifacts = session.visionPollArtifactsByNodeID.get(stage.node_id) || [];
+			artifacts.push(heartbeat.artifact);
+			session.visionPollArtifactsByNodeID.set(stage.node_id, artifacts);
+			const evidence = session.visionPollEvidenceByNodeID.get(stage.node_id) || [];
+			evidence.push({
+				id: `evidence_${heartbeat.artifact.id}`,
+				kind: "webpage_screenshot",
+				summary: heartbeat.material_change ? "构建等待关键帧：页面状态发生变化" : "构建等待心跳：页面状态保持稳定",
+				artifact_id: heartbeat.artifact.id,
+				confidence: 1,
+			});
+			session.visionPollEvidenceByNodeID.set(stage.node_id, evidence);
+			nextHeartbeatAtMS = Date.now() + 60_000;
+		}
 		const target = await interactiveSurfaceTargetOnce(session.page);
 		const explicitFailure = !busyNow && !target && await pageShowsExplicitBusinessFailure(session.page);
 		if (browserExplicitFailureAdmitsTerminal(explicitFailure, busyNow, Boolean(target))) {
@@ -2969,6 +2994,10 @@ async function waitForPlayableSurfaceWithVisualObservation(
 		await session.page.waitForTimeout(Math.min(1_000, Math.max(100, deadline - Date.now())));
 	}
 	return { surface: false, score: false, controls: false };
+}
+
+export function browserTemporalHeartbeatDue(nowMS: number, nextHeartbeatAtMS: number): boolean {
+	return Number.isFinite(nowMS) && Number.isFinite(nextHeartbeatAtMS) && nowMS >= nextHeartbeatAtMS;
 }
 
 export function browserVisibleTextShowsExplicitBusinessFailure(value: string): boolean {
