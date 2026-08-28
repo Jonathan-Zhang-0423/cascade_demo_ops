@@ -218,6 +218,21 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 			}
 		}
 	}
+	repeated := len(priorAttempts) > 0 && priorAttempts[0] > 0
+	if repeated {
+		// A first repair may correctly target one causal surface defect. If that
+		// repair still does not produce a provable product, another sequence of
+		// one-item prompts tends to polish a placeholder without ever completing
+		// the business workflow. Escalate using only the remaining public
+		// interaction intents, in declared order, while keeping one bounded prompt.
+		for _, step := range plan.Steps {
+			id := strings.TrimSpace(step.StepID)
+			value := strings.TrimSpace(step.SemanticIntent)
+			if missingSet[id] && value != "" && !seen[value] {
+				selected, seen[value] = append(selected, value), true
+			}
+		}
+	}
 	if len(selected) == 0 {
 		for _, id := range missing {
 			if value := statements[strings.TrimSpace(id)]; value != "" && !seen[value] {
@@ -237,8 +252,10 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	if len(selected) == 0 {
 		return ""
 	}
-	repeated := len(priorAttempts) > 0 && priorAttempts[0] > 0
-	subject := strings.TrimRight(selected[0], ".。；; ")
+	for index := range selected {
+		selected[index] = strings.TrimRight(selected[index], ".。；; ")
+	}
+	subject := strings.Join(selected, "；")
 	// The initial one-line request intentionally stays provider-neutral and
 	// concise. When a real product defect already requires a bounded repair,
 	// carry the frozen public visual direction into that same edit so the
@@ -252,8 +269,12 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	if repeated {
 		prefix, suffix = "上轮修复后实际预览仍失败。请先复现并检查已加载代码，再修复：", "。完成后在预览中运行确认，保留已有内容。"
 	}
+	maxRunes := 140
+	if repeated {
+		maxRunes = 240
+	}
 	prefixRunes, subjectRunes, suffixRunes := []rune(prefix), []rune(subject), []rune(suffix)
-	if available := 140 - len(prefixRunes) - len(suffixRunes); available < len(subjectRunes) {
+	if available := maxRunes - len(prefixRunes) - len(suffixRunes); available < len(subjectRunes) {
 		if available < 2 {
 			return ""
 		}

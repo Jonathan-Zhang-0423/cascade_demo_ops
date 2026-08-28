@@ -86,10 +86,35 @@ func TestAdaptiveProductRepairPromptEscalatesRepeatedFailureToRuntimeVerificatio
 			t.Fatalf("repeated repair prompt leaked internal term %q: %q", internal, got)
 		}
 	}
-	if len([]rune(got)) > 140 {
+	if len([]rune(got)) > 240 {
 		t.Fatalf("repeated repair prompt is too long: %d %q", len([]rune(got)), got)
 	}
 	if !strings.HasSuffix(got, "保留已有内容。") || strings.Contains(got, ".。") {
 		t.Fatalf("repeated repair prompt lost its public suffix or punctuation: %q", got)
+	}
+}
+
+func TestAdaptiveProductRepairPromptEscalatesAllRemainingPublicCapabilities(t *testing.T) {
+	spec := experiment.ProductSpec{ObservableAcceptance: []experiment.AcceptanceCriterion{{ID: "initial_surface", Statement: "初始业务内容完整渲染并包含可操作状态", Required: true}}}
+	plan := experiment.InteractionPlan{Steps: []experiment.InteractionStep{
+		{StepID: "surface_ready", SemanticIntent: "确认主要交互区域可见"},
+		{StepID: "directional_moves", SemanticIntent: "使用两个不同方向执行实际操作"},
+		{StepID: "undo", SemanticIntent: "撤销并恢复上一状态"},
+		{StepID: "terminal_scenes", SemanticIntent: "显示成功和结束演示状态"},
+	}}
+
+	got := adaptiveProductRepairPrompt(spec, plan, []string{"surface_ready", "directional_moves", "undo", "terminal_scenes"}, 1)
+	for _, publicCapability := range []string{"初始业务内容完整渲染", "两个不同方向", "撤销并恢复", "成功和结束"} {
+		if !strings.Contains(got, publicCapability) {
+			t.Fatalf("repeated repair prompt omitted public capability %q: %q", publicCapability, got)
+		}
+	}
+	if len([]rune(got)) > 240 {
+		t.Fatalf("repeated repair prompt exceeded its bounded public request: %d %q", len([]rune(got)), got)
+	}
+	for _, internal := range []string{"Harness", "selector", "schema", "expected_outcome", "observed_state"} {
+		if strings.Contains(got, internal) {
+			t.Fatalf("repeated repair prompt leaked internal term %q: %q", internal, got)
+		}
 	}
 }
