@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"cascade-demoops/backend/internal/config"
 	"cascade-demoops/backend/internal/llm"
@@ -23,6 +24,16 @@ type browserVisualFallbackTestLLM struct {
 	browserVisualTestLLM
 	multimodalCalls int
 	textCalls       int
+}
+
+type blockingBrowserVisualTestLLM struct {
+	browserVisualTestLLM
+	release chan struct{}
+}
+
+func (f *blockingBrowserVisualTestLLM) GenerateMultimodal(_ context.Context, task config.ModelTask, request llm.MultimodalRequest, target any) (*llm.CallTrace, error) {
+	<-f.release
+	return f.browserVisualTestLLM.GenerateMultimodal(context.Background(), task, request, target)
 }
 
 func (f *browserVisualFallbackTestLLM) GenerateMultimodal(_ context.Context, task config.ModelTask, _ llm.MultimodalRequest, _ any) (*llm.CallTrace, error) {
@@ -82,6 +93,21 @@ func TestBrowserVisualObserverBridgeBindsLoopbackModel(t *testing.T) {
 	}
 	if !strings.Contains(client.user, "responsive interactive product") {
 		t.Fatalf("expected product summary was not bound into the visual Gate request: %q", client.user)
+	}
+}
+
+func TestInvokeBrowserVisualProviderReturnsWhenClientIgnoresContext(t *testing.T) {
+	client := &blockingBrowserVisualTestLLM{release: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, trace, err := invokeBrowserVisualProvider(ctx, client, llm.MultimodalRequest{User: "public visual fact"}, false)
+	close(client.release)
+	if err == nil || trace == nil || trace.ErrorClass != "timeout" {
+		t.Fatalf("ignored provider cancellation did not become a bounded timeout: trace=%+v err=%v", trace, err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("observer waited for the hung provider after its deadline: %s", elapsed)
 	}
 }
 
@@ -162,6 +188,15 @@ func TestBrowserVisualObserverFailureCodeOnlyExposesSafeClass(t *testing.T) {
 	}
 	if got := browserVisualObserverFailureCode(&llm.CallTrace{ErrorClass: "secret=value"}); got != "observer_model_unavailable" {
 		t.Fatalf("unsafe provider detail escaped the observer boundary: %q", got)
+	}
+}
+
+func TestBrowserVisualObserverDoesNotRetryHungProvider(t *testing.T) {
+	if browserVisualObserverMayFallback(&llm.CallTrace{ErrorClass: "timeout"}) {
+		t.Fatal("a timed-out visual call would be retried immediately")
+	}
+	if !browserVisualObserverMayFallback(&llm.CallTrace{ErrorClass: "json_parse_failed"}) {
+		t.Fatal("a fast parse failure should retain its bounded repair fallback")
 	}
 }
 

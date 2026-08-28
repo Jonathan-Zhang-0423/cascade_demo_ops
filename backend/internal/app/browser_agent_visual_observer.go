@@ -211,39 +211,30 @@ func startBrowserVisualObserverBridge(parent context.Context, client llm.Client,
 		providerCalls := 1
 		var output browserVisualObservationModelOutput
 		callCtx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
-		var trace *llm.CallTrace
-		var callErr error
-		if textClient, ok := client.(browserVisualMultimodalTextClient); ok {
-			var textOutput string
-			textOutput, trace, callErr = textClient.GenerateMultimodalText(callCtx, config.ModelTaskBrowserVisualObservation, browserVisualLineFallbackRequest(modelRequest))
-			if callErr == nil {
-				output, callErr = parseBrowserVisualLineProtocol(textOutput)
-			}
-		} else {
-			trace, callErr = client.GenerateMultimodal(callCtx, config.ModelTaskBrowserVisualObservation, modelRequest, &output)
+		_, useText := client.(browserVisualMultimodalTextClient)
+		initialRequest := modelRequest
+		if useText {
+			initialRequest = browserVisualLineFallbackRequest(modelRequest)
 		}
+		output, trace, callErr := invokeBrowserVisualProvider(callCtx, client, initialRequest, useText)
 		cancel()
 		if callErr != nil && allowProviderFallback && browserVisualObserverMayFallback(trace) && r.Context().Err() == nil {
 			providerCalls++
 			output = browserVisualObservationModelOutput{}
 			fallbackCtx, fallbackCancel := context.WithTimeout(r.Context(), 45*time.Second)
 			if browserVisualObserverFailureClass(trace) == "json_parse_failed" {
-				if textClient, ok := client.(browserVisualMultimodalTextClient); ok {
-					fallbackRequest := browserVisualLineFallbackRequest(modelRequest)
-					var fallbackText string
-					fallbackText, trace, callErr = textClient.GenerateMultimodalText(fallbackCtx, config.ModelTaskBrowserVisualObservation, fallbackRequest)
-					if callErr == nil {
-						output, callErr = parseBrowserVisualLineProtocol(fallbackText)
-					}
-				} else {
-					trace, callErr = client.GenerateMultimodal(fallbackCtx, config.ModelTaskBrowserVisualObservation, modelRequest, &output)
+				_, fallbackText := client.(browserVisualMultimodalTextClient)
+				fallbackRequest := modelRequest
+				if fallbackText {
+					fallbackRequest = browserVisualLineFallbackRequest(modelRequest)
 				}
+				output, trace, callErr = invokeBrowserVisualProvider(fallbackCtx, client, fallbackRequest, fallbackText)
 			} else {
 				// Retry through the same explicitly configured vision route. Remote
 				// Browser Workers intentionally carry only that short-lived provider
 				// credential; falling through to an unrelated route can silently turn
 				// a recoverable provider error into api_key_missing.
-				trace, callErr = client.GenerateMultimodal(fallbackCtx, config.ModelTaskBrowserVisualObservation, modelRequest, &output)
+				output, trace, callErr = invokeBrowserVisualProvider(fallbackCtx, client, modelRequest, false)
 			}
 			fallbackCancel()
 		}
@@ -270,12 +261,56 @@ func startBrowserVisualObserverBridge(parent context.Context, client llm.Client,
 	return bridge, nil
 }
 
+type browserVisualProviderResult struct {
+	output browserVisualObservationModelOutput
+	trace  *llm.CallTrace
+	err    error
+}
+
+// invokeBrowserVisualProvider enforces the observer deadline even when a
+// provider adapter or proxy does not return after its request context is
+// canceled. The provider writes only into goroutine-local state, so a late
+// completion cannot mutate a response that has already fallen back to
+// deterministic page evidence.
+func invokeBrowserVisualProvider(ctx context.Context, client llm.Client, request llm.MultimodalRequest, useText bool) (browserVisualObservationModelOutput, *llm.CallTrace, error) {
+	resultCh := make(chan browserVisualProviderResult, 1)
+	go func() {
+		var result browserVisualProviderResult
+		if useText {
+			textClient, ok := client.(browserVisualMultimodalTextClient)
+			if !ok {
+				result.err = errors.New("browser visual text client is unavailable")
+				resultCh <- result
+				return
+			}
+			var textOutput string
+			textOutput, result.trace, result.err = textClient.GenerateMultimodalText(ctx, config.ModelTaskBrowserVisualObservation, request)
+			if result.err == nil {
+				result.output, result.err = parseBrowserVisualLineProtocol(textOutput)
+			}
+		} else {
+			result.trace, result.err = client.GenerateMultimodal(ctx, config.ModelTaskBrowserVisualObservation, request, &result.output)
+		}
+		resultCh <- result
+	}()
+	select {
+	case result := <-resultCh:
+		return result.output, result.trace, result.err
+	case <-ctx.Done():
+		return browserVisualObservationModelOutput{}, &llm.CallTrace{Task: config.ModelTaskBrowserVisualObservation, ErrorClass: "timeout"}, ctx.Err()
+	}
+}
+
 func browserVisualObserverMayFallback(trace *llm.CallTrace) bool {
 	if trace == nil {
 		return false
 	}
 	class := strings.ToLower(strings.TrimSpace(firstNonEmptyString(trace.ErrorClass, trace.FallbackReason)))
-	return class == "json_parse_failed" || class == "timeout" || class == "http_429" || class == "http_503" || class == "http_error"
+	// A timed-out call already consumed the latency budget and may still be
+	// unwinding behind an uncooperative provider adapter. Do not immediately
+	// issue the same expensive request again; return unknown and let structural
+	// evidence or a later scheduled observation decide.
+	return class == "json_parse_failed" || class == "http_429" || class == "http_503" || class == "http_error"
 }
 
 func browserVisualObserverFailureClass(trace *llm.CallTrace) string {
