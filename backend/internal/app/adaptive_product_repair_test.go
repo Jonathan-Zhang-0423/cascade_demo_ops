@@ -20,7 +20,7 @@ func TestAdaptiveProductRepairRequiresAsyncRepairToBecomeIdleBeforeProof(t *test
 	}
 }
 
-func TestAdaptiveProductRepairPromptEscalatesMultipleFailedCapabilitiesImmediately(t *testing.T) {
+func TestAdaptiveProductRepairPromptRepairsOnlyFirstCausalFailure(t *testing.T) {
 	spec := experiment.ProductSpec{VisualDirection: experiment.VisualDirection{Theme: "深色霓虹界面"}, ObservableAcceptance: []experiment.AcceptanceCriterion{
 		{ID: "surface", Statement: "完整产品表面可见", Required: true},
 		{ID: "terminal", Statement: "终局状态可用", Required: true},
@@ -31,13 +31,13 @@ func TestAdaptiveProductRepairPromptEscalatesMultipleFailedCapabilitiesImmediate
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"directional_moves", "terminal_scenes"})
-	for _, required := range []string{"请修好当前产品", "所有要求的键盘操作", "状态切换入口", "胜利和无可移动"} {
+	for _, required := range []string{"只修复这个问题", "不要重写页面", "使用两个不同方向键执行实际操作"} {
 		if !strings.Contains(got, required) {
-			t.Fatalf("multi-capability repair prompt lost %q: %q", required, got)
+			t.Fatalf("causal repair prompt lost %q: %q", required, got)
 		}
 	}
-	if strings.Contains(got, "深色霓虹") || len([]rune(got)) > 180 {
-		t.Fatalf("functional repair should be compact and should not mix visual work: %q", got)
+	if strings.Contains(got, "深色霓虹") || strings.Contains(got, "状态切换入口") || strings.Contains(got, "胜利和无可移动") || len([]rune(got)) > 120 {
+		t.Fatalf("functional repair should contain only the causal defect: %q", got)
 	}
 }
 
@@ -55,17 +55,17 @@ func TestAdaptiveProductRepairPromptFallsBackToOneRequiredCriterion(t *testing.T
 func TestAdaptiveProductRepairPromptCarriesVisualQualityFailure(t *testing.T) {
 	spec := experiment.ProductSpec{VisualDirection: experiment.VisualDirection{Theme: "深蓝霓虹界面", Palette: []string{"深蓝", "青色", "紫色"}}}
 	got := adaptiveProductRepairPrompt(spec, experiment.InteractionPlan{}, []string{"product_visual_quality"}, 1)
-	for _, required := range []string{"请修好当前产品", "将实际产品界面改为深蓝霓虹界面", "深蓝、青色、紫色", "完成后实际运行检查"} {
+	for _, required := range []string{"只调整视觉样式", "将实际产品界面改为深蓝霓虹界面", "深蓝、青色、紫色", "修复后实际操作确认"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("visual product repair lost %q: %q", required, got)
 		}
 	}
-	if strings.Count(got, "深蓝霓虹界面") != 1 || len([]rune(got)) > 180 {
+	if strings.Count(got, "深蓝霓虹界面") != 1 || len([]rune(got)) > 120 {
 		t.Fatalf("visual repair should state the target once and stay compact: %q", got)
 	}
 }
 
-func TestAdaptiveProductRepairPromptKeepsCausalOrderWhileCoveringRelatedFailures(t *testing.T) {
+func TestAdaptiveProductRepairPromptKeepsCausalOrderWithoutUnexecutedFailures(t *testing.T) {
 	spec := experiment.ProductSpec{ObservableAcceptance: []experiment.AcceptanceCriterion{
 		{ID: "initial_surface", Statement: "初始业务内容完整渲染并包含可操作状态", Required: true},
 		{ID: "advanced_state", Statement: "高级状态可切换", Required: true},
@@ -76,8 +76,8 @@ func TestAdaptiveProductRepairPromptKeepsCausalOrderWhileCoveringRelatedFailures
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"continued_stability", "surface_ready"})
-	if !strings.Contains(got, "确认主要交互区域可见") || !strings.Contains(got, "确认连续操作后稳定") {
-		t.Fatalf("clustered repair did not preserve plan order and related public failures: %q", got)
+	if !strings.Contains(got, "确认主要交互区域可见") || strings.Contains(got, "确认连续操作后稳定") {
+		t.Fatalf("repair did not isolate the first causal failure in plan order: %q", got)
 	}
 }
 
@@ -90,7 +90,7 @@ func TestAdaptiveProductRepairPromptEscalatesRepeatedFailureToRuntimeVerificatio
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"surface_ready"}, 1)
-	for _, required := range []string{"请修好当前产品", "初始业务内容完整渲染", "完成后实际运行检查"} {
+	for _, required := range []string{"只修复这个问题", "确认主要交互区域可见", "修复后实际操作确认"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("repeated repair prompt lost %q: %q", required, got)
 		}
@@ -100,15 +100,15 @@ func TestAdaptiveProductRepairPromptEscalatesRepeatedFailureToRuntimeVerificatio
 			t.Fatalf("repeated repair prompt leaked internal term %q: %q", internal, got)
 		}
 	}
-	if len([]rune(got)) > 180 {
+	if len([]rune(got)) > 120 {
 		t.Fatalf("repeated repair prompt is too long: %d %q", len([]rune(got)), got)
 	}
-	if !strings.HasSuffix(got, "完成后实际运行检查。") || strings.Contains(got, ".。") {
+	if !strings.HasSuffix(got, "修复后实际操作确认。") || strings.Contains(got, ".。") {
 		t.Fatalf("repeated repair prompt lost its public suffix or punctuation: %q", got)
 	}
 }
 
-func TestAdaptiveProductRepairPromptEscalatesAllRemainingPublicCapabilities(t *testing.T) {
+func TestAdaptiveProductRepairPromptDoesNotTreatUnexecutedCapabilitiesAsDefects(t *testing.T) {
 	spec := experiment.ProductSpec{ObservableAcceptance: []experiment.AcceptanceCriterion{{ID: "initial_surface", Statement: "初始业务内容完整渲染并包含可操作状态", Required: true}}}
 	plan := experiment.InteractionPlan{Steps: []experiment.InteractionStep{
 		{StepID: "surface_ready", SemanticIntent: "确认主要交互区域可见"},
@@ -118,12 +118,15 @@ func TestAdaptiveProductRepairPromptEscalatesAllRemainingPublicCapabilities(t *t
 	}}
 
 	got := adaptiveProductRepairPrompt(spec, plan, []string{"surface_ready", "directional_moves", "undo", "terminal_scenes"}, 1)
-	for _, publicCapability := range []string{"确认主要交互区域可见", "两个不同方向", "撤销并恢复", "提供可见且可操作的状态切换入口", "成功和结束"} {
-		if !strings.Contains(got, publicCapability) {
-			t.Fatalf("repeated repair prompt omitted public capability %q: %q", publicCapability, got)
+	if !strings.Contains(got, "确认主要交互区域可见") {
+		t.Fatalf("repair prompt omitted its first causal capability: %q", got)
+	}
+	for _, unexecuted := range []string{"两个不同方向", "撤销并恢复", "状态切换入口", "成功和结束"} {
+		if strings.Contains(got, unexecuted) {
+			t.Fatalf("repair prompt treated unexecuted capability %q as a proven defect: %q", unexecuted, got)
 		}
 	}
-	if len([]rune(got)) > 180 {
+	if len([]rune(got)) > 120 {
 		t.Fatalf("repeated repair prompt exceeded its bounded public request: %d %q", len([]rune(got)), got)
 	}
 	for _, internal := range []string{"Harness", "selector", "schema", "expected_outcome", "observed_state"} {

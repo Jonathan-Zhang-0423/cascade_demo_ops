@@ -15,3 +15,4 @@ The script creates a new v3 run with a unique idempotency key, then only polls D
 ## Run reports
 
 - [`run-ba6b66e-failure-analysis-2026-08-28.md`](reports/run-ba6b66e-failure-analysis-2026-08-28.md): rejected real-run sample and the observe-only recovery regression it exposed.
+- [`run-0d6b8d2-failure-analysis-2026-08-28.md`](reports/run-0d6b8d2-failure-analysis-2026-08-28.md): fresh-entity run that proved same-entity repair, then exposed over-broad repair prompts and terminal artifact ordering.

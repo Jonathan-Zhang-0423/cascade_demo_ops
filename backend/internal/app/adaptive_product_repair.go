@@ -203,29 +203,18 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	for _, id := range missing {
 		missingSet[strings.TrimSpace(id)] = true
 	}
-	// The score's missing list is normalized for reporting and may therefore
-	// be alphabetic rather than causal. Follow the declared interaction plan
-	// order so foundational surface readiness is repaired before stability or
-	// advanced controls. When the product surface itself is missing, use the
-	// first public observable criterion: it is more concrete than the generic
-	// harness phrase "surface ready" and remains product-spec driven.
-	if missingSet["surface_ready"] {
-		for _, criterion := range spec.ObservableAcceptance {
-			value := strings.TrimSpace(criterion.Statement)
-			if criterion.Required && value != "" {
-				selected, seen[value] = append(selected, value), true
-				break
-			}
-		}
-	}
-	if len(selected) == 0 {
-		for _, step := range plan.Steps {
-			id := strings.TrimSpace(step.StepID)
-			value := adaptiveProductRepairStepStatement(step)
-			if missingSet[id] && value != "" && !seen[value] {
-				selected, seen[value] = append(selected, value), true
-				break
-			}
+	// A runtime stops at its first blocking interaction. The remaining entries
+	// in CapabilityScore.Missing are therefore mostly unexecuted checks, not a
+	// set of independently proven defects. Repair only the first missing step in
+	// declared interaction order. Asking the target builder to rewrite every
+	// unexecuted capability caused later repairs to regress an already-working
+	// interactive surface in the v3 real run.
+	for _, step := range plan.Steps {
+		id := strings.TrimSpace(step.StepID)
+		value := adaptiveProductRepairStepStatement(step)
+		if missingSet[id] && value != "" && !seen[value] {
+			selected, seen[value] = append(selected, value), true
+			break
 		}
 	}
 	visualOnly := len(missingSet) == 1 && missingSet["product_visual_quality"]
@@ -238,13 +227,6 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 			}
 			selected = append(selected, visualStatement)
 		}
-	}
-	if !visualOnly && len(missingSet) > 1 {
-		// A failed runtime stops at the first blocking action, so its remaining
-		// missing list contains both the causal defect and later unexecuted
-		// criteria. Compile those public intents into one short capability cluster
-		// instead of pasting the plan or submitting one repair per symptom.
-		selected = adaptiveCompactMissingCapabilities(plan, missingSet)
 	}
 	if len(selected) == 0 {
 		for _, id := range missing {
@@ -272,8 +254,11 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 	// Keep functional and visual repairs separate. This prevents a long mixed
 	// request from causing the target builder to fix mechanics while silently
 	// ignoring the palette, or vice versa.
-	prefix, suffix := "请修好当前产品并保留已有功能：", "。完成后实际运行检查。"
-	maxRunes := 180
+	prefix, suffix := "只修复这个问题，不要重写页面，保持已可用功能不变：", "。修复后实际操作确认。"
+	if visualOnly {
+		prefix = "只调整视觉样式，不要改动现有功能和页面结构："
+	}
+	maxRunes := 120
 	prefixRunes, subjectRunes, suffixRunes := []rune(prefix), []rune(subject), []rune(suffix)
 	if available := maxRunes - len(prefixRunes) - len(suffixRunes); available < len(subjectRunes) {
 		if available < 2 {
@@ -282,35 +267,6 @@ func adaptiveProductRepairPrompt(spec experiment.ProductSpec, plan experiment.In
 		subjectRunes = append(subjectRunes[:available-1], '…')
 	}
 	return string(prefixRunes) + string(subjectRunes) + string(suffixRunes)
-}
-
-func adaptiveCompactMissingCapabilities(plan experiment.InteractionPlan, missing map[string]bool) []string {
-	result := []string{}
-	seen := map[string]bool{}
-	appendOnce := func(key, value string) {
-		value = strings.TrimRight(strings.TrimSpace(value), ".。；; ")
-		if value == "" || seen[key] {
-			return
-		}
-		seen[key] = true
-		result = append(result, value)
-	}
-	for _, step := range plan.Steps {
-		if !missing[strings.TrimSpace(step.StepID)] {
-			continue
-		}
-		switch step.Action.Kind {
-		case "keyboard_sequence":
-			appendOnce("keyboard", "所有要求的键盘操作均能实际改变产品状态")
-		case "touch_swipe":
-			appendOnce("touch", "触控手势能实际改变产品状态")
-		case "activate_state_variants":
-			appendOnce("state_variants", adaptiveProductRepairStepStatement(step))
-		default:
-			appendOnce(step.StepID, adaptiveProductRepairStepStatement(step))
-		}
-	}
-	return result
 }
 
 func adaptiveProductRepairStepStatement(step experiment.InteractionStep) string {

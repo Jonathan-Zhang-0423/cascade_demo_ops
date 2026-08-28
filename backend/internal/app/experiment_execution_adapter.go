@@ -742,6 +742,9 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 			if err := emit(experiment.LegExecutionUpdate{Kind: "capability_scored", Summary: "必需产品交互未通过，已从真实阶段结果生成失败能力报告", EvidenceRefs: []string{scoreEvidence}, CapabilityScore: summary}); err != nil {
 				return err
 			}
+			if err := emit(experiment.LegExecutionUpdate{Kind: "artifacts", Artifacts: experimentArtifactRefs(downloads), Summary: "失败轮次的事实录制已保留；无论停止或续修都不会丢失本轮证据"}); err != nil {
+				return err
+			}
 			if adaptiveProductRepairBudgetExhausted(request.ProductRepairRounds) {
 				// ProductRepairRounds is the coordinator's durable attempt budget. A
 				// Worker restart can omit the pre-restart submit stage from the final
@@ -752,9 +755,6 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 			}
 			directive := model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "surface-validation", FailureClass: "required_product_criteria_failed", TargetModule: "execution-capture", Action: "submit_product_repair", ArtifactRefs: []string{scoreEvidence}, Attempt: request.ProductRepairRounds + 1, MaxAttempts: 3, ResumePhase: "product_verification"}
 			if err := emit(experiment.LegExecutionUpdate{Kind: "repair_directive", Summary: "必需产品能力未通过；只在本次绑定实体内提交简短修复要求", EvidenceRefs: []string{scoreEvidence}, RepairDirective: &directive}); err != nil {
-				return err
-			}
-			if err := emit(experiment.LegExecutionUpdate{Kind: "artifacts", Artifacts: experimentArtifactRefs(downloads), Summary: "失败轮次的事实录制已保留；同实体修复不会丢失原始链路"}); err != nil {
 				return err
 			}
 			return a.executeSameEntityProductRepair(ctx, request, projectID, jobID, score, history, emit)
@@ -811,12 +811,12 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 			return err
 		}
 		if !score.CorePassed || !score.EligibleForFilm {
+			if err := emit(experiment.LegExecutionUpdate{Kind: "artifacts", Artifacts: experimentArtifactRefs(downloads), Summary: "未通过轮次的事实录制已保留；无论停止或续修都不会丢失本轮证据"}); err != nil {
+				return err
+			}
 			if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 && !adaptiveProductRepairBudgetExhausted(request.ProductRepairRounds) {
 				directive := model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "surface-validation", FailureClass: "required_product_criteria_failed", TargetModule: "execution-capture", Action: "submit_product_repair", ArtifactRefs: []string{scoreEvidence}, Attempt: request.ProductRepairRounds + 1, MaxAttempts: 3, ResumePhase: "product_verification"}
 				if err := emit(experiment.LegExecutionUpdate{Kind: "repair_directive", Summary: "必需产品能力未通过；只允许在本次绑定实体内提交简短修复要求", EvidenceRefs: []string{scoreEvidence}, RepairDirective: &directive}); err != nil {
-					return err
-				}
-				if err := emit(experiment.LegExecutionUpdate{Kind: "artifacts", Artifacts: experimentArtifactRefs(downloads), Summary: "本轮事实录制已保留，后续修复不会丢失此前链路"}); err != nil {
 					return err
 				}
 				return a.executeSameEntityProductRepair(ctx, request, projectID, jobID, *score, history, emit)
@@ -846,12 +846,12 @@ func (a *appExperimentExecutionAdapter) completeDirectLegWithHistory(ctx context
 				if err := emit(experiment.LegExecutionUpdate{Kind: "capability_scored", Summary: "功能交互已通过，但实际预览未满足冻结的必需视觉规格", EvidenceRefs: []string{qualityDownload.ArtifactID}, CapabilityScore: summary}); err != nil {
 					return err
 				}
+				if err := emit(experiment.LegExecutionUpdate{Kind: "artifacts", Artifacts: experimentArtifactRefs(downloads), Summary: "功能证据与视觉质检报告均已保留"}); err != nil {
+					return err
+				}
 				if !adaptiveProductRepairBudgetExhausted(request.ProductRepairRounds) {
 					directive := model.RepairDirective{SchemaVersion: model.RepairDirectiveSchemaVersion, SourceModule: "surface-validation", FailureClass: "required_product_visual_quality_failed", TargetModule: "execution-capture", Action: "submit_product_repair", ArtifactRefs: []string{qualityDownload.ArtifactID}, Attempt: request.ProductRepairRounds + 1, MaxAttempts: 3, ResumePhase: "product_verification"}
 					if err := emit(experiment.LegExecutionUpdate{Kind: "repair_directive", Summary: "必需视觉规格未通过；只在本次绑定实体内提交一次简短产品修复", EvidenceRefs: []string{qualityDownload.ArtifactID}, RepairDirective: &directive}); err != nil {
-						return err
-					}
-					if err := emit(experiment.LegExecutionUpdate{Kind: "artifacts", Artifacts: experimentArtifactRefs(downloads), Summary: "功能证据与视觉质检报告均已保留"}); err != nil {
 						return err
 					}
 					return a.executeSameEntityProductRepair(ctx, request, projectID, jobID, visualScore, history, emit)
