@@ -1432,10 +1432,12 @@ func directObservationTransportTimeout(request experiment.LegExecutionRequest) t
 	}
 	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
 		// The Worker owns one refresh at the end of the idle window and then a
-		// bounded three-minute post-refresh observation. Leave enough transport
-		// headroom for session setup, the final visual decision, and artifact
-		// publication instead of canceling a still-valid observation at minute 34.
-		return idleTimeout + 8*time.Minute
+		// bounded three-minute post-refresh observation. Initial runs can spend
+		// several minutes authenticating, recording, and binding the fresh entity
+		// before that no-progress clock begins. Keep the transport alive beyond the
+		// Worker's complete business window so the Worker, rather than this poller,
+		// owns the terminal observation decision.
+		return idleTimeout + 18*time.Minute
 	}
 	absolute := idleTimeout * 3
 	if absolute > 90*time.Minute {
