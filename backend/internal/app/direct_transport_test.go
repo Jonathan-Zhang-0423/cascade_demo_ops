@@ -29,6 +29,17 @@ import (
 	"cascade-demoops/backend/internal/store"
 )
 
+func TestClientExecutionEnvelopeCoversLongObservationWindow(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	envelope, err := envelopeForClientExecutionPackage(model.ClientExecutionPackage{PackageID: "pkg-long-observation"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envelope.ExpiresAt.Sub(envelope.CreatedAt); got != 40*time.Minute {
+		t.Fatalf("execution envelope lifetime = %s, want 40m", got)
+	}
+}
+
 func TestDirectArtifactDownloadExtensionPreservesMediaType(t *testing.T) {
 	for name, artifact := range map[string]model.DirectArtifact{
 		"file name":     {FileName: "recording-segment-001.webm", MimeType: "video/webm"},

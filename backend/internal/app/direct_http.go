@@ -44,12 +44,12 @@ type directWorkerRunRegistry struct {
 const directWorkerHeartbeatStaleAfter = 5 * time.Second
 
 func NewDirectHTTPServer(service *Service, baseHost, bootstrapToken, workerToken string) *DirectHTTPServer {
-	return NewDirectHTTPServerWithGateway(service, direct.NewGateway(baseHost, 30*time.Minute), bootstrapToken, workerToken)
+	return NewDirectHTTPServerWithGateway(service, direct.NewGateway(baseHost, 40*time.Minute), bootstrapToken, workerToken)
 }
 
 func NewDirectHTTPServerWithGateway(service *Service, gateway *direct.Gateway, bootstrapToken, workerToken string) *DirectHTTPServer {
 	if gateway == nil {
-		gateway = direct.NewGateway("", 30*time.Minute)
+		gateway = direct.NewGateway("", 40*time.Minute)
 	}
 	s := &DirectHTTPServer{service: service, gateway: gateway, bootstrapToken: bootstrapToken, workerToken: workerToken,
 		workerRuns: &directWorkerRunRegistry{cancels: map[string]context.CancelFunc{}}}

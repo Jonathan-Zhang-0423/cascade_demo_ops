@@ -647,7 +647,15 @@ func synthesizeMissingAdaptiveContinuation(repair, source *model.DemoWorkflowGra
 			continue
 		}
 		nodes[node.ID] = node
-		if recipe, _ := node.ActionSpec.Parameters["action_recipe"].(string); recipe == "continue_execution" {
+		recipe, _ := node.ActionSpec.Parameters["action_recipe"].(string)
+		if recipe == "continue_execution" {
+			return false, nil
+		}
+		// A same-entity product repair submit already starts the target-side
+		// update. It is not evidence that a separate plan-confirmation action is
+		// missing. Synthesizing one here would wait for (or click) an unrelated
+		// primary action after the repair was already committed.
+		if recipe == "product_repair_submit" {
 			return false, nil
 		}
 		if node.ID == failedNodeID {

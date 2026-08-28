@@ -28,6 +28,13 @@ func TestInstallationIDUsesServerCompatibleSHA256Prefix(t *testing.T) {
 	}
 }
 
+func TestGatewayDefaultLeaseCoversLongObservationWindow(t *testing.T) {
+	gateway := NewGateway("gateway.example", 0)
+	if gateway.ttl != 40*time.Minute {
+		t.Fatalf("default lease ttl = %s, want 40m", gateway.ttl)
+	}
+}
+
 func TestGatewayLeaseUsesDedicatedDataPortNotControlPortSuffix(t *testing.T) {
 	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
 	gateway := NewGateway("127.0.0.1:18443", time.Hour)

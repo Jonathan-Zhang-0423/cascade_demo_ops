@@ -21,7 +21,7 @@ func main() {
 	portStart := flag.Int("data-port-start", envInt("CASCADE_DIRECT_DATA_PORT_START", 24000), "first dedicated App port")
 	portEnd := flag.Int("data-port-end", envInt("CASCADE_DIRECT_DATA_PORT_END", 24031), "last dedicated App port")
 	spoolRoot := flag.String("spool-root", env("CASCADE_DIRECT_SPOOL_ROOT", "/var/lib/cascade-browser-agent"), "validated Browser Agent job spool")
-	leaseTTL := flag.Duration("lease-ttl", envDuration("CASCADE_DIRECT_LEASE_TTL", 30*time.Minute), "dedicated data-port lease lifetime")
+	leaseTTL := flag.Duration("lease-ttl", envDuration("CASCADE_DIRECT_LEASE_TTL", 40*time.Minute), "dedicated data-port lease lifetime")
 	flag.Parse()
 	config := directtransport.Config{ControlAddr: *controlAddr, WorkerAddr: *workerAddr, DataBindHost: *bindHost, AdvertisedHost: *advertisedHost, DataPortStart: *portStart, DataPortEnd: *portEnd, TLSCertificateFile: os.Getenv("CASCADE_DIRECT_TLS_CERT"), TLSPrivateKeyFile: os.Getenv("CASCADE_DIRECT_TLS_KEY"), BootstrapToken: os.Getenv("CASCADE_DIRECT_BOOTSTRAP_TOKEN"), WorkerToken: os.Getenv("CASCADE_DIRECT_WORKER_TOKEN"), SpoolRoot: *spoolRoot, LeaseTTL: *leaseTTL}
 	gateway, err := directtransport.NewGateway(config)

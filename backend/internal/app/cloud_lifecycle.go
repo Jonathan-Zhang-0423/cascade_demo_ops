@@ -3217,7 +3217,7 @@ func envelopeForClientExecutionPackage(pkg model.ClientExecutionPackage, now tim
 		PayloadSchemaVersion: model.ClientExecutionPackageSchemaVersion,
 		IdempotencyKey:       "idem_desktop_" + idSeed,
 		CreatedAt:            now,
-		ExpiresAt:            now.Add(30 * time.Minute),
+		ExpiresAt:            now.Add(40 * time.Minute),
 		Producer: model.ExchangeProducer{
 			AppVersion:     defaultDesktopAppVersion,
 			InstallID:      defaultDesktopInstallID,

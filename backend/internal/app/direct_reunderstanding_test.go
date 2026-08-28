@@ -308,6 +308,31 @@ func TestSynthesizeMissingAdaptiveContinuationForSubmittedPassiveStall(t *testin
 	}
 }
 
+func TestSynthesizeMissingAdaptiveContinuationDoesNotTreatProductRepairAsPlanConfirmation(t *testing.T) {
+	observedURL := "https://app.example.com/entity/runtime-42"
+	evidence := model.EvidenceRef{ID: "evidence-product-repair", Kind: "webpage_screenshot", Confidence: 1}
+	submit := &model.GraphNode{ID: "business_stage_submit_product_repair", Type: model.GraphNodeTypeAction, ActionSpec: &model.GraphAction{
+		Type: model.GraphActionClick, Parameters: map[string]any{"action_recipe": "product_repair_submit"},
+	}}
+	failed := &model.GraphNode{ID: "business_stage_contract_experiment_interaction_surface_ready", Type: model.GraphNodeTypeEnd, ActionSpec: &model.GraphAction{Type: model.GraphActionInspect}}
+	source := model.NewDemoWorkflowGraph("source", "project", observedURL)
+	source.Nodes = []*model.GraphNode{submit, failed}
+	repair := model.NewDemoWorkflowGraph("repair", "project", observedURL)
+	repair.Nodes = []*model.GraphNode{
+		{ID: "resume", Type: model.GraphNodeTypeStart, ActionSpec: &model.GraphAction{Type: model.GraphActionNavigate}},
+		{ID: "verify", Type: model.GraphNodeTypeEnd, ActionSpec: &model.GraphAction{Type: model.GraphActionInspect}},
+	}
+	events := []model.StageExecutionEvent{{
+		Sequence: 10, NodeID: submit.ID, EventType: model.StageExecutionEventActionCompleted,
+		Observation: &model.RuntimeObservation{Source: model.RuntimeObservationActualBrowser, URL: observedURL}, EvidenceRefs: []model.EvidenceRef{evidence},
+	}}
+
+	inserted, err := synthesizeMissingAdaptiveContinuation(repair, source, events, observedURL, failed.ID, experiment.ObservationPlan{DeferAfterMS: 1_800_000})
+	if err != nil || inserted || len(repair.Nodes) != 2 {
+		t.Fatalf("product repair submit synthesized an unrelated continuation: inserted=%t nodes=%d err=%v", inserted, len(repair.Nodes), err)
+	}
+}
+
 func TestSynthesizeMissingAdaptiveContinuationRequiresAuditedSubmitEvidence(t *testing.T) {
 	source := model.NewDemoWorkflowGraph("source", "project", "https://app.example.com/workspace")
 	source.Nodes = []*model.GraphNode{

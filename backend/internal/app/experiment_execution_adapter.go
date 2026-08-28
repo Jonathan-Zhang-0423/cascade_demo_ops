@@ -1431,7 +1431,11 @@ func directObservationTransportTimeout(request experiment.LegExecutionRequest) t
 		return idleTimeout + 30*time.Second
 	}
 	if request.HarnessProfile == experiment.HarnessProfileAdaptiveBusinessV2 {
-		return idleTimeout + 4*time.Minute
+		// The Worker owns one refresh at the end of the idle window and then a
+		// bounded three-minute post-refresh observation. Leave enough transport
+		// headroom for session setup, the final visual decision, and artifact
+		// publication instead of canceling a still-valid observation at minute 34.
+		return idleTimeout + 8*time.Minute
 	}
 	absolute := idleTimeout * 3
 	if absolute > 90*time.Minute {

@@ -25,6 +25,20 @@ import (
 const testBootstrapToken = "bootstrap-token-with-at-least-thirty-two-characters"
 const testWorkerToken = "worker-token-with-at-least-thirty-two-characters"
 
+func TestGatewayDefaultLeaseCoversLongObservationWindow(t *testing.T) {
+	gateway, err := NewGateway(Config{
+		ControlAddr: "127.0.0.1:0", WorkerAddr: "127.0.0.1:0", DataBindHost: "127.0.0.1", AdvertisedHost: "127.0.0.1",
+		DataPortStart: 24000, DataPortEnd: 24000, AllowInsecureLoopback: true,
+		BootstrapToken: testBootstrapToken, WorkerToken: testWorkerToken, SpoolRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gateway.config.LeaseTTL != 40*time.Minute {
+		t.Fatalf("default lease ttl = %s, want 40m", gateway.config.LeaseTTL)
+	}
+}
+
 func TestGatewayAllocatesDedicatedPortAndHandsValidatedPackageToWorker(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	port := reserveTestPort(t)

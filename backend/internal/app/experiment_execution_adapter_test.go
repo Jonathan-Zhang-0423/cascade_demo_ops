@@ -640,6 +640,10 @@ func TestAdaptiveTransportWaitDoesNotPreemptWorkerProgressWindow(t *testing.T) {
 	if got := directObservationTransportTimeout(request); got != 91*time.Minute {
 		t.Fatalf("adaptive transport timeout = %s, want 91m", got)
 	}
+	request.HarnessProfile = experiment.HarnessProfileAdaptiveBusinessV2
+	if got := directObservationTransportTimeout(request); got != 38*time.Minute {
+		t.Fatalf("adaptive v2 transport timeout = %s, want 38m", got)
+	}
 	request.HarnessProfile = "legacy"
 	if got := directObservationTransportTimeout(request); got != 30*time.Minute+30*time.Second {
 		t.Fatalf("legacy transport timeout changed: %s", got)

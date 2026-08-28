@@ -53,7 +53,7 @@ func main() {
 	if *statePath == "" {
 		*statePath = filepath.Join(runtime.DataRoot, "direct_gateway_state", "direct-v1-snapshot.json")
 	}
-	gateway, err := direct.NewPersistentGateway(*baseHost, 30*time.Minute, *statePath)
+	gateway, err := direct.NewPersistentGateway(*baseHost, 40*time.Minute, *statePath)
 	must(err)
 	directServer := app.NewDirectHTTPServerWithGateway(service, gateway, bootstrap, workerToken)
 	workerCtx, workerCancel := context.WithCancel(context.Background())

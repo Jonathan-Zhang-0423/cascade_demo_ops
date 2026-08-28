@@ -71,7 +71,7 @@ type Gateway struct {
 
 func NewGateway(baseHost string, ttl time.Duration) *Gateway {
 	if ttl <= 0 {
-		ttl = 30 * time.Minute
+		ttl = 40 * time.Minute
 	}
 	return &Gateway{now: time.Now, baseHost: strings.TrimSpace(baseHost), ttl: ttl, leases: map[string]*Lease{}, byInstall: map[string]string{}, jobs: map[string]*Job{}, nonces: NewNonceSet()}
 }

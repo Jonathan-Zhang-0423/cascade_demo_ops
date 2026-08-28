@@ -145,7 +145,7 @@ func NewGateway(config Config) (*Gateway, error) {
 		config.DataPortEnd = 24031
 	}
 	if config.LeaseTTL == 0 {
-		config.LeaseTTL = 30 * time.Minute
+		config.LeaseTTL = 40 * time.Minute
 	}
 	if config.Now == nil {
 		config.Now = time.Now
