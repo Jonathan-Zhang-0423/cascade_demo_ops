@@ -282,6 +282,22 @@ func (s *Service) RecoverFailedFinalFilmAutomation(ctx context.Context, jobID st
 	return job, nil
 }
 
+func (s *Service) ReconcileFinalFilmJitterMeasurement(ctx context.Context, jobID string, expectedRevision int) (model.FinalFilmJob, error) {
+	if s.finalFilm == nil {
+		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
+	}
+	job, err := s.finalFilm.ReconcileUnavailableJitterMeasurement(ctx, jobID, expectedRevision)
+	if err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	go func() {
+		if _, resumeErr := s.finalFilm.ResumeAutomation(context.Background(), jobID); resumeErr != nil {
+			_, _ = s.finalFilm.MarkAutomationFailed(context.Background(), jobID, resumeErr)
+		}
+	}()
+	return job, nil
+}
+
 func (s *Service) ReviewFinalFilmOutput(ctx context.Context, jobID string, request FinalFilmFinalReviewRequest) (model.FinalFilmJob, error) {
 	if s.finalFilm == nil {
 		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")

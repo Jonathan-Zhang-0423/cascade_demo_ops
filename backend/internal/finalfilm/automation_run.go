@@ -227,6 +227,69 @@ func (s *Service) RecoverFailedAutomation(ctx context.Context, jobID string, exp
 	return s.recoverFailedAutomation(ctx, job)
 }
 
+// ReconcileUnavailableJitterMeasurement re-admits already generated
+// candidates whose only temporal blocker came from a missing optional
+// vidstabdetect filter. It does not change technical failures, does not accept
+// content, and does not consume a provider call: the candidates still have to
+// pass the batched visual contact-sheet review.
+func (s *Service) ReconcileUnavailableJitterMeasurement(ctx context.Context, jobID string, expectedRevision int) (model.FinalFilmJob, error) {
+	job, err := s.store.GetJob(ctx, jobID)
+	if err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	if job.Revision != expectedRevision || job.State != model.FinalFilmJobRevisionRequested || job.RunAuthorization == nil {
+		return model.FinalFilmJob{}, errors.New("jitter reconciliation requires the current provider revision")
+	}
+	next := job
+	next.QualityReports = append([]model.CandidateQualityReport{}, job.QualityReports...)
+	next.ProviderAttempts = append([]model.FinalFilmProviderAttempt{}, job.ProviderAttempts...)
+	reconciled := 0
+	for index := range next.QualityReports {
+		report := &next.QualityReports[index]
+		if !report.TechnicalPass || report.TemporalPass || strings.TrimSpace(report.ContactSheetPath) == "" || !onlyUnavailableJitterBlocks(report.Findings) {
+			continue
+		}
+		report.TemporalPass = true
+		report.Decision = "awaiting_content_review"
+		for findingIndex := range report.Findings {
+			if report.Findings[findingIndex] == "jitter_measurement_unavailable" {
+				report.Findings[findingIndex] = "jitter_measurement_unavailable_advisory"
+			}
+		}
+		if attempt := findAutomatedProviderAttempt(next.ProviderAttempts, report.IntentID, report.Provider, report.Attempt); attempt != nil {
+			attempt.Status = report.Decision
+			attempt.CompletedAt = time.Time{}
+		}
+		reconciled++
+	}
+	if reconciled == 0 {
+		return job, errors.New("provider revision has no candidate blocked only by unavailable jitter measurement")
+	}
+	next.Revision++
+	next.UpdatedAt = s.now().UTC()
+	next.State, next.Phase = model.FinalFilmJobGeneratingPresentation, "jitter_measurement_reconciled"
+	if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, next, s.event(next, next.Phase, "已将可选抖动测量缺失降为提示，复用候选进入联系表视觉质检", map[string]any{"reconciled_candidates": reconciled, "provider_calls_used": next.RunAuthorization.ProviderCallsUsed})); err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	return next, nil
+}
+
+func onlyUnavailableJitterBlocks(findings []string) bool {
+	if len(findings) == 0 {
+		return false
+	}
+	found := false
+	for _, finding := range findings {
+		normalized := strings.TrimSpace(strings.ToLower(finding))
+		if normalized == "jitter_measurement_unavailable" || normalized == "jitter_measurement_unavailable_advisory" {
+			found = true
+			continue
+		}
+		return false
+	}
+	return found
+}
+
 func retryableAutomatedCompositionFailure(message string) bool {
 	message = strings.ToLower(strings.TrimSpace(message))
 	for _, token := range []string{
@@ -689,12 +752,16 @@ func (s *Service) persistAutomatedProviderResult(ctx context.Context, job model.
 					technicalPass = false
 					findings = append(findings, fmt.Sprintf("freeze_duration_exceeded: %dms > 1000ms", probe.FreezeDurationMS))
 				}
-				temporalPass = probe.TemporalAnalysisAvailable && probe.JitterMeasurementAvailable && probe.FullScreenFlashCount <= 1
+				// signalstats and the contact sheet provide the portable temporal
+				// gate. vidstabdetect is an optional measurement-only filter and its
+				// absence must not turn a visually reviewable candidate into a false
+				// failure (some official FFmpeg builds omit libvidstab entirely).
+				temporalPass = probe.TemporalAnalysisAvailable && probe.FullScreenFlashCount <= 1
 				if !probe.TemporalAnalysisAvailable {
 					findings = append(findings, "temporal_analysis_unavailable")
 				}
 				if !probe.JitterMeasurementAvailable {
-					findings = append(findings, "jitter_measurement_unavailable")
+					findings = append(findings, "jitter_measurement_unavailable_advisory")
 				}
 				if probe.FullScreenFlashCount > 1 {
 					findings = append(findings, fmt.Sprintf("full_screen_flash_count_exceeded: %d", probe.FullScreenFlashCount))

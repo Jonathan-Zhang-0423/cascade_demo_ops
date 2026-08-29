@@ -502,6 +502,46 @@ func TestAutomatedPlanCannotReduceBaselineWaitCompression(t *testing.T) {
 	}
 }
 
+func TestUnavailableJitterReconciliationReusesCandidateWithoutProviderCall(t *testing.T) {
+	service, _ := newFinalFilmTestService(t)
+	catalog, baseline := finalFilmFixture()
+	job, err := service.CreateJob(context.Background(), CreateJobRequest{EditorSessionID: "editor_jitter_recovery", EditorRevision: 1, SourcePackageID: "package_jitter_recovery", Catalog: catalog, BaselinePlan: baseline, RenderProfile: finalFilmProfile(), AutomationProfile: model.FinalFilmAutomationProfileGuidedDemoV1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.AuthorizeAutomation(context.Background(), job.JobID, job.Revision, "test-authorization", 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := job
+	revision.State, revision.Phase = model.FinalFilmJobRevisionRequested, "provider_revision_required"
+	revision.RunAuthorization.ProviderCallsUsed = 1
+	revision.QualityReports = []model.CandidateQualityReport{{
+		SchemaVersion: model.CandidateQualityReportSchemaVersion, ReportID: "report_jitter", IntentID: "guided_intro", CandidateID: "candidate_intro",
+		Provider: media.GeneratedShotProviderMiniMaxH3, Attempt: 2, TechnicalPass: true, TemporalPass: false,
+		Findings: []string{"jitter_measurement_unavailable"}, Decision: "provider_revision_required", ContactSheetPath: "intro-contact-sheet.jpg",
+	}}
+	revision.ProviderAttempts = []model.FinalFilmProviderAttempt{{IntentID: "guided_intro", Provider: media.GeneratedShotProviderMiniMaxH3, Attempt: 2, ProviderTaskID: "task_intro", Status: "provider_revision_required"}}
+	revision.Revision++
+	revision.UpdatedAt = time.Now().UTC()
+	if err := service.store.TransitionJob(context.Background(), job.JobID, job.Revision, revision, service.event(revision, revision.Phase, "test jitter unavailable", nil)); err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := service.ReconcileUnavailableJitterMeasurement(context.Background(), job.JobID, revision.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled.State != model.FinalFilmJobGeneratingPresentation || reconciled.QualityReports[0].Decision != "awaiting_content_review" || !reconciled.QualityReports[0].TemporalPass {
+		t.Fatalf("candidate was not re-admitted to visual review: %+v", reconciled.QualityReports)
+	}
+	if reconciled.RunAuthorization.ProviderCallsUsed != 1 || reconciled.ProviderAttempts[0].ProviderTaskID != "task_intro" {
+		t.Fatalf("jitter reconciliation changed provider consumption: auth=%+v attempts=%+v", reconciled.RunAuthorization, reconciled.ProviderAttempts)
+	}
+	if !onlyUnavailableJitterBlocks([]string{"jitter_measurement_unavailable"}) || onlyUnavailableJitterBlocks([]string{"jitter_measurement_unavailable", "black_duration_exceeded"}) {
+		t.Fatal("jitter-only discriminator is not conservative")
+	}
+}
+
 func TestReviewPackageAndFinalReviewAreRevisionBound(t *testing.T) {
 	service, _ := newFinalFilmTestService(t)
 	catalog, baseline := finalFilmFixture()

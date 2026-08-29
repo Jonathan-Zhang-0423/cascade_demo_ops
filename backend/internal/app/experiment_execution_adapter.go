@@ -1608,6 +1608,14 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 				return err
 			}
 		}
+		if job.State == model.FinalFilmJobRevisionRequested && job.Phase == "provider_revision_required" && job.RunAuthorization != nil {
+			if reconciled, reconcileErr := a.service.ReconcileFinalFilmJitterMeasurement(ctx, job.JobID, job.Revision); reconcileErr == nil {
+				job = reconciled
+				if err := emit(experiment.LegExecutionUpdate{Kind: "final_film_bound", FinalFilmJobID: job.JobID, FinalFilmRevision: job.Revision, ProviderCallsUsed: job.RunAuthorization.ProviderCallsUsed}); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	if job.State == model.FinalFilmJobBaselineReady && job.RunAuthorization == nil {
 		job, err = a.service.RunFinalFilmAutomation(ctx, job.JobID, FinalFilmRunRequest{ExpectedRevision: job.Revision, AuthorizationRef: request.AuthorizationRef, MaxProviderCalls: 6})
