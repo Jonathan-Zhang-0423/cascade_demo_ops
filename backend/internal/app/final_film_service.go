@@ -235,6 +235,37 @@ func (s *Service) RunFinalFilmAutomation(ctx context.Context, jobID string, requ
 	return job, nil
 }
 
+func (s *Service) RecoverInterruptedFinalFilmBaseline(ctx context.Context, jobID string, expectedRevision int, request FinalFilmCreateRequest) (model.FinalFilmJob, error) {
+	if s.finalFilm == nil {
+		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")
+	}
+	session, err := s.GetEditorSession(ctx, request.EditorSessionID)
+	if err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	if request.ExpectedRevision != session.Revision {
+		return model.FinalFilmJob{}, errors.New("editor revision conflict")
+	}
+	if err := validateFinalFilmReviewSupplementRoots(s.runtime.ArtifactRoot, request.ReviewSupplements); err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	job, err := s.finalFilm.RecoverInterruptedBaseline(ctx, jobID, expectedRevision, finalfilm.CreateJobRequest{
+		EditorSessionID: session.SessionID, EditorRevision: session.Revision, SourcePackageID: request.SourcePackageID,
+		Catalog: session.AssetCatalog, BaselinePlan: session.EditPlan, RenderProfile: session.FinalProfile,
+		AutomationProfile: request.AutomationProfile, ReviewSupplements: request.ReviewSupplements,
+		PublicNarrativeFacts: request.PublicNarrativeFacts, MediaCoverage: request.MediaCoverage,
+	})
+	if err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	go func() {
+		if _, resumeErr := s.finalFilm.ResumeAutomation(context.Background(), jobID); resumeErr != nil {
+			_, _ = s.finalFilm.MarkAutomationFailed(context.Background(), jobID, resumeErr)
+		}
+	}()
+	return job, nil
+}
+
 func (s *Service) ReviewFinalFilmOutput(ctx context.Context, jobID string, request FinalFilmFinalReviewRequest) (model.FinalFilmJob, error) {
 	if s.finalFilm == nil {
 		return model.FinalFilmJob{}, errors.New("final film workflow is unavailable")

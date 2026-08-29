@@ -414,6 +414,48 @@ func TestAutomationPersistsEvidenceAttemptsQualityAndBlocksRequiredProviderSlot(
 	}
 }
 
+func TestInterruptedBaselineRecoveryKeepsJobAndBudgetWhileReplacingFactPlan(t *testing.T) {
+	service, _ := newFinalFilmTestService(t)
+	catalog, baseline := finalFilmFixture()
+	job, err := service.CreateJob(context.Background(), CreateJobRequest{EditorSessionID: "editor_interrupted", EditorRevision: 1, SourcePackageID: "package_interrupted", Catalog: catalog, BaselinePlan: baseline, RenderProfile: finalFilmProfile(), AutomationProfile: model.FinalFilmAutomationProfileGuidedDemoV1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.AuthorizeAutomation(context.Background(), job.JobID, job.Revision, "test-authorization", 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendering := job
+	rendering.State, rendering.Phase = model.FinalFilmJobRenderingBaseline, "rendering_fact_track"
+	rendering.Revision++
+	rendering.UpdatedAt = time.Now().UTC()
+	if err := service.store.TransitionJob(context.Background(), job.JobID, job.Revision, rendering, service.event(rendering, rendering.Phase, "test interrupted render", nil)); err != nil {
+		t.Fatal(err)
+	}
+	revised := baseline
+	revised.PlanID += "_bounded"
+	revised.TargetDurationMS = 90_000
+	recovered, err := service.RecoverInterruptedBaseline(context.Background(), job.JobID, rendering.Revision, CreateJobRequest{
+		EditorSessionID: "editor_recovered", EditorRevision: 2, SourcePackageID: "package_recovered",
+		Catalog: catalog, BaselinePlan: revised, RenderProfile: finalFilmProfile(),
+		PublicNarrativeFacts: rendering.PublicNarrativeFacts, MediaCoverage: rendering.MediaCoverage,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.JobID != job.JobID || recovered.State != model.FinalFilmJobAnalyzingEvidence || recovered.BaselinePlan.PlanID != revised.PlanID {
+		t.Fatalf("interrupted baseline did not recover in-place: %+v", recovered)
+	}
+	if recovered.RunAuthorization == nil || recovered.RunAuthorization.ProviderCallsUsed != 0 || recovered.SourcePackageID != "package_recovered" {
+		t.Fatalf("recovery changed authorization or failed to rebind source: %+v", recovered)
+	}
+	for _, intent := range recovered.PresentationIntents {
+		if len(intent.ReferenceAssetRefs) != 1 {
+			t.Fatalf("text-free provider reference was lost: %+v", intent)
+		}
+	}
+}
+
 func TestReviewPackageAndFinalReviewAreRevisionBound(t *testing.T) {
 	service, _ := newFinalFilmTestService(t)
 	catalog, baseline := finalFilmFixture()

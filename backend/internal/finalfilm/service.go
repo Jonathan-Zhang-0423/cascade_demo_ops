@@ -250,6 +250,92 @@ func (s *Service) CreateJob(ctx context.Context, request CreateJobRequest) (mode
 	return job, nil
 }
 
+// RecoverInterruptedBaseline replaces only the not-yet-rendered factual plan
+// after the process that owned a baseline render has exited. It deliberately
+// preserves the job ID, authorization, provider budget, and presentation slot
+// identities; it is not a second paid run and cannot be used after any
+// provider task or usable baseline has been produced.
+func (s *Service) RecoverInterruptedBaseline(ctx context.Context, jobID string, expectedRevision int, request CreateJobRequest) (model.FinalFilmJob, error) {
+	job, err := s.store.GetJob(ctx, jobID)
+	if err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	if job.Revision != expectedRevision {
+		return model.FinalFilmJob{}, fmt.Errorf("%w: expected %d current %d", ErrRevisionConflict, expectedRevision, job.Revision)
+	}
+	if job.State != model.FinalFilmJobRenderingBaseline || job.BaselineRender.VideoPath != "" || job.RunAuthorization == nil || job.RunAuthorization.ProviderCallsUsed != 0 || len(job.ProviderAttempts) != 0 {
+		return model.FinalFilmJob{}, errors.New("interrupted baseline recovery requires an unrendered, authorized job with zero provider calls")
+	}
+	if strings.TrimSpace(request.EditorSessionID) == "" || request.EditorRevision < 1 || strings.TrimSpace(request.SourcePackageID) == "" {
+		return model.FinalFilmJob{}, errors.New("interrupted baseline recovery requires editor and source package bindings")
+	}
+
+	// Presentation intents reference the text-free palette created with the
+	// original job. Carry those immutable references into the revised catalog.
+	referenced := map[string]bool{}
+	for _, intent := range job.PresentationIntents {
+		for _, ref := range intent.ReferenceAssetRefs {
+			referenced[ref] = true
+		}
+	}
+	present := map[string]bool{}
+	for _, artifact := range request.Catalog.Artifacts {
+		present[artifact.ID] = true
+	}
+	for _, artifact := range job.Catalog.Artifacts {
+		if referenced[artifact.ID] && !present[artifact.ID] {
+			request.Catalog.Artifacts = append(request.Catalog.Artifacts, artifact)
+			present[artifact.ID] = true
+		}
+	}
+	if err := validateReviewSupplements(request.ReviewSupplements); err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	for _, fact := range request.PublicNarrativeFacts {
+		if err := model.ValidatePublicNarrativeFact(fact); err != nil {
+			return model.FinalFilmJob{}, fmt.Errorf("validate public narrative fact: %w", err)
+		}
+	}
+	if request.MediaCoverage != nil {
+		if err := model.ValidateMediaCoverageReport(*request.MediaCoverage); err != nil {
+			return model.FinalFilmJob{}, fmt.Errorf("validate media coverage: %w", err)
+		}
+	}
+	now := s.now().UTC()
+	constraints, err := CompileStoryboardConstraints(ConstraintCompileInput{
+		SourcePackageID: request.SourcePackageID, Catalog: request.Catalog, BaselinePlan: request.BaselinePlan,
+		Intents: job.PresentationIntents, Canvas: model.RenderCanvas{Width: job.RenderProfile.Width, Height: job.RenderProfile.Height, FPS: job.RenderProfile.FPS, Format: job.RenderProfile.Format}, Now: now,
+	})
+	if err != nil {
+		return model.FinalFilmJob{}, fmt.Errorf("compile recovered final film constraints: %w", err)
+	}
+	validation, err := s.renderer.ValidateEditPlan(ctx, executor.EditPlanValidationRequest{Catalog: request.Catalog, EditPlan: request.BaselinePlan})
+	if err != nil {
+		return model.FinalFilmJob{}, fmt.Errorf("validate recovered baseline edit plan: %w", err)
+	}
+	if !validation.Valid {
+		return model.FinalFilmJob{}, fmt.Errorf("recovered baseline edit plan is invalid: %+v", validation.Errors)
+	}
+
+	next := job
+	next.EditorSessionID, next.EditorRevision, next.SourcePackageID = request.EditorSessionID, request.EditorRevision, request.SourcePackageID
+	next.Constraints, next.Catalog, next.BaselinePlan = constraints, request.Catalog, request.BaselinePlan
+	next.PublicNarrativeFacts = append([]model.PublicNarrativeFact{}, request.PublicNarrativeFacts...)
+	next.MediaCoverage = request.MediaCoverage
+	next.ReviewSupplements = append([]model.FinalFilmReviewSupplement{}, request.ReviewSupplements...)
+	next.State, next.Phase = model.FinalFilmJobAnalyzingEvidence, "interrupted_baseline_recovered"
+	next.Revision++
+	next.UpdatedAt = now
+	next.LastError = nil
+	if err := ValidateJob(next); err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, next, s.event(next, next.Phase, "已用有界七章事实计划恢复中断的基线渲染", map[string]any{"provider_calls_made": 0, "target_duration_ms": request.BaselinePlan.TargetDurationMS})); err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	return next, nil
+}
+
 // RunBaseline renders the factual timeline before any optional provider work.
 // If presentation intents exist, the durable baseline remains available while
 // the job waits for an explicit generation decision.

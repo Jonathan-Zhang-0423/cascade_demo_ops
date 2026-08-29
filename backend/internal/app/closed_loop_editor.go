@@ -22,9 +22,10 @@ type closedLoopCaptureBatch struct {
 }
 
 type closedLoopChapterSpan struct {
-	Chapter string `json:"chapter"`
-	StartMS int    `json:"start_ms"`
-	EndMS   int    `json:"end_ms"`
+	Chapter      string `json:"chapter"`
+	SourceNodeID string `json:"source_node_id,omitempty"`
+	StartMS      int    `json:"start_ms"`
+	EndMS        int    `json:"end_ms"`
 }
 
 type closedLoopEditorMaterialization struct {
@@ -100,7 +101,7 @@ func (a *appExperimentExecutionAdapter) buildClosedLoopEditorSession(ctx context
 			return closedLoopEditorMaterialization{}, fmt.Errorf("required closed-loop chapter %s is missing", chapter)
 		}
 		artifact := imports[batchIndex].artifact
-		start, end := maxInt(0, span.StartMS), minInt(artifact.DurationMS, span.EndMS)
+		start, end, speed := closedLoopChapterSourceWindow(chapter, span, imports[batchIndex].spans, artifact.DurationMS)
 		if end <= start {
 			return closedLoopEditorMaterialization{}, fmt.Errorf("required closed-loop chapter %s has an invalid source range", chapter)
 		}
@@ -111,9 +112,13 @@ func (a *appExperimentExecutionAdapter) buildClosedLoopEditorSession(ctx context
 			StartMS: cursor, EndMS: cursor + duration, DurationMS: duration, Artifacts: []string{artifact.ID},
 		})
 		sourceRange := model.MillisecondRange{start, end}
+		operations := []model.EditOperation{{Type: model.EditOperationTrim}}
+		if speed > 1 {
+			operations = append(operations, model.EditOperation{Type: model.EditOperationSpeed, Speed: &speed})
+		}
 		latest.EditPlan.Shots = append(latest.EditPlan.Shots, model.DemoEditShot{
 			ID: "shot_" + stepID, SourceArtifactID: artifact.ID, SourceStepID: stepID, SourceTimeRangeMS: &sourceRange,
-			Purpose: chapter, Operations: []model.EditOperation{{Type: model.EditOperationTrim}}, Overlays: []model.EditOverlay{},
+			Purpose: chapter, Operations: operations, Overlays: []model.EditOverlay{},
 		})
 		cursor += duration
 	}
@@ -122,7 +127,7 @@ func (a *appExperimentExecutionAdapter) buildClosedLoopEditorSession(ctx context
 	latest.AssetCatalog.Source.RecordingResultPackageID = batches[len(batches)-1].Result.ResultID
 	latest.AssetCatalog.Source.GeneratedAt = time.Now().UTC()
 	latest.AssetCatalog.RunID = request.RunID
-	latest.EditPlan.TargetDurationMS = editorPlanDuration(latest.EditPlan)
+	latest.EditPlan.TargetDurationMS = closedLoopOutputDuration(latest.EditPlan)
 	latest.EditPlan.Objective = request.BuildPrompt
 	latest.Automation = editorAutomationSummary(&batches[len(batches)-1].Result)
 	latest.Revision++
@@ -152,7 +157,12 @@ func closedLoopEditorHasSevenChapters(session model.EditorSession) bool {
 			return false
 		}
 	}
-	return true
+	// A closed-loop fact track is an edited review baseline, not a lossless copy
+	// of a potentially thirty-minute build recording. Older sessions merged
+	// repeated chapter spans into multi-minute overlapping ranges; never reuse
+	// one of those sessions for a new FinalFilm revision.
+	duration := closedLoopOutputDuration(session.EditPlan)
+	return duration >= 30_000 && duration <= 120_000
 }
 
 func readClosedLoopChapterSpans(downloads []CloudDeliverableDownloadResult) (map[string]closedLoopChapterSpan, error) {
@@ -177,22 +187,138 @@ func readClosedLoopChapterSpans(downloads []CloudDeliverableDownloadResult) (map
 	if err := json.Unmarshal(raw, &manifest); err != nil || manifest.SchemaVersion != "demoops.browser_recording_segments.v1" || manifest.RolloverMS != 120_000 {
 		return nil, errors.New("closed-loop recording segment manifest is invalid")
 	}
-	result := map[string]closedLoopChapterSpan{}
+	candidates := map[string][]closedLoopChapterSpan{}
 	for _, span := range manifest.ChapterSpans {
-		chapter := strings.TrimSpace(span.Chapter)
+		chapter := normalizedClosedLoopChapter(span)
 		if span.EndMS <= span.StartMS || chapter == "" {
 			continue
 		}
-		current, ok := result[chapter]
-		if !ok {
-			result[chapter] = span
-			continue
+		span.Chapter = chapter
+		candidates[chapter] = append(candidates[chapter], span)
+	}
+	result := map[string]closedLoopChapterSpan{}
+	for chapter, spans := range candidates {
+		if selected, ok := selectClosedLoopManifestSpan(chapter, spans); ok {
+			result[chapter] = selected
 		}
-		current.StartMS = minInt(current.StartMS, span.StartMS)
-		current.EndMS = maxInt(current.EndMS, span.EndMS)
-		result[chapter] = current
 	}
 	return result, nil
+}
+
+func normalizedClosedLoopChapter(span closedLoopChapterSpan) string {
+	chapter := strings.TrimSpace(span.Chapter)
+	node := strings.ToLower(strings.TrimSpace(span.SourceNodeID))
+	// The worker may initially classify a long-running action by words found in
+	// its expected outcome. Prefer the observed stage's semantic role when it is
+	// available. These roles are workflow concepts and are not tied to a host,
+	// route, selector, product name, or visual style.
+	switch {
+	case strings.Contains(node, "session_setup") || strings.Contains(node, "auth") || strings.Contains(node, "login"):
+		return "login"
+	case strings.Contains(node, "new_project_entry") || strings.Contains(node, "creation_open"):
+		return "creation"
+	case strings.Contains(node, "prompt_input") || strings.Contains(node, "project_name_input") || strings.Contains(node, "product_repair_input"):
+		return "prompt_input"
+	case strings.Contains(node, "start_agent_build") || strings.Contains(node, "submit_product_repair") || strings.Contains(node, "continue_prepared_execution"):
+		return "submission"
+	case strings.Contains(node, "observe_agent_progress") || strings.Contains(node, "final_observe"):
+		return "build_wait"
+	case strings.Contains(node, "interaction_surface_ready"):
+		return "result_reveal"
+	case strings.Contains(node, "interaction_"):
+		return "interaction"
+	default:
+		return chapter
+	}
+}
+
+func selectClosedLoopManifestSpan(chapter string, spans []closedLoopChapterSpan) (closedLoopChapterSpan, bool) {
+	if len(spans) == 0 {
+		return closedLoopChapterSpan{}, false
+	}
+	sort.SliceStable(spans, func(i, j int) bool { return spans[i].StartMS < spans[j].StartMS })
+	if chapter == "interaction" {
+		selected := spans[0]
+		for _, span := range spans[1:] {
+			selected.StartMS = minInt(selected.StartMS, span.StartMS)
+			selected.EndMS = maxInt(selected.EndMS, span.EndMS)
+		}
+		return selected, true
+	}
+	if chapter == "result_reveal" {
+		selected := spans[0]
+		for _, span := range spans[1:] {
+			if span.EndMS-span.StartMS > selected.EndMS-selected.StartMS {
+				selected = span
+			}
+		}
+		return selected, true
+	}
+	if chapter == "submission" {
+		for _, span := range spans {
+			node := strings.ToLower(span.SourceNodeID)
+			if strings.Contains(node, "start_agent_build") || strings.Contains(node, "submit_product_repair") {
+				return span, true
+			}
+		}
+	}
+	return spans[0], true
+}
+
+func closedLoopChapterSourceWindow(chapter string, span closedLoopChapterSpan, all map[string]closedLoopChapterSpan, sourceDurationMS int) (int, int, float64) {
+	start, end := maxInt(0, span.StartMS), minInt(sourceDurationMS, span.EndMS)
+	clipTail := func(maxDurationMS int) {
+		if end-start > maxDurationMS {
+			start = end - maxDurationMS
+		}
+	}
+	speed := 1.0
+	switch chapter {
+	case "login", "creation":
+		clipTail(8_000)
+	case "prompt_input":
+		// The tail preserves the fully entered one-sentence request rather than
+		// spending the film on every keystroke.
+		clipTail(12_000)
+	case "submission", "result_reveal":
+		clipTail(8_000)
+	case "interaction":
+		// Keep a single continuous proof session while bounding the final film.
+		clipTail(65_000)
+	case "build_wait":
+		// A preview-readiness action often owns the real asynchronous wait and is
+		// only labelled result_reveal when it finally returns. Borrow the window
+		// immediately before its stable reveal, then compress it deterministically.
+		if reveal, ok := all["result_reveal"]; ok && reveal.EndMS-reveal.StartMS > 24_000 {
+			end = minInt(sourceDurationMS, reveal.EndMS-8_000)
+			start = maxInt(reveal.StartMS, end-96_000)
+		}
+		if end-start > 12_000 {
+			speed = 12
+		} else {
+			clipTail(12_000)
+		}
+	}
+	return start, end, speed
+}
+
+func closedLoopOutputDuration(plan model.DemoEditPlan) int {
+	total := 0
+	for _, shot := range plan.Shots {
+		if shot.SourceTimeRangeMS == nil {
+			continue
+		}
+		speed := 1.0
+		for index := len(shot.Operations) - 1; index >= 0; index-- {
+			operation := shot.Operations[index]
+			if operation.Type == model.EditOperationSpeed && operation.Speed != nil && *operation.Speed > 0 {
+				speed = *operation.Speed
+				break
+			}
+		}
+		total += int(float64((*shot.SourceTimeRangeMS)[1]-(*shot.SourceTimeRangeMS)[0]) / speed)
+	}
+	return total
 }
 
 func selectClosedLoopChapter(imports []closedLoopImportedBatch, chapter string) (int, closedLoopChapterSpan, bool) {

@@ -69,6 +69,49 @@ func TestClosedLoopEditorPreservesOnceOnlyChaptersAndUsesLatestRepairEvidence(t 
 	}
 }
 
+func TestClosedLoopManifestCompactsLongPreviewWaitWithoutOverlappingReveal(t *testing.T) {
+	root := t.TempDir()
+	manifestPath := filepath.Join(root, "long-wait-segments.json")
+	spans := []closedLoopChapterSpan{
+		{Chapter: "login", SourceNodeID: "business_stage_session_setup", StartMS: 1_000, EndMS: 5_000},
+		{Chapter: "submission", SourceNodeID: "business_stage_new_project_entry", StartMS: 6_000, EndMS: 8_000},
+		{Chapter: "prompt_input", SourceNodeID: "business_stage_project_name_input", StartMS: 9_000, EndMS: 31_000},
+		{Chapter: "creation", SourceNodeID: "business_stage_select_build_mode", StartMS: 32_000, EndMS: 35_000},
+		{Chapter: "submission", SourceNodeID: "business_stage_start_agent_build", StartMS: 36_000, EndMS: 44_000},
+		{Chapter: "result_reveal", SourceNodeID: "business_stage_contract_experiment_interaction_surface_ready", StartMS: 45_000, EndMS: 980_000},
+		{Chapter: "interaction", SourceNodeID: "business_stage_contract_experiment_interaction_directional_moves", StartMS: 981_000, EndMS: 996_000},
+		{Chapter: "build_wait", SourceNodeID: "business_stage_contract_experiment_interaction_merge_score", StartMS: 997_000, EndMS: 1_012_000},
+		{Chapter: "result_reveal", SourceNodeID: "business_stage_contract_experiment_interaction_continued_stability", StartMS: 1_013_000, EndMS: 1_028_000},
+		{Chapter: "interaction", SourceNodeID: "business_stage_contract_experiment_interaction_touch", StartMS: 1_029_000, EndMS: 1_044_000},
+	}
+	payload, _ := json.Marshal(map[string]any{"schema_version": "demoops.browser_recording_segments.v1", "rollover_ms": 120_000, "chapter_spans": spans})
+	if err := os.WriteFile(manifestPath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := readClosedLoopChapterSpans([]CloudDeliverableDownloadResult{{Kind: "recording_segment_manifest", LocalPath: manifestPath}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected["creation"].SourceNodeID != "business_stage_new_project_entry" {
+		t.Fatalf("creation was not recovered from the observed stage role: %+v", selected["creation"])
+	}
+	if selected["submission"].SourceNodeID != "business_stage_start_agent_build" {
+		t.Fatalf("submission did not select the actual build action: %+v", selected["submission"])
+	}
+	interaction := selected["interaction"]
+	if interaction.StartMS != 981_000 || interaction.EndMS != 1_044_000 {
+		t.Fatalf("interaction proof session was not kept continuous: %+v", interaction)
+	}
+	waitStart, waitEnd, waitSpeed := closedLoopChapterSourceWindow("build_wait", selected["build_wait"], selected, 1_050_000)
+	revealStart, revealEnd, revealSpeed := closedLoopChapterSourceWindow("result_reveal", selected["result_reveal"], selected, 1_050_000)
+	if waitSpeed != 12 || waitEnd-waitStart != 96_000 {
+		t.Fatalf("long wait was not deterministically compressed: range=%d..%d speed=%v", waitStart, waitEnd, waitSpeed)
+	}
+	if revealSpeed != 1 || revealEnd-revealStart != 8_000 || waitEnd != revealStart {
+		t.Fatalf("stable reveal does not follow the wait window without overlap: wait_end=%d reveal=%d..%d", waitEnd, revealStart, revealEnd)
+	}
+}
+
 func closedLoopFixtureBatch(t *testing.T, root, id string, chapters []string) closedLoopCaptureBatch {
 	t.Helper()
 	rawPath := filepath.Join(root, id+".mp4")

@@ -1582,6 +1582,23 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 		if err != nil {
 			return &experiment.AdapterError{Code: "final_film_resume_failed", Phase: "director_media", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
 		}
+		if job.State == model.FinalFilmJobRenderingBaseline && job.BaselineRender.VideoPath == "" && job.RunAuthorization != nil && job.RunAuthorization.ProviderCallsUsed == 0 {
+			coverage, facts, coverageErr := closedLoopNarrativeBoundary(request, downloads, &session)
+			if coverageErr != nil {
+				return &experiment.AdapterError{Code: "media_coverage_incomplete", Phase: "capture_ready", State: experiment.RunStateWaitingInput, Retryable: true, Cause: coverageErr}
+			}
+			job, err = a.service.RecoverInterruptedFinalFilmBaseline(ctx, job.JobID, job.Revision, FinalFilmCreateRequest{
+				EditorSessionID: sessionID, ExpectedRevision: session.Revision, SourcePackageID: result.SourcePackageID,
+				AutomationProfile: model.FinalFilmAutomationProfileGuidedDemoV1, ReviewSupplements: supplements,
+				PublicNarrativeFacts: facts, MediaCoverage: coverage,
+			})
+			if err != nil {
+				return &experiment.AdapterError{Code: "final_film_baseline_recovery_failed", Phase: "director_media", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
+			}
+			if err := emit(experiment.LegExecutionUpdate{Kind: "final_film_bound", FinalFilmJobID: job.JobID, FinalFilmRevision: job.Revision, ProviderCallsUsed: 0}); err != nil {
+				return err
+			}
+		}
 	}
 	if job.State == model.FinalFilmJobBaselineReady && job.RunAuthorization == nil {
 		job, err = a.service.RunFinalFilmAutomation(ctx, job.JobID, FinalFilmRunRequest{ExpectedRevision: job.Revision, AuthorizationRef: request.AuthorizationRef, MaxProviderCalls: 6})
