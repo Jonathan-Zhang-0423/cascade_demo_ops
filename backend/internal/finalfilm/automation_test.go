@@ -488,6 +488,20 @@ func TestFailedDirectorPlacementRecoveryReturnsToPlanningWithoutProviderSpend(t 
 	}
 }
 
+func TestAutomatedPlanCannotReduceBaselineWaitCompression(t *testing.T) {
+	catalog, baseline := finalFilmFixture()
+	if len(baseline.Shots) == 0 {
+		t.Fatal("fixture has no factual shot")
+	}
+	baselineSpeed := 12.0
+	baseline.Shots[0].Operations = append(baseline.Shots[0].Operations, model.EditOperation{Type: model.EditOperationSpeed, Speed: &baselineSpeed})
+	job := model.FinalFilmJob{Catalog: catalog, BaselinePlan: baseline, DirectorPlan: &model.FinalFilmDirectorPlan{StoryPlan: &model.DirectorStoryPlan{Timeline: []model.DirectorTimelineSegment{{Kind: "fact", SourceStepID: baseline.Shots[0].SourceStepID, Speed: 8}}}}}
+	_, plan, _ := compileAutomatedGeneratedPlan(job, GeneratedTrackRecord{})
+	if got := existingShotSpeed(plan.Shots[0]); got != 12 {
+		t.Fatalf("Director reduced bounded baseline compression: got=%v want=12", got)
+	}
+}
+
 func TestReviewPackageAndFinalReviewAreRevisionBound(t *testing.T) {
 	service, _ := newFinalFilmTestService(t)
 	catalog, baseline := finalFilmFixture()

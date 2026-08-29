@@ -1000,7 +1000,10 @@ func compileAutomatedGeneratedPlan(job model.FinalFilmJob, record GeneratedTrack
 		}
 		for index := range plan.Shots {
 			if fact, ok := factsByStepID[plan.Shots[index].SourceStepID]; ok && fact.Speed != 1 {
-				speed := fact.Speed
+				// The Director may increase deterministic wait compression, but it
+				// must never undo the bounded speed already proven by the factual
+				// baseline and push the assembled film back over 120 seconds.
+				speed := maxFloat(existingShotSpeed(plan.Shots[index]), fact.Speed)
 				plan.Shots[index].Operations = append(plan.Shots[index].Operations, model.EditOperation{Type: model.EditOperationSpeed, Speed: &speed})
 			}
 		}
