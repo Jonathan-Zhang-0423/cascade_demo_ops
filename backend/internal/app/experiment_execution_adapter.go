@@ -1599,6 +1599,15 @@ func (a *appExperimentExecutionAdapter) runFinalFilm(ctx context.Context, reques
 				return err
 			}
 		}
+		if job.State == model.FinalFilmJobFailed && job.LastError != nil && job.LastError.Retryable && job.RunAuthorization != nil && job.RunAuthorization.ProviderCallsUsed == 0 {
+			job, err = a.service.RecoverFailedFinalFilmAutomation(ctx, job.JobID, job.Revision)
+			if err != nil {
+				return &experiment.AdapterError{Code: "final_film_recovery_failed", Phase: "director_planning", State: experiment.RunStateWaitingExternal, Retryable: true, Cause: err}
+			}
+			if err := emit(experiment.LegExecutionUpdate{Kind: "final_film_bound", FinalFilmJobID: job.JobID, FinalFilmRevision: job.Revision, ProviderCallsUsed: 0}); err != nil {
+				return err
+			}
+		}
 	}
 	if job.State == model.FinalFilmJobBaselineReady && job.RunAuthorization == nil {
 		job, err = a.service.RunFinalFilmAutomation(ctx, job.JobID, FinalFilmRunRequest{ExpectedRevision: job.Revision, AuthorizationRef: request.AuthorizationRef, MaxProviderCalls: 6})

@@ -122,6 +122,17 @@ func (s *Service) recoverFailedAutomation(ctx context.Context, job model.FinalFi
 	if job.LastError == nil || !job.LastError.Retryable || job.RunAuthorization == nil || job.AutomationPolicy == nil {
 		return job, nil
 	}
+	if job.RunAuthorization.ProviderCallsUsed == 0 && job.DirectorPlan == nil && job.EvidenceDigest != nil && strings.Contains(strings.ToLower(job.LastError.Message), "invalid generated placement") {
+		next := job
+		next.Revision++
+		next.UpdatedAt = s.now().UTC()
+		next.State, next.Phase = model.FinalFilmJobPlanning, "director_placement_reconciled"
+		next.LastError = nil
+		if err := s.store.TransitionJob(ctx, job.JobID, job.Revision, next, s.event(next, next.Phase, "已按公共章节语义修复展示槽位并重新规划，不产生模型视频调用", map[string]any{"provider_calls_used": 0})); err != nil {
+			return model.FinalFilmJob{}, err
+		}
+		return next, nil
+	}
 	record, err := decodeGeneratedTrack(job.GeneratedTrack)
 	if err != nil {
 		return job, err
@@ -200,6 +211,20 @@ func (s *Service) recoverFailedAutomation(ctx context.Context, job model.FinalFi
 		return model.FinalFilmJob{}, err
 	}
 	return next, nil
+}
+
+// RecoverFailedAutomation performs the durable recovery transition only. The
+// caller starts the long-running ResumeAutomation loop after observing the new
+// revision, avoiding a race where an adapter sees the old failed state.
+func (s *Service) RecoverFailedAutomation(ctx context.Context, jobID string, expectedRevision int) (model.FinalFilmJob, error) {
+	job, err := s.store.GetJob(ctx, jobID)
+	if err != nil {
+		return model.FinalFilmJob{}, err
+	}
+	if job.Revision != expectedRevision || job.State != model.FinalFilmJobFailed {
+		return model.FinalFilmJob{}, errors.New("failed automation recovery requires the current failed revision")
+	}
+	return s.recoverFailedAutomation(ctx, job)
 }
 
 func retryableAutomatedCompositionFailure(message string) bool {

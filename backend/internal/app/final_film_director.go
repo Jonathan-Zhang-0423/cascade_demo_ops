@@ -294,18 +294,27 @@ func copyFinalFilmSkillVersions(fallback *model.DirectorStoryPlan) map[string]st
 }
 
 func normalizeGeneratedPlacement(purpose, placement, anchorFact string, digest *model.DirectorEvidenceDigest) (string, string) {
-	if purpose == "intro" && placement == "before_first_fact" {
+	// Slot placement is a server-owned story invariant. The Director decides
+	// the adjacent visual idea and records its reason, but an omitted synonym or
+	// anchor must not invalidate an otherwise sound plan. Canonicalize the three
+	// fixed guided-demo slots against public chapter semantics.
+	switch purpose {
+	case "intro":
 		return "before_first_required_step", ""
-	}
-	if purpose == "outro" && placement == "after_last_fact" {
+	case "outro":
 		return "after_last_required_step", ""
-	}
-	if purpose != "section_divider" || placement != "after_public_fact" {
-		return "", ""
-	}
-	for _, step := range digest.RequiredSteps {
-		if step.PublicNarrativeFactID == anchorFact {
-			return "between_sections", step.StepID
+	case "section_divider":
+		if placement == "after_public_fact" && strings.TrimSpace(anchorFact) != "" {
+			for _, step := range digest.RequiredSteps {
+				if step.PublicNarrativeFactID == anchorFact && step.Chapter == "build_wait" {
+					return "between_sections", step.StepID
+				}
+			}
+		}
+		for _, step := range digest.RequiredSteps {
+			if step.Chapter == "build_wait" {
+				return "between_sections", step.StepID
+			}
 		}
 	}
 	return "", ""

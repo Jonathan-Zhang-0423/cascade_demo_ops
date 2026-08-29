@@ -456,6 +456,38 @@ func TestInterruptedBaselineRecoveryKeepsJobAndBudgetWhileReplacingFactPlan(t *t
 	}
 }
 
+func TestFailedDirectorPlacementRecoveryReturnsToPlanningWithoutProviderSpend(t *testing.T) {
+	service, _ := newFinalFilmTestService(t)
+	catalog, baseline := finalFilmFixture()
+	job, err := service.CreateJob(context.Background(), CreateJobRequest{EditorSessionID: "editor_director_recovery", EditorRevision: 1, SourcePackageID: "package_director_recovery", Catalog: catalog, BaselinePlan: baseline, RenderProfile: finalFilmProfile(), AutomationProfile: model.FinalFilmAutomationProfileGuidedDemoV1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = service.AuthorizeAutomation(context.Background(), job.JobID, job.Revision, "test-authorization", 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := job
+	failed.State, failed.Phase = model.FinalFilmJobFailed, "automation_failed"
+	failed.EvidenceDigest = &model.DirectorEvidenceDigest{SchemaVersion: model.DirectorEvidenceDigestSchemaVersion, DigestID: "digest_recovery"}
+	failed.LastError = &model.FinalFilmJobError{Code: "automation_failed", Message: "invalid generated placement for guided_section_divider_01", Retryable: true, OccurredAt: time.Now().UTC()}
+	failed.Revision++
+	failed.UpdatedAt = time.Now().UTC()
+	if err := service.store.TransitionJob(context.Background(), job.JobID, job.Revision, failed, service.event(failed, failed.Phase, "test failed director", nil)); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := service.RecoverFailedAutomation(context.Background(), job.JobID, failed.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.State != model.FinalFilmJobPlanning || recovered.Phase != "director_placement_reconciled" || recovered.LastError != nil {
+		t.Fatalf("Director planning failure did not recover: %+v", recovered)
+	}
+	if recovered.RunAuthorization == nil || recovered.RunAuthorization.ProviderCallsUsed != 0 {
+		t.Fatalf("Director planning recovery consumed provider budget: %+v", recovered.RunAuthorization)
+	}
+}
+
 func TestReviewPackageAndFinalReviewAreRevisionBound(t *testing.T) {
 	service, _ := newFinalFilmTestService(t)
 	catalog, baseline := finalFilmFixture()

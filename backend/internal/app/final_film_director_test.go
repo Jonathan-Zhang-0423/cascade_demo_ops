@@ -162,3 +162,15 @@ func TestAutomatedDirectorStoryPreservesPublicOrderAndOnlyCompressesWait(t *test
 		}
 	}
 }
+
+func TestAutomatedDirectorCanonicalizesOmittedDividerAnchor(t *testing.T) {
+	digest := &model.DirectorEvidenceDigest{RequiredSteps: []model.DirectorEvidenceStep{
+		{StepID: "step_submission", Chapter: "submission", PublicNarrativeFactID: "fact_submission"},
+		{StepID: "step_wait", Chapter: "build_wait", PublicNarrativeFactID: "fact_wait"},
+		{StepID: "step_reveal", Chapter: "result_reveal", PublicNarrativeFactID: "fact_reveal"},
+	}}
+	placement, anchor := normalizeGeneratedPlacement("section_divider", "", "", digest)
+	if placement != "between_sections" || anchor != "step_wait" {
+		t.Fatalf("divider was not anchored at the public build-wait boundary: placement=%s anchor=%s", placement, anchor)
+	}
+}
